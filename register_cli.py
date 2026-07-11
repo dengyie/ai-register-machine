@@ -355,6 +355,16 @@ def register_one(
             f.write(line)
         log(worker_id, f"+ 注册成功: {email}")
         reg.mark_used(email, password)
+        try:
+            import account_backup as _ab
+
+            _ab.backup_after_success(
+                email,
+                root=os.path.dirname(os.path.abspath(__file__)),
+                log_callback=lambda m: log(worker_id, m),
+            )
+        except Exception as _be:
+            log(worker_id, f"[backup] 注册后备份失败: {_be}")
 
         # Capture cookies BEFORE releasing browser (for mint cookie inject)
         page = reg._get_page()
@@ -468,6 +478,17 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
                 # flag on but no remote_inject payload — wiring bug / old code path
                 _inc("remote_inject_fail")
                 log(worker_id, "! tebi inject 未执行（export 未返回 remote_inject）")
+            try:
+                import account_backup as _ab
+
+                _ab.backup_after_success(
+                    email,
+                    root=os.path.dirname(os.path.abspath(__file__)),
+                    cpa_path=result.get("path"),
+                    log_callback=lambda m: log(worker_id, m),
+                )
+            except Exception as _be:
+                log(worker_id, f"[backup] mint 后备份失败: {_be}")
         elif result.get("skipped"):
             _inc("mint_skip")
             log(worker_id, f"[cpa] skipped: {result.get('reason')}")
@@ -753,6 +774,23 @@ def main() -> int:
 
     with _stats_lock:
         s = dict(_stats)
+    # Final timestamped project backup after batch (accounts + cpa_auths)
+    try:
+        import account_backup as _ab
+
+        snap = _ab.snapshot_registered_accounts(
+            root=os.path.dirname(os.path.abspath(__file__)),
+            reason="batch_complete",
+            make_timestamped=True,
+            log_callback=lambda m: print(m, flush=True),
+        )
+        print(
+            f"[backup] final snapshot accounts={snap.get('account_count')} "
+            f"cpa={snap.get('cpa_count')} -> {snap.get('stamped') or snap.get('latest')}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[backup] final snapshot failed: {exc}", flush=True)
     print(
         f"=== 完成: 注册成功 {s.get('reg_success', 0)}, 注册失败 {s.get('reg_fail', 0)}, "
         f"CPA成功 {s.get('mint_success', 0)}, CPA失败 {s.get('mint_fail', 0)}, "

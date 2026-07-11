@@ -25,3 +25,9 @@ cookies/
 screenshots/
 *.log
 *.bak
+
+# register backups & secrets
+backups/
+accounts_cli.txt
+cpa_auths/*.json
+logs/

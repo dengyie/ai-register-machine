@@ -490,6 +490,22 @@ def export_cpa_xai_for_account(
                 result["ok"] = False
                 result["error"] = f"remote inject required but failed: {result['remote_inject_error']}"
 
+    # Project-local backup of accounts + cpa auth (gitignored backups/)
+    if result.get("ok") and result.get("path"):
+        try:
+            import account_backup as _ab
+
+            bres = _ab.backup_after_success(
+                email,
+                root=_REG_DIR,
+                cpa_path=result.get("path"),
+                log_callback=log,
+            )
+            result["local_backup"] = bres
+        except Exception as e:  # noqa: BLE001
+            log(f"[cpa] local backup failed: {e}")
+            result["local_backup_error"] = str(e)
+
     # failure log under register dir
     if not result.get("ok"):
         fail_path = out_dir / "cpa_auth_failed.txt"
