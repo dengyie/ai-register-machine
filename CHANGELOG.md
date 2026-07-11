@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] - 2026-07-12
+
+### Added
+
+- Startup cleanup of orphan Drission Chromes reparented to init/launchd (PPID=1)
+- `tab_pool.cleanup_orphan_drission_chromes` / `TabPool.cleanup_orphans` with protect list
+- Offline tests for Drission Chrome cmdline matching and dry-run cleanup
+
+### Notes
+
+- Success path still **reuses** the register browser (`clear_session`); cleanup only targets crashed leftovers, not the live worker Chrome.
+
 ## [1.1.1] - 2026-07-12
 
 ### Fixed

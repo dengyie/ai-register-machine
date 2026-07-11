@@ -9,6 +9,7 @@ Browser lifecycle:
   - Full recycle every N accounts or on error
   - Register browser released BEFORE mint (mint always standalone Chromium)
   - Peak browsers ≈ R + M (not 2×R)
+  - Startup: kill PPID=1 orphan Drission Chromes left by crashed runs
 """
 from __future__ import annotations
 
@@ -695,6 +696,23 @@ def main() -> int:
 
     log_thread = threading.Thread(target=_log_writer, daemon=True)
     log_thread.start()
+
+    # Crashed prior runs can leave Drission Chrome reparented to launchd (PPID=1).
+    # Clean those before starting workers; never touch live children of this process.
+    try:
+        from tab_pool import cleanup_orphan_drission_chromes
+
+        cres = cleanup_orphan_drission_chromes(
+            log_callback=lambda m: print(m, flush=True),
+            only_ppid_init=True,
+        )
+        if cres.get("killed"):
+            print(
+                f"[*] 启动清理孤儿浏览器: killed={cres['killed']} pids={cres.get('pids')}",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] 孤儿浏览器清理跳过: {exc}", flush=True)
 
     try:
         reg.TabPool.init(reg.create_browser_options, log_callback=lambda m: log(0, m))

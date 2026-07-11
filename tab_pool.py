@@ -7,19 +7,169 @@ Interface:
     TabPool.clear_session()       → wipe cookies/storage; keep process warm
     TabPool.release_tab()         → quit current thread browser + drop registry
     TabPool.shutdown()            → quit all known browsers
+    cleanup_orphan_drission_chromes() → kill PPID=1 leftover Drission Chromes
 
 Notes:
     - One Chromium per worker thread (cookie isolation).
     - Prefer clear_session() between accounts; release_tab() only on errors / GC.
     - _all_browsers is pruned on release to avoid zombie list growth.
+    - Success path reuses the process; orphans usually come from crashed runs
+      where quit() never ran and Chrome was reparented to init/launchd (PPID=1).
 """
 
 from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import threading
-from typing import Any
+import time
+from typing import Any, Callable
+
+LogFn = Callable[[str], None]
+
+
+def is_drission_chrome_cmdline(cmd: str) -> bool:
+    """True for Drission/register Chrome mains (not Helpers / unrelated Chrome)."""
+    if not cmd or "Helper" in cmd:
+        return False
+    if "remote-debugging-port" not in cmd:
+        return False
+    return ("autoPortData" in cmd) or ("DrissionPage" in cmd) or ("turnstilePatch" in cmd)
+
+
+def parse_ps_chrome_rows(ps_text: str) -> list[tuple[int, int, str]]:
+    """Parse ``ps -ax -o pid=,ppid=,command=`` style lines → (pid, ppid, cmd)."""
+    rows: list[tuple[int, int, str]] = []
+    for line in (ps_text or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        parts = s.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        cmd = parts[2]
+        if is_drission_chrome_cmdline(cmd):
+            rows.append((pid, ppid, cmd))
+    return rows
+
+
+def cleanup_orphan_drission_chromes(
+    *,
+    log_callback: LogFn | None = None,
+    protect_pids: set[int] | None = None,
+    only_ppid_init: bool = True,
+    dry_run: bool = False,
+    term_grace_sec: float = 1.0,
+) -> dict[str, Any]:
+    """Kill leftover Drission Chromium mains that were reparented to init/launchd.
+
+    Safety:
+      - Only matches Drission/register Chrome mains (autoPortData / turnstilePatch
+        + remote-debugging-port), never generic user Chrome profiles.
+      - Default only_ppid_init=True → only PPID in {0, 1} (orphans). Live children
+        of a healthy register_cli (PPID=python) are left alone.
+      - Never signals protect_pids, os.getpid(), or this process's parent.
+      - SIGTERM first, then SIGKILL after a short grace.
+
+    Returns dict: scanned, matched, killed, protected_skipped, errors, pids.
+    """
+    log = log_callback or (lambda _m: None)
+    protect = set(protect_pids or ())
+    protect.add(os.getpid())
+    try:
+        protect.add(os.getppid())
+    except Exception:
+        pass
+
+    result: dict[str, Any] = {
+        "scanned": 0,
+        "matched": 0,
+        "killed": 0,
+        "protected_skipped": 0,
+        "errors": [],
+        "pids": [],
+        "dry_run": dry_run,
+    }
+
+    try:
+        proc = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        ps_text = proc.stdout or ""
+    except Exception as e:  # noqa: BLE001
+        result["errors"].append(f"ps failed: {e}")
+        log(f"[browser] orphan cleanup: ps failed: {e}")
+        return result
+
+    rows = parse_ps_chrome_rows(ps_text)
+    result["scanned"] = len(rows)
+    init_ppids = {0, 1}
+
+    for pid, ppid, cmd in rows:
+        if only_ppid_init and ppid not in init_ppids:
+            continue
+        result["matched"] += 1
+        if pid in protect or ppid in protect:
+            result["protected_skipped"] += 1
+            continue
+        # Extra: never kill if this pid is our direct child (live session)
+        if ppid == os.getpid():
+            result["protected_skipped"] += 1
+            continue
+        port = ""
+        if "remote-debugging-port=" in cmd:
+            try:
+                port = cmd.split("remote-debugging-port=", 1)[1].split(None, 1)[0]
+            except Exception:
+                port = "?"
+        if dry_run:
+            log(f"[browser] orphan would kill pid={pid} ppid={ppid} port={port}")
+            result["pids"].append(pid)
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError as e:
+            result["errors"].append(f"pid={pid}: {e}")
+            continue
+        except OSError as e:
+            result["errors"].append(f"pid={pid}: {e}")
+            continue
+
+        deadline = time.time() + max(0.1, float(term_grace_sec))
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+        result["killed"] += 1
+        result["pids"].append(pid)
+        log(f"[browser] killed orphan Drission Chrome pid={pid} ppid={ppid} port={port}")
+
+    if result["matched"] or result["killed"]:
+        log(
+            f"[browser] orphan cleanup: matched={result['matched']} "
+            f"killed={result['killed']} skipped={result['protected_skipped']}"
+        )
+    return result
 
 
 class TabPool:
@@ -262,3 +412,30 @@ class TabPool:
     @classmethod
     def get_browser(cls):
         return getattr(cls._thread_local, "browser", None)
+
+    @classmethod
+    def tracked_pids(cls) -> set[int]:
+        """OS PIDs of Chromium instances currently tracked by TabPool."""
+        out: set[int] = set()
+        with cls._all_browsers_lock:
+            browsers = list(cls._all_browsers)
+        for b in browsers:
+            pid = getattr(b, "process_id", None)
+            if isinstance(pid, int) and pid > 0:
+                out.add(pid)
+        local = getattr(cls._thread_local, "browser", None)
+        pid = getattr(local, "process_id", None) if local is not None else None
+        if isinstance(pid, int) and pid > 0:
+            out.add(pid)
+        return out
+
+    @classmethod
+    def cleanup_orphans(cls, log_callback: LogFn | None = None, **kwargs: Any) -> dict[str, Any]:
+        """Kill PPID=1 Drission leftovers; never touch tracked/live children."""
+        protect = set(kwargs.pop("protect_pids", None) or ())
+        protect |= cls.tracked_pids()
+        return cleanup_orphan_drission_chromes(
+            log_callback=log_callback,
+            protect_pids=protect,
+            **kwargs,
+        )

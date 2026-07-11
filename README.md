@@ -18,7 +18,7 @@
 | [DISCLAIMER.md](DISCLAIMER.md) | 免责声明与使用边界 |
 | [SECURITY.md](SECURITY.md) | 密钥范围、泄露处理、漏洞反馈 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR 约定 |
-| [CHANGELOG.md](CHANGELOG.md) | 版本变更（当前 **v1.1.1**） |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更（当前 **v1.1.2**） |
 | [LICENSE](LICENSE) | MIT |
 
 ---
@@ -440,6 +440,7 @@ uv run python register_cli.py -h
 | 有 token 但无 grok-4.5 | `cpa_base_url` 是否为 `https://cli-chat-proxy.grok.com/v1` |
 | 注册成功但无 `cpa_auths` | `cpa_export_enabled`？看 `cpa_auths/cpa_auth_failed.txt` 与日志 |
 | 远端注入失败 | `cpa_remote_inject`、SSH host、`sshpass` / 凭据文件、隧道是否通 |
+| 活动监视器里很多 Chrome | 成功默认 **复用** 注册浏览器（`clear_session`），不是每号关闭；另有 Helper 子进程。CLI 启动时会清理 PPID=1 的旧 Drission 孤儿进程。若需每号硬关：`--no-browser-reuse` |
 
 调试原则：以 **token 端点返回 `access_token` + `refresh_token`** 为准；probe 看 `/v1/models` 是否含 `grok-4.5`。
 
@@ -521,4 +522,4 @@ GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 - **CLIProxyAPI / CPA：** 自备；将 `cpa_auths/xai-*.json` 放到 CPA auth-dir 即可热加载
 - **免费 Grok 4.5：** 只走 Build OIDC + `cli-chat-proxy`，不是网页 SSO
 - **仓库：** https://github.com/dengyie/grok-register
-- **最新发布：** https://github.com/dengyie/grok-register/releases/tag/v1.1.1
+- **最新发布：** https://github.com/dengyie/grok-register/releases/tag/v1.1.2

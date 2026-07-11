@@ -47,6 +47,7 @@ jobs:
             cpa_xai/proxyutil.py \
             cpa_xai/schema.py \
             cpa_xai/writer.py \
+            tab_pool.py \
             scripts/backfill_cpa_xai_from_accounts.py \
             scripts/backup_registered_accounts.py \
             scripts/export_cpa_xai_from_grok_auth.py
