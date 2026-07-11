@@ -60,9 +60,11 @@ DEFAULT_CONFIG = {
     "hotmail_max_aliases_per_account": 5,
     "hotmail_poll_interval": 5,
     "hotmail_recent_seconds": 900,
+    "hotmail_mail_fetch_modes": "rest,imap",
     "hotmail_imap_hosts": "outlook.office365.com,imap-mail.outlook.com",
     "hotmail_imap_last_n": 30,
     "hotmail_require_recipient_match": True,
+    "hotmail_manual_code": False,
 }
 
 config = DEFAULT_CONFIG.copy()
@@ -683,7 +685,7 @@ def http_post(url, **kwargs):
 
 def raise_if_cancelled(cancel_callback=None):
     if cancel_callback and cancel_callback():
-        raise RegistrationCancelled("鐢ㄦ埛鍋滄娉ㄥ唽")
+        raise RegistrationCancelled("用户停止注册")
 
 
 def sleep_with_cancel(seconds, cancel_callback=None):
@@ -1700,12 +1702,168 @@ def _hotmail_get_imap_hosts():
     if isinstance(raw, (list, tuple)):
         hosts = [str(x).strip() for x in raw if str(x).strip()]
     else:
-        hosts = [x.strip() for x in re.split(r"[,，\\s]+", str(raw or "")) if x.strip()]
+        hosts = [x.strip() for x in re.split(r"[,，\s]+", str(raw or "")) if x.strip()]
     out = []
     for host in hosts or ["outlook.office365.com", "imap-mail.outlook.com"]:
         if host not in out:
             out.append(host)
     return out
+
+
+def _hotmail_mail_fetch_modes():
+    """收码通道顺序。默认 rest,imap：REST 可绕开 'authenticated but not connected'。"""
+    raw = config.get("hotmail_mail_fetch_modes", "rest,imap")
+    if isinstance(raw, (list, tuple)):
+        items = [str(x).strip().lower() for x in raw if str(x).strip()]
+    else:
+        # 注意: 用 \s 表示空白；不要写成 \\s（会把字母 s 当分隔符，rest 被拆成 re/t）
+        items = [x.strip().lower() for x in re.split(r"[,，\s]+", str(raw or "")) if x.strip()]
+    allowed = {"rest", "outlook_rest", "imap"}
+    out = []
+    for item in items or ["rest", "imap"]:
+        if item == "outlook_rest":
+            item = "rest"
+        if item in allowed and item not in out:
+            out.append(item)
+    return out or ["rest", "imap"]
+
+
+def _hotmail_parse_iso_ts(value):
+    """Parse Outlook ReceivedDateTime (…Z or +00:00) to epoch ms; 0 on failure."""
+    if not value:
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    try:
+        # 2026-07-11T16:47:54Z
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        # datetime.fromisoformat handles +00:00
+        dt = datetime.datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+def _hotmail_rest_get_code(mailbox_email, target_email, access_token, log_callback=None):
+    """通过 Outlook Office REST 拉最近邮件并提取验证码。
+
+    很多 consumer Hotmail 账号 OAuth 能过 IMAP AUTH，但 SELECT 报
+    'User is authenticated but not connected'；REST 通常仍可用。
+    """
+    try:
+        recent_seconds = int(config.get("hotmail_recent_seconds", 900) or 900)
+    except Exception:
+        recent_seconds = 900
+    try:
+        last_n = int(config.get("hotmail_imap_last_n", 30) or 30)
+    except Exception:
+        last_n = 30
+    last_n = max(5, min(50, last_n))
+    require_recipient = _config_bool(
+        config.get("hotmail_require_recipient_match", True), default=True
+    )
+    filter_after_ts = int((time.time() - max(60, recent_seconds)) * 1000)
+    target_lower = (target_email or "").strip().lower()
+    keywords = ["x.ai", "xai", "grok", "verification", "code", "confirm", "验证码", "确认", "confirmation"]
+
+    # $orderby 含空格，必须编码；否则 urllib/部分客户端会拒收
+    query = (
+        f"$top={last_n}"
+        f"&$select=Subject,ReceivedDateTime,ToRecipients,CcRecipients,BodyPreview,Body,From"
+        f"&$orderby=ReceivedDateTime%20desc"
+    )
+    bases = (
+        "https://outlook.office.com/api/v2.0/me/messages",
+        "https://outlook.office.com/api/v2.0/me/mailfolders/inbox/messages",
+        "https://outlook.office365.com/api/v2.0/me/messages",
+    )
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    last_error = None
+    messages = []
+    for base in bases:
+        url = f"{base}?{query}"
+        try:
+            if log_callback:
+                log_callback(f"[Debug] Hotmail/Outlook REST 拉取: {base.split('/')[2]} user={mailbox_email}")
+            resp = http_get(url, headers=headers, timeout=30)
+            if resp.status_code == 401:
+                raise Exception(f"Outlook REST 401 unauthorized: {(resp.text or '')[:160]}")
+            if resp.status_code >= 400:
+                last_error = f"HTTP {resp.status_code}: {(resp.text or '')[:160]}"
+                if log_callback:
+                    log_callback(f"[Debug] Hotmail/Outlook REST 失败: {last_error}")
+                continue
+            try:
+                payload = resp.json()
+            except Exception as exc:
+                last_error = f"invalid json: {exc}"
+                continue
+            messages = payload.get("value") or []
+            if messages:
+                break
+        except Exception as exc:
+            last_error = str(exc)
+            if log_callback:
+                log_callback(f"[Debug] Hotmail/Outlook REST 异常: {exc}")
+            continue
+
+    if not messages:
+        if last_error:
+            raise Exception(f"Outlook REST 无可用邮件: {last_error}")
+        return None
+
+    for msg in messages:
+        recv_ms = _hotmail_parse_iso_ts(msg.get("ReceivedDateTime"))
+        if recv_ms and recv_ms < filter_after_ts:
+            continue
+
+        subject = str(msg.get("Subject") or "")
+        sender = ""
+        try:
+            sender = str(((msg.get("From") or {}).get("EmailAddress") or {}).get("Address") or "")
+        except Exception:
+            sender = ""
+        recipients = []
+        for key in ("ToRecipients", "CcRecipients"):
+            for item in msg.get(key) or []:
+                try:
+                    addr = str(((item or {}).get("EmailAddress") or {}).get("Address") or "").strip()
+                except Exception:
+                    addr = ""
+                if addr:
+                    recipients.append(addr.lower())
+        recipient_blob = " ".join(recipients)
+        recipient_matched = (not target_lower) or (target_lower in recipient_blob)
+        if require_recipient and not recipient_matched:
+            continue
+
+        body_obj = msg.get("Body") or {}
+        body_content = str(body_obj.get("Content") or "")
+        if str(body_obj.get("ContentType") or "").lower() == "html":
+            body_content = re.sub(r"<[^>]+>", " ", body_content)
+        preview = str(msg.get("BodyPreview") or "")
+        combined = f"{subject}\n{sender}\n{recipient_blob}\n{preview}\n{body_content}"
+        combined_lower = combined.lower()
+        if not any(kw in combined_lower for kw in keywords):
+            # subject 本身常带 "ABC-DEF xAI confirmation code"
+            if "xai" not in subject.lower() and "confirmation" not in subject.lower():
+                continue
+        code = extract_verification_code(combined, subject)
+        if code:
+            if log_callback:
+                log_callback(
+                    f"[*] Hotmail/Outlook REST 提取到验证码: {code} "
+                    f"(to={target_email or mailbox_email})"
+                )
+            return code
+    return None
 
 
 def _hotmail_manual_prompt(mailbox_email, target_email, log_callback=None, prompted=False):
@@ -1856,8 +2014,11 @@ def hotmail_get_oai_code(
     deadline = time.time() + timeout
     access_token = None
     next_resend_at = time.time() + 60
+    # 默认关人工；REST 可用时不应阻塞 stdin
     manual_mode = _config_bool(config.get("hotmail_manual_code"), default=False)
     manual_prompted = False
+    fetch_modes = _hotmail_mail_fetch_modes()
+    consecutive_transport_fails = 0
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -1874,42 +2035,94 @@ def hotmail_get_oai_code(
             if not access_token:
                 access_token = hotmail_refresh_access_token(account, log_callback=log_callback)
             code = None
-            host_errors = []
-            for imap_host in _hotmail_get_imap_hosts():
-                try:
-                    code = _hotmail_imap_get_code(
+            transport_errors = []
+            transport_ok = False
+
+            for mode in fetch_modes:
+                if mode == "rest":
+                    try:
+                        code = _hotmail_rest_get_code(
+                            mailbox_email,
+                            email,
+                            access_token,
+                            log_callback=log_callback,
+                        )
+                        transport_ok = True
+                        if code:
+                            break
+                        # REST 成功但本轮无匹配码，不必再打 IMAP（省一轮 SSL/AUTH 失败）
+                        break
+                    except Exception as rest_exc:
+                        transport_errors.append(f"rest: {rest_exc}")
+                        if log_callback:
+                            log_callback(f"[Debug] Hotmail/Outlook REST 失败: {rest_exc}")
+                        continue
+
+                if mode == "imap":
+                    host_errors = []
+                    for imap_host in _hotmail_get_imap_hosts():
+                        try:
+                            code = _hotmail_imap_get_code(
+                                mailbox_email,
+                                email,
+                                access_token,
+                                log_callback=log_callback,
+                                host=imap_host,
+                            )
+                            transport_ok = True
+                            # 成功连接但本轮未找到码，不必再换同邮箱另一个 host 重扫。
+                            break
+                        except Exception as host_exc:
+                            host_errors.append(f"{imap_host}: {host_exc}")
+                            if log_callback:
+                                log_callback(
+                                    f"[Debug] Hotmail/Outlook IMAP host 失败: {imap_host}: {host_exc}"
+                                )
+                            continue
+                    if host_errors and not transport_ok:
+                        transport_errors.append("imap: " + "; ".join(host_errors))
+                    if code:
+                        break
+                    if transport_ok:
+                        break
+
+            if code:
+                return code
+
+            if transport_ok:
+                consecutive_transport_fails = 0
+                if log_callback:
+                    log_callback(f"[Debug] Hotmail/Outlook 本轮未找到验证码: {email}")
+            else:
+                consecutive_transport_fails += 1
+                # 全部通道挂掉：manual 兜底；否则抛出让外层刷新 token 后重试
+                if manual_mode:
+                    code = _hotmail_manual_prompt(
                         mailbox_email,
                         email,
-                        access_token,
                         log_callback=log_callback,
-                        host=imap_host,
+                        prompted=manual_prompted,
                     )
-                    # 成功连接但本轮未找到码，不必再换同邮箱另一个 host 重扫。
-                    break
-                except Exception as host_exc:
-                    host_errors.append(f"{imap_host}: {host_exc}")
-                    if log_callback:
-                        log_callback(f"[Debug] Hotmail/Outlook IMAP host 失败: {imap_host}: {host_exc}")
-                    continue
-            if code is None and host_errors and len(host_errors) >= len(_hotmail_get_imap_hosts()):
-                if manual_mode:
-                    code = _hotmail_manual_prompt(mailbox_email, email,
-                                                  log_callback=log_callback,
-                                                  prompted=manual_prompted)
                     manual_prompted = True
                     if code:
                         return code
-                    # 你空回车就再轮一轮（可能你还没去邮箱看），下一轮会再提示
                     if log_callback:
                         log_callback(f"[Debug] manual 输入为空,本轮继续等: {email}")
+                elif consecutive_transport_fails >= 3:
+                    raise Exception(
+                        "Hotmail/Outlook 收码通道连续失败: "
+                        + ("; ".join(transport_errors) if transport_errors else "unknown")
+                    )
                 else:
-                    raise Exception("; ".join(host_errors))
-            if code:
-                return code
-            if log_callback:
-                log_callback(f"[Debug] Hotmail/Outlook 本轮未找到验证码: {email}")
+                    # 刷新 token 再试
+                    access_token = None
+                    if log_callback and transport_errors:
+                        log_callback(
+                            f"[Debug] Hotmail/Outlook 收码通道失败，将重试: "
+                            f"{'; '.join(transport_errors)[:240]}"
+                        )
         except Exception as exc:
-            # OAuth/IMAP 临时失败时下一轮重新 refresh access_token。
+            # OAuth/通道临时失败时下一轮重新 refresh access_token。
             access_token = None
             if log_callback:
                 log_callback(f"[Debug] Hotmail/Outlook 拉取验证码失败: {exc}")
