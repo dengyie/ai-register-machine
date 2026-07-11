@@ -417,6 +417,22 @@ def export_cpa_xai_for_account(
             log(f"[cpa] hotload copy failed: {e}")
             result["cpa_copy_error"] = str(e)
 
+    # Optional: auto inject minted auth into remote CPA (tebi /personal/cpa/auths)
+    if result.get("ok") and result.get("path") and _config_bool(cfg.get("cpa_remote_inject"), default=False):
+        remote_res = inject_cpa_auth_remote(
+            result["path"],
+            config=cfg,
+            log_callback=log,
+        )
+        result["remote_inject"] = remote_res
+        if remote_res.get("ok"):
+            result["remote_path"] = remote_res.get("remote_path")
+        else:
+            result["remote_inject_error"] = remote_res.get("error") or remote_res.get("reason")
+            if _config_bool(cfg.get("cpa_remote_inject_required"), default=False):
+                result["ok"] = False
+                result["error"] = f"remote inject required but failed: {result['remote_inject_error']}"
+
     # failure log under register dir
     if not result.get("ok"):
         fail_path = out_dir / "cpa_auth_failed.txt"
