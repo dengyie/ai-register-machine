@@ -127,6 +127,50 @@ _next_idx = [1]
 # mint 队列结束哨兵
 _MINT_STOP = object()
 
+# 不可恢复错误：别名耗尽 / 凭证缺失等 → 全进程停止，禁止空转重试
+_fatal_stop = threading.Event()
+_fatal_reason_lock = threading.Lock()
+_fatal_reason: list[str] = [""]
+
+
+class FatalRegisterError(Exception):
+    """Unrecoverable resource/config error — stop the whole batch immediately."""
+
+
+def request_fatal_stop(reason: str) -> None:
+    """Signal all workers to exit; first reason wins."""
+    text = str(reason or "fatal").strip() or "fatal"
+    with _fatal_reason_lock:
+        if not _fatal_reason[0]:
+            _fatal_reason[0] = text
+    _fatal_stop.set()
+
+
+def fatal_stop_reason() -> str:
+    with _fatal_reason_lock:
+        return _fatal_reason[0]
+
+
+def is_fatal_register_error(msg: str) -> bool:
+    """Hard blockers that must stop the job (no retry / no empty loop)."""
+    text = str(msg or "")
+    markers = (
+        "可用别名已耗尽",
+        "账号文件不存在",
+        "账号文件无有效记录",
+        "Cloudflare API Base 未配置",
+        "CloudMail 需要在 defaultDomains",
+        "CloudMail 配置不完整",
+        "YYDS API Key 或 JWT 未配置",
+        "YYDS 没有返回任何可用域名",
+        "YYDS 无已验证域名可用",
+        "DuckMail 没有返回任何可用域名",
+        "DuckMail 无已验证域名可用",
+        "获取 DuckMail token 失败",
+        "获取 YYDS token 失败",
+    )
+    return any(m in text for m in markers)
+
 
 def resolve_mint_workers(
     *,
@@ -209,11 +253,14 @@ def classify_email_stage_failure(msg: str) -> str:
     """Classify email/code stage failure for retry policy.
 
     Returns:
+      fatal         — resource/config exhausted; stop whole batch (no retry)
       progress_fail — code filled but profile not reached (do not swap mailbox as mail-miss)
       mail_miss     — verification code not received / IMAP path
       other         — navigation/form/browser hard failure
     """
     text = str(msg or "")
+    if is_fatal_register_error(text):
+        return "fatal"
     if ("未进入资料页" in text) or ("验证码已填写" in text):
         return "progress_fail"
     if (
@@ -309,6 +356,11 @@ def register_one(
         except Exception as exc:
             msg = str(exc)
             kind = classify_email_stage_failure(msg)
+            if kind == "fatal":
+                log(worker_id, f"! 致命错误，停止整批（不空转）: {msg}")
+                _inc("reg_fail")
+                request_fatal_stop(msg)
+                raise FatalRegisterError(msg) from exc
             if kind == "mail_miss" and mail_try < max_mail_retry:
                 log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
                 _mark_email_stage_error(email, msg)
@@ -519,10 +571,13 @@ def _register_worker(
     do_mint_inline: bool,
 ):
     while True:
+        if _fatal_stop.is_set():
+            log(worker_id, f"[stop] 致命错误已触发，退出 worker: {fatal_stop_reason()}")
+            break
         try:
             idx = task_queue.get_nowait()
         except queue.Empty:
-            if not forever:
+            if not forever or _fatal_stop.is_set():
                 break
             with _next_idx_lock:
                 nxt = _next_idx[0]
@@ -532,7 +587,7 @@ def _register_worker(
             continue
 
         retry = 0
-        while retry < 2:
+        while retry < 2 and not _fatal_stop.is_set():
             try:
                 result = register_one(
                     worker_id,
@@ -547,12 +602,17 @@ def _register_worker(
                 # register_one 内部已在失败路径上 restart 过浏览器；
                 # worker 层不再重复 restart，避免 quit+create 链叠加导致僵尸进程堆积。
                 retry += 1
-                if retry < 2:
+                if retry < 2 and not _fatal_stop.is_set():
                     log(worker_id, f"[retry] 账号 {idx} 失败，重试 {retry}/1")
+            except FatalRegisterError as exc:
+                # 不可恢复：不重试、不换号空转，直接停本 worker（全局 stop 已 set）
+                log(worker_id, f"[stop] FatalRegisterError: {exc}")
+                retry = 2
+                break
             except Exception:
                 # 只有 register_one 抛出未捕获异常时，worker 才需要 recycle 浏览器。
                 retry += 1
-                if retry < 2:
+                if retry < 2 and not _fatal_stop.is_set():
                     log(worker_id, f"[retry] 账号 {idx} 异常，重试 {retry}/1")
                     traceback.print_exc()
                     try:
@@ -563,6 +623,8 @@ def _register_worker(
         if retry >= 2:
             # register_one 已在自己的失败路径上计 reg_fail；worker 不再重复计。
             pass
+        if _fatal_stop.is_set():
+            break
 
     # worker exit: free browser
     try:
@@ -767,15 +829,22 @@ def main() -> int:
             t.join()
     except KeyboardInterrupt:
         print("\n[!] 用户中断", flush=True)
+        request_fatal_stop("KeyboardInterrupt")
 
-    # drain mint queue
+    # drain mint queue (skip long wait if fatal — still flush in-flight)
     if mint_queue is not None:
-        log(0, f"[cpa] 等待 mint 队列清空（qsize≈{mint_queue.qsize()}）...")
+        if _fatal_stop.is_set():
+            log(
+                0,
+                f"[cpa] 致命停止，尽快清空 mint 队列（qsize≈{mint_queue.qsize()}）...",
+            )
+        else:
+            log(0, f"[cpa] 等待 mint 队列清空（qsize≈{mint_queue.qsize()}）...")
         mint_queue.join()
         for _ in mint_threads:
             mint_queue.put(_MINT_STOP)
         for t in mint_threads:
-            t.join(timeout=600)
+            t.join(timeout=120 if _fatal_stop.is_set() else 600)
 
     try:
         reg.shutdown_browser()
@@ -820,6 +889,10 @@ def main() -> int:
         f"tebi注入跳过 {s.get('remote_inject_skip', 0)} ===",
         flush=True,
     )
+    if _fatal_stop.is_set():
+        reason = fatal_stop_reason()
+        print(f"[!] 致命错误已停止任务（不空转）: {reason}", flush=True)
+        return 2
     return 0 if s.get("reg_success", 0) > 0 else 1
 
 

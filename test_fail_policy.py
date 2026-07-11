@@ -10,26 +10,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 
 
-def _load_classify():
-    """Load classify_email_stage_failure without importing grok_register_ttk (tkinter)."""
+def _load_fail_fast_helpers():
+    """Load is_fatal_register_error + classify without importing ttk."""
     src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
-    target = None
+    wanted = {
+        "is_fatal_register_error",
+        "classify_email_stage_failure",
+    }
+    nodes = []
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "classify_email_stage_failure":
-            target = node
-            break
-    if target is None:
-        raise RuntimeError("classify_email_stage_failure not found")
-    module = ast.Module(body=[target], type_ignores=[])
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
+            nodes.append(node)
+    if len(nodes) != 2:
+        raise RuntimeError(f"expected 2 helpers, got {[n.name for n in nodes]}")
+    # is_fatal must come before classify (classify calls it)
+    nodes.sort(key=lambda n: 0 if n.name == "is_fatal_register_error" else 1)
+    module = ast.Module(body=nodes, type_ignores=[])
     code = compile(module, "register_cli.py", "exec")
     ns: dict = {}
     exec(code, ns)
-    return ns["classify_email_stage_failure"]
+    return ns["is_fatal_register_error"], ns["classify_email_stage_failure"]
 
 
 def test_classify() -> None:
-    classify = _load_classify()
+    is_fatal, classify = _load_fail_fast_helpers()
     cases = [
         ("验证码已填写，但未进入资料页: code=ABC", "progress_fail"),
         ("验证码已填写，但未进入资料页 IMAP", "progress_fail"),
@@ -41,6 +46,15 @@ def test_classify() -> None:
         ("未找到邮箱输入框或注册按钮", "other"),
         ("浏览器启动失败", "other"),
         ("打开注册页失败: page is None", "other"),
+        (
+            "Hotmail/Outlook 可用别名已耗尽：请增加 hotmail_max_aliases_per_account、"
+            "补充 mail_credentials.txt，或清理 emails_used.txt / emails_error.txt",
+            "fatal",
+        ),
+        ("Hotmail/Outlook 账号文件不存在: /tmp/x", "fatal"),
+        ("Hotmail/Outlook 账号文件无有效记录: /tmp/x", "fatal"),
+        ("Cloudflare API Base 未配置", "fatal"),
+        ("DuckMail 没有返回任何可用域名", "fatal"),
     ]
     failed = 0
     for msg, expect in cases:
@@ -48,6 +62,9 @@ def test_classify() -> None:
         ok = got == expect
         print(f"{'PASS' if ok else 'FAIL'}  {got!r:16} expect={expect!r:16}  {msg[:48]}")
         if not ok:
+            failed += 1
+        if expect == "fatal" and not is_fatal(msg):
+            print(f"FAIL  is_fatal should be True for: {msg[:48]}")
             failed += 1
     if failed:
         raise SystemExit(f"classify failures: {failed}")
@@ -79,6 +96,24 @@ def test_soft_hard_helpers() -> None:
     print("PASS  soft/hard recycle helpers present")
 
 
+def test_fatal_stop_wiring() -> None:
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    for needle in (
+        "class FatalRegisterError",
+        "def request_fatal_stop",
+        "def is_fatal_register_error",
+        "_fatal_stop",
+        "raise FatalRegisterError",
+        "except FatalRegisterError",
+        "return 2",
+        "致命错误，停止整批（不空转）",
+    ):
+        assert needle in src, f"missing: {needle}"
+    # worker must check stop flag and must NOT retry FatalRegisterError
+    assert "if _fatal_stop.is_set()" in src
+    print("PASS  fatal stop wiring present")
+
+
 def test_hotpath_no_mojibake() -> None:
     src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
     # hot-path markers that must be correct Chinese
@@ -102,6 +137,7 @@ def main() -> int:
     test_classify()
     test_open_signup_hardens_release()
     test_soft_hard_helpers()
+    test_fatal_stop_wiring()
     test_hotpath_no_mojibake()
     print("\nALL PASS")
     return 0

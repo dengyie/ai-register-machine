@@ -18,7 +18,7 @@
 | [DISCLAIMER.md](DISCLAIMER.md) | 免责声明与使用边界 |
 | [SECURITY.md](SECURITY.md) | 密钥范围、泄露处理、漏洞反馈 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR 约定 |
-| [CHANGELOG.md](CHANGELOG.md) | 版本变更（当前 **v1.1.2**） |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更（当前 **v1.1.3**） |
 | [LICENSE](LICENSE) | MIT |
 
 ---
@@ -437,6 +437,7 @@ uv run python register_cli.py -h
 | 一直 `authorization_pending` | 浏览器路径未完成 consent；需到「设备已授权」且 token 200 |
 | `rate_limited` / `slow_down` | mint 过密；加大 backfill `--sleep`，稍后重试 |
 | Hotmail 收不到码 | 检查四段凭证、ClientID/Token、REST/IMAP、alias 计数上限 |
+| 日志出现「可用别名已耗尽」后任务退出 | **预期行为（v1.1.3+）**：硬资源/配置失败直接停批，不空转重试；提高 `hotmail_max_aliases_per_account` 或补充 `mail_credentials.txt` 后重启 |
 | 有 token 但无 grok-4.5 | `cpa_base_url` 是否为 `https://cli-chat-proxy.grok.com/v1` |
 | 注册成功但无 `cpa_auths` | `cpa_export_enabled`？看 `cpa_auths/cpa_auth_failed.txt` 与日志 |
 | 远端注入失败 | `cpa_remote_inject`、SSH host、`sshpass` / 凭据文件、隧道是否通 |
@@ -522,4 +523,4 @@ GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 - **CLIProxyAPI / CPA：** 自备；将 `cpa_auths/xai-*.json` 放到 CPA auth-dir 即可热加载
 - **免费 Grok 4.5：** 只走 Build OIDC + `cli-chat-proxy`，不是网页 SSO
 - **仓库：** https://github.com/dengyie/grok-register
-- **最新发布：** https://github.com/dengyie/grok-register/releases/tag/v1.1.2
+- **最新发布：** https://github.com/dengyie/grok-register/releases/tag/v1.1.3

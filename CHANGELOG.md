@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.3] - 2026-07-12
+
+### Fixed
+
+- Hard resource/config failures (Hotmail alias exhaustion, missing mail credentials, unconfigured providers) now **stop the whole batch immediately** instead of empty-loop retries
+- `FatalRegisterError` + `_fatal_stop` event: workers exit without further account retries; process exit code `2`
+
+### Added
+
+- `classify_email_stage_failure` returns `fatal` for unrecoverable markers
+- Offline tests for fatal classification and stop wiring
+
 ## [1.1.2] - 2026-07-12
 
 ### Added
