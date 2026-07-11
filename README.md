@@ -1,13 +1,17 @@
-# grok_reg-protocol_cpa
+# Grok 注册机
 
-基于 **Chromium + DrissionPage + turnstilePatch** 的免费 Grok 账号注册机。
+基于 **Chromium + DrissionPage + turnstilePatch** 的免费 **Grok 账号自动注册机**。
 
-本分支在原版注册机基础上新增了两点：
+注册成功后可自动铸造 CPA / Grok Build 用的 xAI OIDC 凭证（`cpa_auths/xai-*.json`），并可选推送到远端热加载目录。
+
+本仓库在原版注册机基础上新增了两点：
 
 1. **Hotmail / Outlook 邮箱凭证池**  
-   支持 `邮箱----密码----ClientID----Token` 四段格式读取与 XOAUTH2 IMAP 收验证码。
-2. **协议优先的  导出**  
+   支持 `邮箱----密码----ClientID----Token` 四段格式读取与 XOAUTH2 IMAP / Office REST 收验证码。
+2. **协议优先的 CPA OIDC 导出**  
    注册拿到 SSO 后，优先用 **纯 HTTP Device Flow**（`curl_cffi` + `sso` cookie）铸造 CPA 用的 `xai-*.json`；协议失败再回退原浏览器 consent 逻辑。
+
+> **安全提示：** 不要把 `config.json`、`mail_credentials.txt`、`accounts_*.txt`、`cpa_auths/*.json`、`backups/`、`.env` 提交进 Git。仓库已默认 gitignore 这些路径；请只用 `*.example*` 模板。
 
 一条成功链路会产出两类凭证：
 
