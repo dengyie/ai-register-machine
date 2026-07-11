@@ -349,6 +349,13 @@ def register_one(
         sso = reg.wait_for_sso_cookie(
             log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
         )
+        try:
+            from cpa_xai.accounts import normalize_sso_cookie
+
+            sso = normalize_sso_cookie(sso)
+        except Exception:
+            raw = (sso or "").strip()
+            sso = raw[1:] if raw.startswith("-eyJ") else raw
         password = profile.get("password", "") or ""
         line = f"{email}----{password}----{sso}\n"
         with open(accounts_file, "a", encoding="utf-8") as f:

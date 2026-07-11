@@ -93,6 +93,18 @@ def test_modes_and_rest_helpers() -> None:
 
 
 def test_live_rest_if_credentials() -> None:
+    """Live mailbox smoke — opt-in only.
+
+    Requires:
+      - GROK_REGISTER_LIVE=1
+      - local mail_credentials.txt (gitignored)
+    Never enable this in CI.
+    """
+    import os
+
+    if os.environ.get("GROK_REGISTER_LIVE", "").strip() not in {"1", "true", "TRUE", "yes", "YES"}:
+        print("SKIP  live REST (set GROK_REGISTER_LIVE=1 to enable)")
+        return
     cred = ROOT / "mail_credentials.txt"
     if not cred.is_file():
         print("SKIP  live REST (no mail_credentials.txt)")

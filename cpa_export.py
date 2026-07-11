@@ -386,11 +386,13 @@ def export_cpa_xai_for_account(
         use_cookies = None
     else:
         # Always attach SSO cookie clones — register cookies alone often miss accounts.x.ai host
-        sso_val = (sso or "").strip()
+        from cpa_xai.accounts import normalize_sso_cookie
+
+        sso_val = normalize_sso_cookie(sso)
         if not sso_val and isinstance(use_cookies, list):
             for c in use_cookies:
                 if isinstance(c, dict) and c.get("name") in ("sso", "sso-rw") and c.get("value"):
-                    sso_val = str(c.get("value"))
+                    sso_val = normalize_sso_cookie(str(c.get("value")))
                     break
         if sso_val:
             base = list(use_cookies) if isinstance(use_cookies, list) else []
@@ -406,11 +408,13 @@ def export_cpa_xai_for_account(
                     })
             use_cookies = base
 
-    sso_val = (sso or "").strip()
+    from cpa_xai.accounts import normalize_sso_cookie
+
+    sso_val = normalize_sso_cookie(sso)
     if not sso_val and isinstance(use_cookies, list):
         for c in use_cookies:
             if isinstance(c, dict) and c.get("name") in ("sso", "sso-rw") and c.get("value"):
-                sso_val = str(c.get("value"))
+                sso_val = normalize_sso_cookie(str(c.get("value")))
                 break
 
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -1,13 +1,36 @@
 [project]
-name = "grok-reg-protocol-cpa"
+name = "grok-register"
 version = "1.1.0"
-description = "Grok 注册机（Hotmail 四段凭证 + 协议优先 OIDC/CPA，失败回退浏览器；Chrome + DrissionPage + turnstilePatch）"
+description = "Grok 注册机：Chromium 自动注册 + Hotmail 收码 + 协议优先 CPA/OIDC 铸造"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.13,<3.14"
+authors = [{ name = "dengyie" }]
+keywords = ["grok", "xai", "register", "oidc", "cpa", "automation"]
 dependencies = [
-    "DrissionPage>=4.1",   # Chrome 自动化（含 turnstilePatch 扩展加载）
-    "curl_cffi>=0.7",      # HTTP client（带 TLS 指纹），邮箱 API + grok2api 调用
+    "DrissionPage>=4.1",
+    "curl_cffi>=0.7",
 ]
 
-# application 模式：不构建 wheel，uv 只管依赖
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/dengyie/grok-register"
+Repository = "https://github.com/dengyie/grok-register"
+Issues = "https://github.com/dengyie/grok-register/issues"
+Changelog = "https://github.com/dengyie/grok-register/blob/main/CHANGELOG.md"
+
+# application mode: uv manages deps only, no wheel build
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

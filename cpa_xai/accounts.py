@@ -6,6 +6,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def normalize_sso_cookie(value: str | None) -> str:
+    """Normalize SSO cookie / JWT-like token from ledger or browser export.
+
+    Some capture paths prefix a stray ``-`` before ``eyJ...``. Protocol mint
+    treats that as invalid and lands on sign-in; stripping restores a usable JWT.
+    """
+    s = (value or "").strip()
+    if not s:
+        return ""
+    # Strip accidental leading dashes only when a JWT header is present nearby.
+    while s.startswith("-") and "eyJ" in s[:8]:
+        s = s[1:].lstrip()
+    return s.strip()
+
+
 @dataclass
 class AccountLine:
     email: str
@@ -29,7 +44,7 @@ def parse_accounts_file(path: str | Path) -> list[AccountLine]:
             continue
         email = parts[0].strip()
         password = parts[1].strip()
-        sso = parts[2].strip() if len(parts) > 2 else ""
+        sso = normalize_sso_cookie(parts[2] if len(parts) > 2 else "")
         if not email or not password:
             continue
         out.append(AccountLine(email=email, password=password, sso=sso, raw=s, line_no=i))

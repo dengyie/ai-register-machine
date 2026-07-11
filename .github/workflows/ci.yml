@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: offline-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Syntax check
+        run: |
+          uv run python -m py_compile \
+            register_cli.py \
+            cpa_export.py \
+            account_backup.py \
+            tab_pool.py \
+            optimization_checks.py \
+            cf_mail_debug.py \
+            cpa_xai/__init__.py \
+            cpa_xai/accounts.py \
+            cpa_xai/browser_confirm.py \
+            cpa_xai/mint.py \
+            cpa_xai/oauth_device.py \
+            cpa_xai/probe.py \
+            cpa_xai/protocol_mint.py \
+            cpa_xai/proxyutil.py \
+            cpa_xai/schema.py \
+            cpa_xai/writer.py \
+            scripts/backfill_cpa_xai_from_accounts.py \
+            scripts/backup_registered_accounts.py \
+            scripts/export_cpa_xai_from_grok_auth.py
+
+      - name: Offline unit tests
+        env:
+          # Never run live mailbox / remote inject in CI
+          GROK_REGISTER_LIVE: ""
+        run: uv run python -m pytest -q
+
+      - name: Secret path guard
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)(config\.json|\.env|mail_credentials\.txt|accounts_cli\.txt)$|cpa_auths/xai-|^backups/|^logs/'; then
+            echo "Refusing tracked secret/runtime paths" >&2
+            git ls-files | grep -E '(^|/)(config\.json|\.env|mail_credentials\.txt|accounts_cli\.txt)$|cpa_auths/xai-|^backups/|^logs/' >&2
+            exit 1
+          fi
+          echo "OK: no secret runtime paths tracked"

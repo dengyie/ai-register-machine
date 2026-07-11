@@ -11,6 +11,16 @@
 
 > **安全提示：** 不要把 `config.json`、`mail_credentials.txt`、`accounts_*.txt`、`cpa_auths/*.json`、`backups/`、`.env`、`logs/`、`screenshots/` 提交进 Git。仓库已默认 gitignore 这些路径；请只用 `*.example*` 模板。
 
+> **合规提示：** 自动化注册 / 收码 / 铸 token 可能违反第三方服务条款。请先阅读 [DISCLAIMER.md](DISCLAIMER.md) 与 [SECURITY.md](SECURITY.md)。本项目按 **MIT** 许可提供，**不附带任何担保**。
+
+| 文档 | 说明 |
+|------|------|
+| [DISCLAIMER.md](DISCLAIMER.md) | 免责声明与使用边界 |
+| [SECURITY.md](SECURITY.md) | 密钥范围、泄露处理、漏洞反馈 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR 约定 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更 |
+| [LICENSE](LICENSE) | MIT |
+
 ---
 
 ## 功能特性
@@ -105,8 +115,9 @@ OIDC 相关代码自包含在 `cpa_xai/`：
 ```bash
 git clone https://github.com/dengyie/grok-register.git
 cd grok-register
-uv sync
+uv sync --extra dev
 uv run python -c "from DrissionPage import Chromium; from curl_cffi import requests; print('OK')"
+uv run python -m pytest -q
 ```
 
 或用 mise：
@@ -441,13 +452,38 @@ grok-register/
 
 ---
 
+## 开发与测试
+
+```bash
+uv sync --extra dev
+uv run python -m pytest -q          # 离线单测（CI 同款）
+mise run test                       # 若使用 mise
+mise run check                      # py_compile
+```
+
+Live Hotmail REST（**不要**在 CI 开）：
+
+```bash
+GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
+```
+
+贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub Actions 在 `main` 上跑语法检查 + 离线 pytest + 密钥路径守卫。
+
+---
+
 ## 安全与合规
 
 - **切勿提交密钥：** `config.json`、邮箱 refresh_token、账本密码/SSO、`cpa_auths` 的 access/refresh token
 - 本地文件建议权限 `600`
 - 分享本项目时只分享代码仓库或去掉运行时目录的干净拷贝
 - 免费 Build 有额度与风控；批量注册 / mint 请控速，合理使用
-- 本工具仅供学习与个人自动化研究；请遵守 xAI、微软等服务条款与当地法律
+- 完整边界见 [DISCLAIMER.md](DISCLAIMER.md)；泄露处理见 [SECURITY.md](SECURITY.md)
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 dengyie
 
 ---
 
