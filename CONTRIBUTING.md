@@ -31,6 +31,7 @@ uv run python test_account_backup.py
 uv run python test_cpa_remote_inject.py
 uv run python test_fail_policy.py
 uv run python test_hotmail_rest_code.py
+uv run python test_sso_normalize.py
 ```
 
 Live Hotmail REST (needs real `mail_credentials.txt`, **not** for CI):
@@ -39,10 +40,10 @@ Live Hotmail REST (needs real `mail_credentials.txt`, **not** for CI):
 GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 ```
 
-Syntax check:
+Syntax check (CI also compiles `grok_register_ttk.py`):
 
 ```bash
-uv run python -m py_compile register_cli.py cpa_export.py account_backup.py cpa_xai/*.py
+uv run python -m py_compile register_cli.py grok_register_ttk.py cpa_export.py account_backup.py cpa_xai/*.py
 ```
 
 ## Coding guidelines
@@ -52,6 +53,9 @@ uv run python -m py_compile register_cli.py cpa_export.py account_backup.py cpa_
 - Add or extend offline tests when fixing logic
 - Never log raw passwords, refresh tokens, or access tokens
 - Document user-facing config keys in `config.example.json` comment keys
+- **SSO handling:** only use `cpa_xai.accounts.normalize_sso_cookie` / `format_account_line`. Do not invent a second strip rule. Normalize must stay at mint core + ledger write (CLI/GUI).
+- **CPA export path:** production register and default backfill go through `cpa_export.export_cpa_xai_for_account` so remote inject / backup hooks stay consistent. Do not reintroduce “mint only” as the default backfill path.
+- **Config booleans:** use `_config_bool` (or equivalent) so string `"false"` is false.
 
 ## Pull requests
 

@@ -57,6 +57,7 @@ We aim to acknowledge reports within a reasonable time; there is no bug bounty.
 - Prefer dummy values in examples
 - Never attach real `cpa_auths` or mail credentials to pull requests
 - Redact emails and tokens in logs pasted into issues
+- SSO normalize only strips a leading `-` when a JWT header (`eyJ`) is nearby; do not change this to blind `lstrip("-")` on arbitrary session values
 
 ## Remote inject
 

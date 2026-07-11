@@ -18,7 +18,7 @@
 | [DISCLAIMER.md](DISCLAIMER.md) | 免责声明与使用边界 |
 | [SECURITY.md](SECURITY.md) | 密钥范围、泄露处理、漏洞反馈 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR 约定 |
-| [CHANGELOG.md](CHANGELOG.md) | 版本变更 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更（当前 **v1.1.1**） |
 | [LICENSE](LICENSE) | MIT |
 
 ---
@@ -34,7 +34,8 @@
 | 免费 Grok 4.5 | 产出 `type=xai` 认证文件，对接 `cli-chat-proxy` / CLIProxyAPI |
 | 远端注入（可选） | mint 成功后 SSH 写入远端 CPA `auth-dir` |
 | 本地备份 | 成功后刷新 `backups/latest`，可打时间戳快照 |
-| 存量回填 | 已有账本 SSO 时可只 mint、不重新注册 |
+| 存量回填 | 已有账本 SSO 时走与注册相同的 `cpa_export` 管线（含可选远端注入） |
+| SSO 归一化 | 账本/cookie 前导多余 `-`（`-eyJ…`）在 mint 内核与写账本时自动剥离 |
 
 ---
 
@@ -51,11 +52,12 @@ OIDC 相关代码自包含在 `cpa_xai/`：
 
 | 路径 | 说明 |
 |------|------|
-| `cpa_xai/protocol_mint.py` | SSO → 纯 HTTP Device Flow（verify / approve / token） |
-| `cpa_xai/mint.py` | 协议优先，失败回退浏览器 |
+| `cpa_xai/protocol_mint.py` | SSO → 纯 HTTP Device Flow（verify / approve / token）；extract/set 时 normalize |
+| `cpa_xai/mint.py` | 协议优先，失败回退浏览器；入口统一 `normalize_sso_cookie` |
+| `cpa_xai/accounts.py` | 账本解析、SSO normalize、`format_account_line`、plus-alias skip 键 |
 | `cpa_xai/browser_confirm.py` | 有头 Chromium 完成 consent |
-| `cpa_export.py` | 注册成功 hook（写文件 / 可选远端注入 / 本地备份） |
-| `scripts/backfill_cpa_xai_from_accounts.py` | 存量账号批量补 CPA |
+| `cpa_export.py` | 注册 / backfill 共用 hook（写文件 / 可选远端注入 / 本地备份） |
+| `scripts/backfill_cpa_xai_from_accounts.py` | 存量补 CPA（默认走 `cpa_export`，与注册同链路） |
 | `scripts/export_cpa_xai_from_grok_auth.py` | 从 `~/.grok/auth.json` 导出 |
 | `scripts/backup_registered_accounts.py` | 手动触发本地备份 |
 
@@ -244,12 +246,21 @@ cpa_proxy  >  proxy  >  环境变量 https_proxy / http_proxy
 | `cpa_probe_after_write` | `true` | 写文件后探测 `/models` 是否含 grok-4.5 |
 | `cpa_copy_to_hotload` | `false` | 是否复制到本机 CPA 热加载目录 |
 | `cpa_hotload_dir` | 空 | 本机 CPA `auth-dir` |
-| `cpa_remote_inject` | `false` | mint 后是否 SSH 注入远端 |
+| `cpa_remote_inject` | `false` | mint 后是否 SSH 注入远端（backfill 默认同样生效） |
+| `cpa_remote_inject_required` | `false` | 远端注入失败是否整次 export 失败 |
 | `cpa_remote_ssh_host` | 如 `tebi-tunnel` | ssh 主机别名（写在 `~/.ssh/config`） |
 | `cpa_remote_auth_dir` | 如 `/personal/cpa/auths` | 远端热加载目录 |
 | `cpa_remote_credentials_file` | `~/.ssh/bohrium_credentials` | 可选密码文件；也可用环境变量 `CPA_REMOTE_SSHPASS` / `SSHPASS` |
 
+布尔配置请写 JSON 布尔或可解析字符串（`true`/`false`/`1`/`0`）；export 路径用 `_config_bool`，字符串 `"false"` **不会**被当成开启。
+
 CLI 与 GUI 都会在注册成功后读这些配置。GUI 下 CPA 导出会串行，避免多窗口抢焦点。
+
+### 账本与文件名
+
+- 账本行：`email----password----sso`；CLI/GUI 写盘前都会 `normalize_sso_cookie`（去掉 JWT 前多余的 `-`）。
+- CPA 文件名：`xai-<email>.json`，其中 `+` 等不安全字符会变成 `-`（如 `user+abc@x.com` → `xai-user-abc@x.com.json`）。
+- skip-existing 对 **plus-alias 与 sanitize 后的 stem** 对称匹配，避免重复 mint。
 
 ### 落盘约定
 
@@ -288,11 +299,18 @@ uv run python -u register_cli.py --count 100 --threads 1 --no-headless
 3. 若 `cpa_export_enabled`：协议 mint（失败则浏览器）→ `cpa_auths/xai-<email>.json`
 4. 可选：远端注入 / 本机 hotload / `backups/latest`
 
-### B. 存量号补 CPA（只 mint，不重新注册）
+### B. 存量号补 CPA（不重新注册）
 
-账本需含 SSO（第三段）。有有效 SSO 时通常**无需**弹浏览器：
+账本需含 SSO（第三段）。**默认走 `cpa_export.export_cpa_xai_for_account`**，与注册成功后的链路一致：
+
+- SSO normalize（mint 内核 + export）
+- 读 `config.json` 的 `cpa_*`（含 `cpa_remote_inject`）
+- 可选远端注入 / hotload / 本地 backup
+
+有有效 SSO 时通常**无需**弹浏览器：
 
 ```bash
+# 试跑 1 个缺失号（会按 config 决定是否远端注入）
 uv run python -u scripts/backfill_cpa_xai_from_accounts.py \
   --accounts accounts_cli.txt \
   --limit 1 --probe --timeout 300
@@ -300,17 +318,28 @@ uv run python -u scripts/backfill_cpa_xai_from_accounts.py \
 # 全量缺失号（建议加间隔，避免 rate limit）
 uv run python -u scripts/backfill_cpa_xai_from_accounts.py \
   --limit 0 --probe --timeout 300 --sleep 12
+
+# 只要本地 mint，不要这次 SSH 注入
+uv run python -u scripts/backfill_cpa_xai_from_accounts.py \
+  --limit 5 --no-remote --sleep 12
+
+# 完全绕过 cpa_export（无 inject / backup hook；调试用）
+uv run python -u scripts/backfill_cpa_xai_from_accounts.py \
+  --limit 1 --local-only
 ```
 
 | 参数 | 含义 |
 |------|------|
 | `--limit N` | 本次最多 N 个缺失号；`0`=全部 |
 | `--email x@y` | 只处理指定邮箱 |
-| `--out-dir` | 主导出目录 |
+| `--out-dir` | 覆盖 `cpa_auth_dir` |
 | `--cpa-dir` | 成功后复制到本机 CPA 热加载目录 |
-| `--probe` | 检查是否列出 `grok-4.5` |
+| `--probe` / `--no-probe` | 检查是否列出 `grok-4.5` |
 | `--sleep N` | 每个号之间休眠秒数 |
 | `--headless` | 回退浏览器时无头（不推荐） |
+| `--no-remote` | 本 run 强制 `cpa_remote_inject=false` |
+| `--local-only` | 直接 `mint_and_export`，不经 `cpa_export` |
+| `--config` | 默认 `./config.json` |
 
 ### C. 从 `~/.grok/auth.json` 导出
 
@@ -403,7 +432,7 @@ uv run python register_cli.py -h
 | 现象 | 原因 / 处理 |
 |------|-------------|
 | Turnstile / 注册卡住 | 使用 **有头** 浏览器（`--no-headless`）；检查代理与 `turnstilePatch` |
-| 协议 `sso invalid` / 落 sign-in | SSO 过期、格式异常（如前导多余字符）或已失效；检查账本第三段是否以 `eyJ` 开头 |
+| 协议 `sso invalid` / 落 sign-in | SSO 过期或已失效。v1.1.1+ 会自动剥 JWT 前导 `-`；若仍失败，确认第三段 normalize 后以 `eyJ` 开头，必要时重新登录拿 SSO |
 | 协议 verify/approve 失败 | 会话态变化 / 风控；看日志后自动回退浏览器 |
 | 一直 `authorization_pending` | 浏览器路径未完成 consent；需到「设备已授权」且 token 200 |
 | `rate_limited` / `slow_down` | mint 过密；加大 backfill `--sleep`，稍后重试 |
@@ -492,3 +521,4 @@ GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 - **CLIProxyAPI / CPA：** 自备；将 `cpa_auths/xai-*.json` 放到 CPA auth-dir 即可热加载
 - **免费 Grok 4.5：** 只走 Build OIDC + `cli-chat-proxy`，不是网页 SSO
 - **仓库：** https://github.com/dengyie/grok-register
+- **最新发布：** https://github.com/dengyie/grok-register/releases/tag/v1.1.1
