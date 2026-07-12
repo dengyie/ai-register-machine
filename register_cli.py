@@ -634,8 +634,28 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
         if result.get("ok"):
             log(worker_id, f"+ CPA auth: {result.get('path')}")
             _inc("mint_success")
+            multi = result.get("remote_injects")
             remote = result.get("remote_inject") or {}
-            if remote.get("ok"):
+            if isinstance(multi, list) and multi:
+                ok_n = sum(1 for r in multi if r.get("ok"))
+                fail_n = sum(1 for r in multi if not r.get("ok") and not r.get("skipped"))
+                skip_n = sum(1 for r in multi if r.get("skipped"))
+                if ok_n:
+                    _inc("remote_inject_ok")
+                    paths = result.get("remote_paths") or [
+                        r.get("remote_path") or r.get("dir") for r in multi if r.get("ok")
+                    ]
+                    log(worker_id, f"+ tebi inject x{ok_n}: {paths}")
+                if fail_n:
+                    _inc("remote_inject_fail")
+                    log(
+                        worker_id,
+                        f"! tebi inject 部分/全部失败: "
+                        f"{result.get('remote_inject_error') or result.get('remote_inject_partial_errors')}",
+                    )
+                if skip_n and not ok_n and not fail_n:
+                    _inc("remote_inject_skip")
+            elif remote.get("ok"):
                 _inc("remote_inject_ok")
                 log(worker_id, f"+ tebi inject: {remote.get('remote_path') or result.get('remote_path')}")
             elif remote.get("skipped"):

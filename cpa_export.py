@@ -7,6 +7,7 @@ points at a directory that *contains* the `cpa_xai` package.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -77,6 +78,90 @@ def _config_bool(value: Any, default: bool = False) -> bool:
     if s in {"0", "false", "no", "off", "n", ""}:
         return False
     return default
+
+
+def _config_priority(cfg: dict | None, default: int = 1000) -> int:
+    """CPA auth-file routing weight (CLIProxyAPI priority field)."""
+    raw = (cfg or {}).get("cpa_auth_priority", default)
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+def resolve_remote_auth_dirs(cfg: dict | None) -> list[str]:
+    """Remote CPA auth-dirs to inject into (live first, then inventory).
+
+    Config priority:
+      1) cpa_remote_auth_dirs — list or comma-separated (explicit wins)
+      2) if cpa_remote_inject: default live+inventory
+         /root/.cli-proxy-api,/personal/cpa/auths
+      3) cpa_remote_auth_dir — legacy single dir (only when inject is off
+         or as the sole explicit choice via cpa_remote_auth_dirs)
+
+    One-click CPA requires the live pool; inventory-only is not enough.
+    To inject a single custom dir, set cpa_remote_auth_dirs to that path only.
+    """
+    cfg = cfg or {}
+    raw = cfg.get("cpa_remote_auth_dirs")
+    dirs: list[str] = []
+    if isinstance(raw, (list, tuple)):
+        dirs = [str(x).strip() for x in raw if str(x).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        dirs = [p.strip() for p in raw.split(",") if p.strip()]
+    if not dirs:
+        if _config_bool(cfg.get("cpa_remote_inject"), default=False):
+            # One-click: always live + inventory unless multi dirs explicitly set.
+            dirs = ["/root/.cli-proxy-api", "/personal/cpa/auths"]
+        else:
+            single = str(cfg.get("cpa_remote_auth_dir") or "").strip()
+            if single:
+                dirs = [single]
+    # de-dup preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for d in dirs:
+        d = d.rstrip("/")
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        out.append(d)
+    return out
+
+
+def ensure_auth_file_priority(
+    path: str | Path,
+    *,
+    priority: int = 1000,
+    log_callback: Callable[[str], None] | None = None,
+) -> int:
+    """Ensure local xai-*.json has priority field; return applied value."""
+    log = log_callback or (lambda _m: None)
+    src = Path(path)
+    try:
+        data = json.loads(src.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        log(f"[cpa] priority ensure read failed: {e}")
+        return priority
+    try:
+        want = int(priority)
+    except Exception:
+        want = 1000
+    if data.get("priority") == want:
+        return want
+    data["priority"] = want
+    try:
+        src.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        try:
+            os.chmod(src, 0o600)
+        except Exception:
+            pass
+        log(f"[cpa] priority set {want} on {src.name}")
+    except Exception as e:  # noqa: BLE001
+        log(f"[cpa] priority ensure write failed: {e}")
+    return want
 
 
 def _resolve_remote_ssh_password(cfg: dict) -> str:
@@ -220,6 +305,11 @@ def inject_cpa_auth_remote(
             os.chmod(src, 0o600)
         except Exception:
             pass
+        ensure_auth_file_priority(
+            src,
+            priority=_config_priority(cfg),
+            log_callback=log,
+        )
         payload = src.read_bytes()
         local_size = len(payload)
 
@@ -377,6 +467,7 @@ def export_cpa_xai_for_account(
     prefer_protocol = _config_bool(cfg.get("cpa_prefer_protocol"), default=True)
     protocol_only = _config_bool(cfg.get("cpa_protocol_only"), default=False)
     protocol_poll_timeout = float(cfg.get("cpa_protocol_poll_timeout_sec", 90) or 90)
+    auth_priority = _config_priority(cfg)
 
     from cpa_xai.accounts import normalize_sso_cookie
 
@@ -445,6 +536,7 @@ def export_cpa_xai_for_account(
         prefer_protocol=prefer_protocol,
         protocol_only=protocol_only,
         protocol_poll_timeout_sec=protocol_poll_timeout,
+        priority=auth_priority,
         log=_log,
     )
     if result.get("mint_method"):
@@ -463,6 +555,14 @@ def export_cpa_xai_for_account(
         result["probe_warning"] = result.pop("error", "probe failed")
         log(f"[cpa] probe warning ignored (file already written): {result.get('probe_warning')}")
 
+    if result.get("ok") and result.get("path"):
+        ensure_auth_file_priority(
+            result["path"],
+            priority=auth_priority,
+            log_callback=log,
+        )
+        result["priority"] = auth_priority
+
     if result.get("ok") and result.get("path") and _config_bool(cfg.get("cpa_copy_to_hotload"), default=False) and cpa_dir:
         try:
             cpa_dir.mkdir(parents=True, exist_ok=True)
@@ -476,18 +576,43 @@ def export_cpa_xai_for_account(
             log(f"[cpa] hotload copy failed: {e}")
             result["cpa_copy_error"] = str(e)
 
-    # Optional: auto inject minted auth into remote CPA (tebi /personal/cpa/auths)
+    # Optional: auto inject minted auth into remote CPA live + inventory dirs.
     if result.get("ok") and result.get("path") and _config_bool(cfg.get("cpa_remote_inject"), default=False):
-        remote_res = inject_cpa_auth_remote(
-            result["path"],
-            config=cfg,
-            log_callback=log,
-        )
-        result["remote_inject"] = remote_res
-        if remote_res.get("ok"):
-            result["remote_path"] = remote_res.get("remote_path")
+        remote_dirs = resolve_remote_auth_dirs(cfg)
+        remote_results: list[dict] = []
+        any_ok = False
+        errors: list[str] = []
+        for rdir in remote_dirs:
+            inj_cfg = dict(cfg)
+            inj_cfg["cpa_remote_inject"] = True
+            inj_cfg["cpa_remote_auth_dir"] = rdir
+            # prevent recursive multi-expand inside single-dir injector
+            inj_cfg["cpa_remote_auth_dirs"] = [rdir]
+            remote_res = inject_cpa_auth_remote(
+                result["path"],
+                config=inj_cfg,
+                log_callback=log,
+            )
+            remote_results.append({"dir": rdir, **remote_res})
+            if remote_res.get("ok"):
+                any_ok = True
+            else:
+                errors.append(
+                    f"{rdir}:{remote_res.get('error') or remote_res.get('reason') or 'fail'}"
+                )
+        result["remote_injects"] = remote_results
+        # backward-compatible single summary (first success, else last)
+        summary = next((r for r in remote_results if r.get("ok")), remote_results[-1] if remote_results else {"ok": False, "error": "no remote dirs"})
+        result["remote_inject"] = summary
+        if any_ok:
+            ok_paths = [r.get("remote_path") for r in remote_results if r.get("ok")]
+            result["remote_path"] = ok_paths[0] if ok_paths else summary.get("remote_path")
+            result["remote_paths"] = ok_paths
+            if errors:
+                result["remote_inject_partial_errors"] = errors
+                log(f"[cpa] remote inject partial: ok={len(ok_paths)} fail={len(errors)}")
         else:
-            result["remote_inject_error"] = remote_res.get("error") or remote_res.get("reason")
+            result["remote_inject_error"] = "; ".join(errors) if errors else "remote inject failed"
             if _config_bool(cfg.get("cpa_remote_inject_required"), default=False):
                 result["ok"] = False
                 result["error"] = f"remote inject required but failed: {result['remote_inject_error']}"

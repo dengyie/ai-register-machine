@@ -246,11 +246,19 @@ cpa_proxy  >  proxy  >  环境变量 https_proxy / http_proxy
 | `cpa_probe_after_write` | `true` | 写文件后探测 `/models` 是否含 grok-4.5 |
 | `cpa_copy_to_hotload` | `false` | 是否复制到本机 CPA 热加载目录 |
 | `cpa_hotload_dir` | 空 | 本机 CPA `auth-dir` |
-| `cpa_remote_inject` | `false` | mint 后是否 SSH 注入远端（backfill 默认同样生效） |
+| `cpa_auth_priority` | `1000` | 写入 `xai-*.json` 的 CPA 路由权重（mint/写盘/注入统一） |
+| `cpa_remote_inject` | `false` | mint 后是否 SSH **一键**注入远端（注册/backfill/remint 同链路） |
 | `cpa_remote_inject_required` | `false` | 远端注入失败是否整次 export 失败 |
 | `cpa_remote_ssh_host` | 如 `tebi-tunnel` | ssh 主机别名（写在 `~/.ssh/config`） |
-| `cpa_remote_auth_dir` | 如 `/personal/cpa/auths` | 远端热加载目录 |
+| `cpa_remote_auth_dirs` | live+inventory | 多目录：`/root/.cli-proxy-api,/personal/cpa/auths`（显式设置优先生效） |
+| `cpa_remote_auth_dir` | 兼容单目录 | 仅当 **未** 开 inject 且未设 `cpa_remote_auth_dirs` 时使用 |
 | `cpa_remote_credentials_file` | `~/.ssh/bohrium_credentials` | 可选密码文件；也可用环境变量 `CPA_REMOTE_SSHPASS` / `SSHPASS` |
+
+**一键进 CPA：** 注册成功 → 协议 mint → 本地 `cpa_auths`（含 `priority`）→ 远端 **live** `/root/.cli-proxy-api` + inventory `/personal/cpa/auths`。存量续期：
+
+```bash
+uv run python -u scripts/remint_expired_and_sync_authdir.py --limit 5
+```
 
 布尔配置请写 JSON 布尔或可解析字符串（`true`/`false`/`1`/`0`）；export 路径用 `_config_bool`，字符串 `"false"` **不会**被当成开启。
 

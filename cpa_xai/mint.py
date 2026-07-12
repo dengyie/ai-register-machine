@@ -40,6 +40,7 @@ def mint_and_export(
     prefer_protocol: bool = True,
     protocol_only: bool = False,
     protocol_poll_timeout_sec: float = 90.0,
+    priority: int = 1000,
     log: LogFn | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -48,6 +49,8 @@ def mint_and_export(
     Protocol path (curl_cffi + sso cookie) is tried first when prefer_protocol
     and an sso cookie is available. On failure, falls back to browser mint unless
     protocol_only=True.
+
+    priority: CPA auth-file routing weight (CLIProxyAPI). Default 1000.
 
     Returns dict with keys: ok, path, email, probe, error?, mint_method?
     """
@@ -155,6 +158,10 @@ def mint_and_export(
                 "protocol_error": protocol_err,
             }
 
+    try:
+        pri = int(priority)
+    except Exception:
+        pri = 1000
     payload = build_cpa_xai_auth(
         email=email,
         access_token=tokens["access_token"],
@@ -162,9 +169,10 @@ def mint_and_export(
         id_token=tokens.get("id_token"),
         expires_in=tokens.get("expires_in"),
         base_url=base_url,
+        priority=pri,
     )
     path = write_cpa_xai_auth(auth_dir, payload)
-    log(f"wrote {path}")
+    log(f"wrote {path} priority={pri}")
 
     result: dict[str, Any] = {
         "ok": True,
@@ -174,6 +182,7 @@ def mint_and_export(
         "base_url": base_url,
         "proxy": proxy_log_label(resolved),
         "mint_method": tokens.get("mint_method") or "browser",
+        "priority": pri,
     }
     if protocol_err and result["mint_method"] != "protocol":
         result["protocol_error"] = protocol_err

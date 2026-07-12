@@ -89,6 +89,7 @@ def build_cpa_xai_auth(
     redirect_uri: str = DEFAULT_REDIRECT_URI,
     headers: dict[str, str] | None = None,
     disabled: bool = False,
+    priority: int = 1000,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a CPA-importable xAI OAuth auth object."""
@@ -135,6 +136,7 @@ def build_cpa_xai_auth(
         "token_endpoint": token_endpoint,
         "redirect_uri": redirect_uri,
         "disabled": bool(disabled),
+        "priority": int(priority),
         "headers": dict(headers or DEFAULT_CLIENT_HEADERS),
     }
     if id_token:
