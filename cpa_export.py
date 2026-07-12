@@ -597,7 +597,10 @@ def export_cpa_xai_for_account(
     # Default headed: headless is frequently Cloudflare-blocked on accounts.x.ai
     headless = _config_bool(cfg.get("cpa_headless"), default=False)
     probe = _config_bool(cfg.get("cpa_probe_after_write"), default=True)
-    probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=False)
+    # Product default ON: models-only is not free-Build success (chat 403 common).
+    probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=True)
+    # When chat probe runs, deny soft-pass unless explicitly disabled.
+    probe_chat_required = _config_bool(cfg.get("cpa_probe_chat_required"), default=True)
     timeout = float(cfg.get("cpa_mint_timeout_sec", 240))
     base_url = cfg.get("cpa_base_url") or "https://cli-chat-proxy.grok.com/v1"
     force_standalone = _config_bool(cfg.get("cpa_force_standalone"), default=True)
@@ -683,18 +686,84 @@ def export_cpa_xai_for_account(
     if result.get("mint_method"):
         log(f"[cpa] mint_method={result.get('mint_method')}")
 
-    # By default, a failed post-write probe is only a warning: the CPA auth file
-    # has already been minted and written. Set cpa_probe_required=true to make
-    # missing /models grok-4.5 fail the export.
+    # Models-only soft-pass (legacy): only when chat probe is off and
+    # cpa_probe_required is false. Chat entitlement failure is never soft-passed
+    # when cpa_probe_chat_required is true (default).
+    err_s = str(result.get("error") or "")
+    is_models_only_miss = err_s.startswith("token ok but grok-4.5 not listed")
+    is_chat_fail = bool(
+        result.get("entitlement_denied")
+        or result.get("fail_reason")
+        in ("entitlement_denied", "chat_failed", "auth_or_protocol", "transient")
+        or err_s.startswith("chat probe failed")
+        or err_s.startswith("chat entitlement denied")
+    )
     if (
         not result.get("ok")
         and result.get("path")
-        and str(result.get("error") or "").startswith("token ok but grok-4.5 not listed")
+        and is_models_only_miss
+        and not is_chat_fail
+        and not probe_chat
         and not _config_bool(cfg.get("cpa_probe_required"), default=False)
     ):
         result["ok"] = True
         result["probe_warning"] = result.pop("error", "probe failed")
         log(f"[cpa] probe warning ignored (file already written): {result.get('probe_warning')}")
+
+    # Chat entitlement is a hard product gate: keep ok=False, never remint-spin.
+    if (
+        not result.get("ok")
+        and is_chat_fail
+        and probe_chat
+        and probe_chat_required
+    ):
+        result["non_retryable"] = True
+        if result.get("entitlement_denied"):
+            result["fail_reason"] = result.get("fail_reason") or "entitlement_denied"
+            log(
+                f"[cpa] FAIL-FAST entitlement_denied for {email}: "
+                f"{result.get('error') or 'chat permission-denied'} "
+                "(file may exist but is not product-usable free Build)"
+            )
+        else:
+            log(
+                f"[cpa] chat probe hard-fail for {email}: "
+                f"{result.get('error') or result.get('fail_reason')}"
+            )
+
+    # Soft-pass for non-entitlement chat fail only when operator disables required.
+    # Entitlement denied always hard-fails.
+    if (
+        not result.get("ok")
+        and result.get("path")
+        and is_chat_fail
+        and probe_chat
+        and not probe_chat_required
+        and not result.get("entitlement_denied")
+    ):
+        result["ok"] = True
+        result["probe_chat_warning"] = result.pop("error", "chat probe failed")
+        result["chat_ok"] = False
+        log(
+            f"[cpa] chat probe warning ignored (cpa_probe_chat_required=false): "
+            f"{result.get('probe_chat_warning')}"
+        )
+
+    if result.get("entitlement_denied"):
+        # Never treat models-only file as product success.
+        result["ok"] = False
+        result["non_retryable"] = True
+        result["chat_ok"] = False
+        result["fail_reason"] = "entitlement_denied"
+        if not result.get("error"):
+            result["error"] = "chat entitlement denied (permission-denied)"
+
+    # Surface chat fields for CLI stats even on success.
+    if "chat_ok" not in result and probe_chat:
+        ch = result.get("probe_chat") or {}
+        if isinstance(ch, dict) and ch:
+            result["chat_ok"] = bool(ch.get("ok"))
+            result.setdefault("entitlement_denied", bool(ch.get("entitlement_denied")))
 
     if result.get("ok") and result.get("path"):
         ensure_auth_file_priority(
@@ -704,7 +773,20 @@ def export_cpa_xai_for_account(
         )
         result["priority"] = auth_priority
 
-    if result.get("ok") and result.get("path") and _config_bool(cfg.get("cpa_copy_to_hotload"), default=False) and cpa_dir:
+    # Skip remote inject when account has no free Build chat entitlement.
+    skip_inject_entitlement = bool(result.get("entitlement_denied"))
+    if skip_inject_entitlement:
+        result["remote_inject_skipped"] = True
+        result["remote_inject_skip_reason"] = "entitlement_denied"
+        log(f"[cpa] skip remote inject (entitlement_denied): {email}")
+
+    if (
+        result.get("ok")
+        and result.get("path")
+        and _config_bool(cfg.get("cpa_copy_to_hotload"), default=False)
+        and cpa_dir
+        and not skip_inject_entitlement
+    ):
         try:
             cpa_dir.mkdir(parents=True, exist_ok=True)
             src = Path(result["path"])
@@ -719,7 +801,16 @@ def export_cpa_xai_for_account(
 
     # Optional: auto inject minted auth into remote CPA live + inventory dirs.
     # One-click product gate: live dir success is required by default.
-    apply_multi_remote_inject(result, cfg, log_callback=log)
+    # Never inject dead-entitlement tokens into live pool.
+    if not skip_inject_entitlement:
+        apply_multi_remote_inject(result, cfg, log_callback=log)
+    else:
+        result["remote_live_ok"] = False
+        result["remote_inject"] = {
+            "ok": False,
+            "skipped": True,
+            "reason": "entitlement_denied",
+        }
 
     # Project-local backup of accounts + cpa auth (gitignored backups/)
     if result.get("ok") and result.get("path"):

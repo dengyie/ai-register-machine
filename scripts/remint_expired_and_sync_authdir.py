@@ -196,7 +196,10 @@ def main() -> int:
         run_cfg["cpa_prefer_protocol"] = True
         run_cfg["cpa_protocol_only"] = True
         run_cfg["cpa_probe_after_write"] = True
-        run_cfg["cpa_probe_chat"] = False
+        # Remint cannot grant free Build chat entitlement. Probe chat so we
+        # fail-fast and skip tebi inject for permission-denied accounts.
+        run_cfg["cpa_probe_chat"] = True
+        run_cfg["cpa_probe_chat_required"] = True
         # Prefer unified multi-dir inject from cpa_export (same as register one-click).
         if remote_dirs:
             run_cfg["cpa_remote_inject"] = True

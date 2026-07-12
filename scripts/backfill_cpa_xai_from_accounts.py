@@ -80,7 +80,13 @@ def main() -> int:
     )
     ap.add_argument("--probe", action="store_true", default=True)
     ap.add_argument("--no-probe", action="store_false", dest="probe")
-    ap.add_argument("--probe-chat", action="store_true", default=False)
+    ap.add_argument(
+        "--probe-chat",
+        action="store_true",
+        default=True,
+        help="Probe /v1/responses after mint (default on; product free-Build gate)",
+    )
+    ap.add_argument("--no-probe-chat", action="store_false", dest="probe_chat")
     ap.add_argument(
         "--proxy",
         default="",

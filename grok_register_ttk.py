@@ -321,6 +321,8 @@ def apply_env_config_overrides(cfg: dict | None = None) -> dict:
         ("CPA_REMOTE_INJECT_REQUIRED", "cpa_remote_inject_required", "bool"),
         ("CPA_PROTOCOL_ONLY", "cpa_protocol_only", "bool"),
         ("CPA_EXPORT_ENABLED", "cpa_export_enabled", "bool"),
+        ("CPA_PROBE_CHAT", "cpa_probe_chat", "bool"),
+        ("CPA_PROBE_CHAT_REQUIRED", "cpa_probe_chat_required", "bool"),
         ("CPA_AUTH_PRIORITY", "cpa_auth_priority", "int"),
     ):
         raw = (os.environ.get(env_key) or "").strip()

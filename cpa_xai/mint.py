@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from .accounts import normalize_sso_cookie
 from .browser_confirm import mint_with_browser
-from .probe import probe_mini_response, probe_models
+from .probe import classify_chat_probe, probe_mini_response, probe_models
 from .protocol_mint import ProtocolMintError, extract_sso_from_cookies, mint_with_sso_protocol
 from .proxyutil import proxy_log_label, resolve_proxy, set_runtime_proxy
 from .schema import DEFAULT_BASE_URL, build_cpa_xai_auth
@@ -30,7 +30,7 @@ def mint_and_export(
     headless: bool = False,
     base_url: str = DEFAULT_BASE_URL,
     probe: bool = True,
-    probe_chat: bool = False,
+    probe_chat: bool = True,
     browser_timeout_sec: float = 240.0,
     force_standalone: bool = True,
     cookies: Any | None = None,
@@ -52,7 +52,12 @@ def mint_and_export(
 
     priority: CPA auth-file routing weight (CLIProxyAPI). Default 1000.
 
-    Returns dict with keys: ok, path, email, probe, error?, mint_method?
+    Returns dict with keys: ok, path, email, probe_*, error?, mint_method?,
+    entitlement_denied?, chat_retryable?, chat_ok?.
+
+    Product rule: when probe_chat=True, models-only success is not enough —
+    free Build chat must pass /v1/responses. 403 permission-denied is
+    non-retryable entitlement failure (do not remint-spin).
     """
     log = log or _noop
     email = (email or "").strip()
@@ -187,7 +192,9 @@ def mint_and_export(
     if protocol_err and result["mint_method"] != "protocol":
         result["protocol_error"] = protocol_err
 
-    if probe:
+    # Chat gate implies models probe (need has_grok_45 before /responses).
+    run_models = bool(probe or probe_chat)
+    if run_models:
         pr = probe_models(tokens["access_token"], base_url=base_url, proxy=resolved or None)
         result["probe_models"] = pr
         log(
@@ -198,13 +205,58 @@ def mint_and_export(
         if not pr.get("has_grok_45"):
             result["ok"] = False
             result["error"] = "token ok but grok-4.5 not listed"
+            result["chat_ok"] = False
+            if probe_chat:
+                # Models-only is not product success when chat is required.
+                result["entitlement_denied"] = False
+                result["chat_retryable"] = bool(pr.get("status") in (0, 408, 429, 500, 502, 503, 504))
+
         if probe_chat and pr.get("has_grok_45"):
             ch = probe_mini_response(
                 tokens["access_token"], base_url=base_url, proxy=resolved or None
             )
+            # Ensure classification fields even if older probe path
+            cls = classify_chat_probe(ch)
+            for k, v in cls.items():
+                ch.setdefault(k, v)
             result["probe_chat"] = ch
-            log(f"probe chat: ok={ch.get('ok')} model={ch.get('model')} text={ch.get('text')!r}")
+            result["chat_ok"] = bool(ch.get("ok"))
+            result["entitlement_denied"] = bool(ch.get("entitlement_denied"))
+            result["chat_retryable"] = bool(ch.get("retryable"))
+            result["chat_error_code"] = ch.get("error_code") or ""
+            log(
+                f"probe chat: ok={ch.get('ok')} status={ch.get('status')} "
+                f"entitlement_denied={ch.get('entitlement_denied')} "
+                f"retryable={ch.get('retryable')} code={ch.get('error_code')!r} "
+                f"model={ch.get('model')} text={ch.get('text')!r}"
+            )
             if not ch.get("ok"):
                 result["ok"] = False
-                result["error"] = f"chat probe failed: {ch.get('error') or ch.get('status')}"
+                if ch.get("entitlement_denied"):
+                    result["error"] = (
+                        "chat entitlement denied (permission-denied): "
+                        "account has no free Build chat grant; do not remint"
+                    )
+                    result["non_retryable"] = True
+                    result["fail_reason"] = "entitlement_denied"
+                    log(
+                        "FAIL-FAST: chat entitlement_denied — skip remint/retry for this account"
+                    )
+                else:
+                    result["error"] = (
+                        f"chat probe failed: status={ch.get('status')} "
+                        f"code={ch.get('error_code') or ''} "
+                        f"{(ch.get('error') or '')[:200]}"
+                    )
+                    result["non_retryable"] = not bool(ch.get("retryable"))
+                    result["fail_reason"] = str(ch.get("reason") or "chat_failed")
+        elif probe_chat and not pr.get("has_grok_45"):
+            result["chat_ok"] = False
+            result["fail_reason"] = "models_missing_grok_45"
+    elif probe_chat:
+        # Defensive: probe_chat without models path should not silent-pass.
+        result["ok"] = False
+        result["chat_ok"] = False
+        result["error"] = "probe_chat requested but models probe skipped"
+        result["non_retryable"] = False
     return result

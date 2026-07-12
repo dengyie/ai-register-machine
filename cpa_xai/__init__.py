@@ -13,7 +13,7 @@ from .accounts import (
     parse_accounts_file,
 )
 from .mint import mint_and_export
-from .probe import probe_mini_response, probe_models
+from .probe import classify_chat_probe, probe_mini_response, probe_models
 from .protocol_mint import (
     ProtocolMintError,
     extract_sso_from_cookies,
@@ -47,6 +47,7 @@ __all__ = [
     "OAUTH_CLIENT_ID",
     "ProtocolMintError",
     "build_cpa_xai_auth",
+    "classify_chat_probe",
     "credential_file_name",
     "email_in_existing",
     "email_match_keys",

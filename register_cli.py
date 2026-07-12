@@ -136,6 +136,9 @@ _stats = {
     "mint_success": 0,
     "mint_fail": 0,
     "mint_skip": 0,
+    "chat_ok": 0,
+    "chat_denied": 0,
+    "chat_fail": 0,
     "remote_inject_ok": 0,
     "remote_inject_fail": 0,
     "remote_inject_skip": 0,
@@ -633,6 +636,18 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
             config=config,
             log_callback=lambda m: log(worker_id, m),
         )
+        # Chat entitlement stats (product: models-only is not free Build success).
+        if result.get("entitlement_denied"):
+            _inc("chat_denied")
+        elif result.get("chat_ok") is True:
+            _inc("chat_ok")
+        elif result.get("chat_ok") is False or (
+            isinstance(result.get("probe_chat"), dict)
+            and result.get("probe_chat")
+            and not result["probe_chat"].get("ok")
+        ):
+            _inc("chat_fail")
+
         if result.get("ok"):
             log(worker_id, f"+ CPA auth: {result.get('path')}")
             _inc("mint_success")
@@ -643,6 +658,8 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
                 _inc("remote_live_ok")
             elif live_ok is False:
                 _inc("remote_live_fail")
+            if result.get("remote_inject_skipped") or remote.get("skipped"):
+                _inc("remote_inject_skip")
             if isinstance(multi, list) and multi:
                 ok_n = sum(1 for r in multi if r.get("ok"))
                 fail_n = sum(1 for r in multi if not r.get("ok") and not r.get("skipped"))
@@ -700,8 +717,17 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
             log(worker_id, f"[cpa] skipped: {result.get('reason')}")
         else:
             _inc("mint_fail")
-            log(worker_id, f"! CPA auth 未成功: {result.get('error') or result}")
-            if result.get("remote_inject_error"):
+            if result.get("entitlement_denied"):
+                log(
+                    worker_id,
+                    f"! CPA chat entitlement_denied（不可重试/勿 remint）: "
+                    f"{result.get('error') or result}",
+                )
+            else:
+                log(worker_id, f"! CPA auth 未成功: {result.get('error') or result}")
+            if result.get("remote_inject_skipped"):
+                _inc("remote_inject_skip")
+            elif result.get("remote_inject_error"):
                 _inc("remote_inject_fail")
         return result
     except Exception as exc:
@@ -1066,6 +1092,8 @@ def main() -> int:
         f"=== 完成: 注册成功 {s.get('reg_success', 0)}, 注册失败 {s.get('reg_fail', 0)}, "
         f"CPA成功 {s.get('mint_success', 0)}, CPA失败 {s.get('mint_fail', 0)}, "
         f"CPA跳过 {s.get('mint_skip', 0)}, "
+        f"chat可用 {s.get('chat_ok', 0)}, chat无权限 {s.get('chat_denied', 0)}, "
+        f"chat其它失败 {s.get('chat_fail', 0)}, "
         f"tebi注入成功 {s.get('remote_inject_ok', 0)}, tebi注入失败 {s.get('remote_inject_fail', 0)}, "
         f"tebi注入跳过 {s.get('remote_inject_skip', 0)}, "
         f"live成功 {s.get('remote_live_ok', 0)}, live失败 {s.get('remote_live_fail', 0)} ===",
