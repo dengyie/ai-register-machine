@@ -5,15 +5,25 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-07-13
+
+### Added
+
+- Outsider-friendly packaging: `config.simple.example.json` + `scripts/setup_simple.sh`
+- README **5 分钟快速开始** (simple local path; tebi inject off by default)
+- Product success table: chat probe required; `entitlement_denied` ≠ remint
+
 ## [1.2.0] - 2026-07-13
 
 ### Added
 
 - One-click CPA chain: `cpa_auth_priority` end-to-end, multi remote auth-dirs (live + inventory)
 - `cpa_remote_live_dir` / `cpa_remote_live_required` — **live inject is the product success gate**
+- Free Build **chat entitlement gate**: default-on `/v1/responses` probe; 403 → `entitlement_denied`, skip live inject, remint ledger skip
+- Transient chat probe retries + `chat_retryable` auth stamps; `entitlement_denied.jsonl`
 - Auth proxy bridge for Chromium `user:pass` proxies; browser recycle modes; account slot retry
 - `scripts/remint_expired_and_sync_authdir.py` for inventory remint without starting registration
-- Offline tests for one-click dirs/priority and live-gate partial inject semantics
+- Offline tests for one-click dirs/priority, live-gate, and chat entitlement
 
 ### Fixed
 
@@ -21,6 +31,7 @@ project versioning follows [Semantic Versioning](https://semver.org/).
 - Mint browser no longer double-applies `--proxy-server`
 - Proxy bridge failure hard-fails (no silent direct)
 - Inventory-only remote inject no longer counts as one-click success when live was targeted
+- Models-only 200 no longer counts as usable free Build when chat probe is on
 - CI `py_compile` covers `proxy_bridge.py` and remint script
 
 ### Security

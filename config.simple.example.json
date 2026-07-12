@@ -1,0 +1,40 @@
+{
+  "//_readme": "对外简易模板：复制为 config.json 即可跑本地一键链路。以 // 开头的键是注释，加载时忽略。",
+  "//_vs_full": "完整字段见 config.example.json。本文件默认关闭远端 tebi 注入，只写本地 cpa_auths/。",
+
+  "// email_provider": "hotmail | outlookmail | duckmail | cloudmail | cloudflare | yyds。微软邮箱填 mail_credentials.txt。",
+  "email_provider": "hotmail",
+  "hotmail_accounts_file": "mail_credentials.txt",
+  "hotmail_alias_mode": "random",
+  "hotmail_max_aliases_per_account": 50,
+  "hotmail_mail_fetch_modes": "rest,imap",
+  "hotmail_recent_seconds": 900,
+
+  "// proxy": "注册浏览器 + 邮箱 HTTP。访问 xAI 通常需要本地代理。",
+  "proxy": "http://127.0.0.1:7890",
+  "browser_headless": false,
+  "browser_recycle_mode": "soft",
+  "account_slot_retry": 1,
+  "register_count": 1,
+  "enable_nsfw": false,
+
+  "// ===== 本地 CPA（默认开）=====": "",
+  "cpa_export_enabled": true,
+  "cpa_auth_dir": "./cpa_auths",
+  "cpa_base_url": "https://cli-chat-proxy.grok.com/v1",
+  "// cpa_proxy": "空=跟 proxy；可单独指定 mint/probe 代理。",
+  "cpa_proxy": "",
+  "cpa_prefer_protocol": true,
+  "cpa_protocol_only": false,
+  "cpa_probe_after_write": true,
+  "cpa_probe_chat": true,
+  "cpa_probe_chat_required": true,
+  "cpa_auth_priority": 1000,
+  "cpa_mint_workers": 1,
+
+  "// ===== 远端 tebi / live 注入（简易模式默认关）=====": "",
+  "cpa_remote_inject": false,
+  "cpa_copy_to_hotload": false,
+  "grok2api_auto_add_local": false,
+  "grok2api_auto_add_remote": false
+}

@@ -1,25 +1,20 @@
 # Grok 注册机
 
-基于 **Chromium + DrissionPage + turnstilePatch** 的免费 **Grok 账号自动注册机**。
+基于 **Chromium + DrissionPage + turnstilePatch** 的 Grok 账号自动注册机：  
+**注册 → SSO 账本 → CPA OIDC mint → chat 可用性探针**（可选推远端 live 池）。
 
-一条成功链路会完成：
-
-1. 自动注册 Grok / xAI 账号（邮箱验证码）
-2. 落盘账本 `email----password----sso`
-3. **协议优先**铸造 CPA / Grok Build 用的 OIDC 凭证（`cpa_auths/xai-*.json`）
-4. 可选：推送远端 CPA 热加载目录、本地 `backups/` 快照
-
-> **安全提示：** 不要把 `config.json`、`mail_credentials.txt`、`accounts_*.txt`、`cpa_auths/*.json`、`backups/`、`.env`、`logs/`、`screenshots/` 提交进 Git。仓库已默认 gitignore 这些路径；请只用 `*.example*` 模板。
-
-> **合规提示：** 自动化注册 / 收码 / 铸 token 可能违反第三方服务条款。请先阅读 [DISCLAIMER.md](DISCLAIMER.md) 与 [SECURITY.md](SECURITY.md)。本项目按 **MIT** 许可提供，**不附带任何担保**。
+> **安全提示：** 不要提交 `config.json`、`mail_credentials.txt`、`accounts_*.txt`、`cpa_auths/*.json`、`backups/`、`.env`、`logs/`、`screenshots/`。仓库已 gitignore；只用 `*.example*` 模板。  
+> **合规提示：** 可能违反第三方服务条款。见 [DISCLAIMER.md](DISCLAIMER.md) / [SECURITY.md](SECURITY.md)。**MIT，无担保。**
 
 | 文档 | 说明 |
 |------|------|
-| [DISCLAIMER.md](DISCLAIMER.md) | 免责声明与使用边界 |
-| [SECURITY.md](SECURITY.md) | 密钥范围、泄露处理、漏洞反馈 |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR 约定 |
-| [CHANGELOG.md](CHANGELOG.md) | 版本变更（当前 **v1.1.3**） |
+| [DISCLAIMER.md](DISCLAIMER.md) | 免责声明 |
+| [SECURITY.md](SECURITY.md) | 密钥与泄露处理 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR |
+| [CHANGELOG.md](CHANGELOG.md) | 版本（当前 **v1.2.1**） |
 | [LICENSE](LICENSE) | MIT |
+| `config.simple.example.json` | **对外简易配置**（推荐新人） |
+| `config.example.json` | 全量字段 + 注释 |
 
 ---
 
@@ -31,7 +26,7 @@
 | Hotmail / Outlook 收码 | 四段凭证 + plus alias；优先 Office REST，失败回退 XOAUTH2 IMAP |
 | 其他邮箱通道 | CloudMail / Cloudflare Worker / DuckMail 等（见配置） |
 | CPA OIDC 铸造 | SSO cookie → 纯 HTTP Device Flow（`curl_cffi`）；失败再回退有头浏览器 consent |
-| 免费 Grok 4.5 | 产出 `type=xai` 认证文件，对接 `cli-chat-proxy` / CLIProxyAPI |
+| 免费 Grok 4.5 门禁 | 产出 `type=xai` 文件，并默认探针 `/v1/responses`；**403 不算可用** |
 | 远端注入（可选） | mint 成功后 SSH 写入远端 CPA `auth-dir` |
 | 本地备份 | 成功后刷新 `backups/latest`，可打时间戳快照 |
 | 存量回填 | 已有账本 SSO 时走与注册相同的 `cpa_export` 管线（含可选远端注入） |
@@ -107,54 +102,86 @@ OIDC 相关代码自包含在 `cpa_xai/`：
 
 | 依赖 | 说明 |
 |------|------|
-| macOS / Linux | 注册与浏览器回退建议有桌面会话；纯协议 mint 可不弹窗 |
+| macOS / Linux | 注册建议有桌面会话（有头浏览器过 Turnstile） |
 | Python **3.13** | 见 `pyproject.toml` / `uv.lock` |
-| [uv](https://github.com/astral-sh/uv) | 推荐包管理；可选 `mise` |
-| Chromium / Chrome | 注册 + 协议失败回退时需要 |
-| 代理 | 访问 xAI / accounts.x.ai 通常需要，如 `http://127.0.0.1:7890` |
-| 可选 | grok2api、CLIProxyAPI(CPA)、`sshpass`（远端注入） |
+| [uv](https://docs.astral.sh/uv/) | 包管理（推荐） |
+| Chromium / Chrome | 注册必需 |
+| 本地代理 | 访问 xAI 通常需要，如 `http://127.0.0.1:7890` |
+| 收码邮箱 | Hotmail 四段凭证，或 DuckMail / CloudMail 等 |
+
+---
+
+## 5 分钟快速开始（对外简易模式）
+
+目标：**本地**跑通「注册 1 个号 → 写出 CPA → chat 探针」，**不**连远端 tebi。
 
 ```bash
 git clone https://github.com/dengyie/grok-register.git
 cd grok-register
-uv sync --extra dev
-uv run python -c "from DrissionPage import Chromium; from curl_cffi import requests; print('OK')"
-uv run python -m pytest -q
-```
 
-或用 mise：
+# 一键生成 config.json + mail_credentials.txt 并 uv sync
+bash scripts/setup_simple.sh
 
-```bash
-mise install
-mise run deps
-```
+# 1) 改代理
+#    config.json → "proxy": "http://127.0.0.1:你的端口"
 
----
+# 2) 填邮箱（email_provider=hotmail 时）
+#    mail_credentials.txt 每行：
+#    邮箱----密码----ClientID----Microsoft_refresh_token
 
-## 快速开始
-
-```bash
-cd grok-register
-uv sync
-
-# 1) 配置
-cp config.example.json config.json
-cp mail_credentials.example.txt mail_credentials.txt
-# 编辑 config.json：email_provider、proxy、cpa_*
-# 若用 Hotmail：填 mail_credentials.txt 四段凭证
-
-# 2) 再注册 1 个号（推荐有头浏览器）
+# 3) 注册 1 个号（有头浏览器更稳）
 uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
 
-# 3) 查看产物
+# 4) 看产物
 ls accounts_cli.txt cpa_auths/
+```
+
+等价手动配置：
+
+```bash
+uv sync
+cp config.simple.example.json config.json
+cp mail_credentials.example.txt mail_credentials.txt
+# 编辑后同上 register_cli 命令
 ```
 
 GUI：
 
 ```bash
 uv run python grok_register_ttk.py
-# 或 mise run gui
+```
+
+### 什么叫「成功」
+
+| 结果 | 含义 | 你该做什么 |
+|------|------|------------|
+| `CPA成功` 且统计里有 **chat可用** | models 含 grok-4.5 **且** `/v1/responses` 通过 | 可用 free Build / 可注入 CPA |
+| `chat无权限` / `entitlement_denied` | models 可能 200，但 chat **403** | **不要 remint**；换获权渠道或付费 API |
+| 只有 `accounts_cli.txt` 有 SSO | 注册成功，OIDC/chat 未过 | SSO 可给 grok2api；**≠** free Build |
+
+默认配置（简易模板）：
+
+- `cpa_probe_chat=true` — mint 后打最小 chat  
+- `cpa_remote_inject=false` — **不**自动推远端  
+- 无权限号写入 `cpa_auths/entitlement_denied.jsonl`，remint 会跳过  
+
+> **重要：** 本工具不能「生成」xAI free Build 权限。权限由 xAI 服务端在注册/邀请窗口授予；脚本只负责检测并 fail-fast。
+
+### 生产模式（可选）
+
+需要一键注入 tebi live 池时：
+
+```bash
+cp config.example.json config.json
+# 打开：cpa_remote_inject=true、SSH/host、cpa_remote_auth_dirs
+# 详见下文「远端注入」与 config.example.json 注释
+```
+
+开发自检：
+
+```bash
+uv sync --extra dev
+uv run python -m pytest -q
 ```
 
 ---
