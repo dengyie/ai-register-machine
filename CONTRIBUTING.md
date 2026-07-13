@@ -13,12 +13,16 @@ Thanks for considering a contribution.
 ```bash
 git clone https://github.com/dengyie/grok-register.git
 cd grok-register
+# outsider path
+bash scripts/setup_simple.sh
+# or full template
 uv sync --extra dev
 cp config.example.json config.json
 # optional: mail_credentials for live mail tests only
+bash scripts/doctor_secrets.sh   # hygiene; never prints secret contents
 ```
 
-Python **3.13** is required (`requires-python` in `pyproject.toml`).
+Python **3.13** is required (`requires-python` in `pyproject.toml`). Install via [uv](https://docs.astral.sh/uv/): `uv python install 3.13`.
 
 ## Tests
 
@@ -26,12 +30,8 @@ Offline (default, used by CI):
 
 ```bash
 uv run python -m pytest -q
-# or without pytest:
-uv run python test_account_backup.py
-uv run python test_cpa_remote_inject.py
-uv run python test_fail_policy.py
-uv run python test_hotmail_rest_code.py
-uv run python test_sso_normalize.py
+bash -n scripts/setup_simple.sh scripts/doctor_secrets.sh
+bash scripts/doctor_secrets.sh || test $? -eq 2
 ```
 
 Live Hotmail REST (needs real `mail_credentials.txt`, **not** for CI):
@@ -40,7 +40,7 @@ Live Hotmail REST (needs real `mail_credentials.txt`, **not** for CI):
 GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 ```
 
-Syntax check (CI also compiles `grok_register_ttk.py`):
+Syntax check (CI also compiles `grok_register_ttk.py` and scripts):
 
 ```bash
 uv run python -m py_compile register_cli.py grok_register_ttk.py cpa_export.py account_backup.py cpa_xai/*.py
@@ -48,13 +48,14 @@ uv run python -m py_compile register_cli.py grok_register_ttk.py cpa_export.py a
 
 ## Coding guidelines
 
-- Match existing style; avoid drive-by refactors in `grok_register_ttk.py`
+- Match existing style; **avoid drive-by refactors in `grok_register_ttk.py`** (~5k lines). Prefer extract-with-tests if you must split; do not “clean up while here.”
 - Keep changes scoped to the bug/feature
-- Add or extend offline tests when fixing logic
+- Add or extend offline tests when fixing logic (prefer behavior tests over source-string contracts when practical)
 - Never log raw passwords, refresh tokens, or access tokens
-- Document user-facing config keys in `config.example.json` comment keys
+- Document user-facing config keys in `config.example.json` / `config.simple.example.json` comment keys
 - **SSO handling:** only use `cpa_xai.accounts.normalize_sso_cookie` / `format_account_line`. Do not invent a second strip rule. Normalize must stay at mint core + ledger write (CLI/GUI).
 - **CPA export path:** production register and default backfill go through `cpa_export.export_cpa_xai_for_account` so remote inject / backup hooks stay consistent. Do not reintroduce “mint only” as the default backfill path.
+- **Chat gate:** free Build product success requires chat probe when enabled; `entitlement_denied` must not soft-pass or remint-spin.
 - **Config booleans:** use `_config_bool` (or equivalent) so string `"false"` is false.
 
 ## Pull requests

@@ -40,24 +40,40 @@ def test_simple_config_template() -> None:
 
 def test_setup_script_syntax_and_readme() -> None:
     setup = ROOT / "scripts" / "setup_simple.sh"
+    doctor = ROOT / "scripts" / "doctor_secrets.sh"
     assert setup.is_file()
+    assert doctor.is_file()
     mode = setup.stat().st_mode
     assert mode & stat.S_IXUSR, "setup_simple.sh must be executable"
+    assert doctor.stat().st_mode & stat.S_IXUSR, "doctor_secrets.sh must be executable"
     src = setup.read_text(encoding="utf-8")
     assert "config.simple.example.json" in src
     assert "register_cli.py" in src
     assert "doctor" in src
     assert "placeholder" in src or "duckmail_api_key" in src
+    dsrc = doctor.read_text(encoding="utf-8")
+    assert "git ls-files" in dsrc
+    assert "never" in dsrc.lower() or "no content" in dsrc.lower() or "paths only" in dsrc.lower()
+    # must not cat secrets
+    assert "cat mail_credentials" not in dsrc
+    assert "cat config.json" not in dsrc
     # bash -n
     subprocess.run(["bash", "-n", str(setup)], check=True)
+    subprocess.run(["bash", "-n", str(doctor)], check=True)
+    # doctor runs offline against this repo (may exit 2 on mode warnings)
+    r = subprocess.run(["bash", str(doctor)], cwd=ROOT, capture_output=True, text=True)
+    assert r.returncode in (0, 2), r.stdout + r.stderr
+    assert "tracked" in (r.stdout + r.stderr).lower() or "[ok]" in (r.stdout + r.stderr)
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "最短路径" in readme or "快速开始" in readme
     assert "config.simple.example.json" in readme
     assert "entitlement_denied" in readme
     assert "setup_simple.sh" in readme
+    assert "doctor_secrets.sh" in readme
     assert "duckmail" in readme.lower()
+    assert "Education / personal automation" in readme or "not a free-quota farm" in readme.lower()
     assert "常见卡点" in readme or "Typical blockers" in readme or "卡点" in readme
-    print("PASS setup script + readme")
+    print("PASS setup script + doctor + readme")
 
 
 def test_gitignore_keeps_examples() -> None:

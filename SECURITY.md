@@ -20,7 +20,17 @@ Never commit or publish:
 | `backups/` | full credential snapshots |
 | `logs/` / `screenshots/` / `cookies/` | may embed PII or tokens |
 
-Templates are safe to share: `config.example.json`, `mail_credentials.example.txt`, `.env.example`.
+Templates are safe to share: `config.example.json`, `config.simple.example.json`, `mail_credentials.example.txt`, `.env.example`.
+
+## Local hygiene (operators)
+
+Runtime trees often hold **thousands** of tokens. Treat the working directory as a secrets vault:
+
+1. Prefer full-disk encryption; avoid putting this repo under iCloud/Dropbox/OneDrive sync of `mail_credentials.txt` / `cpa_auths/` / `backups/`.
+2. Restrict permissions: `chmod 600 config.json .env mail_credentials.txt accounts_cli.txt` when present.
+3. Before every commit: `bash scripts/doctor_secrets.sh` (prints **paths/modes only**, never file contents). Exit `1` = tracked/staged secrets; `2` = warnings (e.g. loose mode).
+4. Never `git add -f` gitignored credential paths. CI also refuses known secret paths on `main`.
+5. If leaked: rotate Microsoft refresh tokens, xAI/SSO sessions, CPA OIDC tokens, and any SSH passwords in inject credentials; invalidate remote live copies.
 
 ## Reporting a vulnerability
 

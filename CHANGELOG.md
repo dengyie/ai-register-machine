@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.3] - 2026-07-13
+
+### Added
+
+- `scripts/doctor_secrets.sh` — local secret hygiene (tracked paths, modes, cloud-sync path warn; never prints contents)
+- CI: `bash -n` on setup/doctor scripts; py_compile quality scripts; run doctor_secrets in guard step
+- README education banner + local secret hygiene; CONTRIBUTING ttk refactor caution + chat-gate rule
+
+### Changed
+
+- Package description emphasizes OIDC + chat gate (not Hotmail-only / not a quota farm)
+
 ## [1.2.2] - 2026-07-13
 
 ### Fixed

@@ -261,5 +261,8 @@ Next (after fixing any [warn] above):
 
 Typical blockers: proxy down · Turnstile · duckmail key · hotmail placeholder · chat 403 (no entitlement)
 
+Secret hygiene (paths/modes only, never prints tokens):
+  bash scripts/doctor_secrets.sh
+
 Docs: README.md  |  Full config: config.example.json  |  Production: cpa_remote_inject
 EOF

@@ -27,6 +27,11 @@ jobs:
       - name: Sync dependencies
         run: uv sync --extra dev
 
+      - name: Shell syntax (setup/doctor)
+        run: |
+          bash -n scripts/setup_simple.sh
+          bash -n scripts/doctor_secrets.sh
+
       - name: Syntax check
         run: |
           uv run python -m py_compile \
@@ -51,7 +56,9 @@ jobs:
             scripts/backfill_cpa_xai_from_accounts.py \
             scripts/backup_registered_accounts.py \
             scripts/export_cpa_xai_from_grok_auth.py \
-            scripts/remint_expired_and_sync_authdir.py
+            scripts/remint_expired_and_sync_authdir.py \
+            scripts/quality_milestone_watch.py \
+            scripts/quality_sample_accounts.py
 
       - name: Offline unit tests
         env:
@@ -68,3 +75,4 @@ jobs:
             exit 1
           fi
           echo "OK: no secret runtime paths tracked"
+          bash scripts/doctor_secrets.sh || test $? -eq 2

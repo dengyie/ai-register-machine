@@ -1,7 +1,7 @@
 [project]
 name = "grok-register"
-version = "1.2.2"
-description = "Grok 注册机：Chromium 自动注册 + Hotmail 收码 + 协议优先 CPA/OIDC 铸造"
+version = "1.2.3"
+description = "Grok register: signup + CPA OIDC mint + free Build chat entitlement gate (not a quota farm)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.13,<3.14"

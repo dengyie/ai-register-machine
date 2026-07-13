@@ -3,6 +3,8 @@
 基于 **Chromium + DrissionPage + turnstilePatch** 的 Grok 账号自动注册机：  
 **注册 → SSO 账本 → CPA OIDC mint → chat 可用性探针**（可选推远端 live 池）。
 
+> **Education / personal automation only.** Not a free-quota farm, not for mass account creation, spam, resale, or bypassing paid limits. This tool **detects** free Build chat entitlement — it does **not** grant it. See [DISCLAIMER.md](DISCLAIMER.md).
+
 > **安全提示：** 不要提交 `config.json`、`mail_credentials.txt`、`accounts_*.txt`、`cpa_auths/*.json`、`backups/`、`.env`、`logs/`、`screenshots/`。仓库已 gitignore；只用 `*.example*` 模板。  
 > **合规提示：** 可能违反第三方服务条款。见 [DISCLAIMER.md](DISCLAIMER.md) / [SECURITY.md](SECURITY.md)。**MIT，无担保。**
 
@@ -11,10 +13,12 @@
 | [DISCLAIMER.md](DISCLAIMER.md) | 免责声明 |
 | [SECURITY.md](SECURITY.md) | 密钥与泄露处理 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR |
-| [CHANGELOG.md](CHANGELOG.md) | 版本（当前 **v1.2.2**） |
+| [CHANGELOG.md](CHANGELOG.md) | 版本（当前 **v1.2.3**） |
 | [LICENSE](LICENSE) | MIT |
 | `config.simple.example.json` | **对外简易配置**（推荐新人） |
 | `config.example.json` | 全量字段 + 注释 |
+| `scripts/setup_simple.sh` | 一键配置 + 环境 doctor |
+| `scripts/doctor_secrets.sh` | 本地密钥/跟踪卫生检查（不打印内容） |
 
 ## 如何使用（TL;DR）
 
@@ -35,7 +39,12 @@ uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
 # 4) 看结果
 ls accounts_cli.txt cpa_auths/
 # 统计里「chat可用」= free Build 真可用；entitlement_denied / chat 403 = 无权限，勿 remint
+
+# 5) 可选：本地密钥卫生（不打印文件内容）
+bash scripts/doctor_secrets.sh
 ```
+
+**Python：** 需要 **3.13**（`pyproject.toml` → `requires-python`）。请用 [uv](https://docs.astral.sh/uv/)：`uv python install 3.13 && uv sync`。系统自带 3.11/3.12 不够。
 
 | 你想… | 看哪里 |
 |--------|--------|
@@ -563,10 +572,14 @@ grok-register/
     browser_confirm.py            # 浏览器 consent
     oauth_device.py / schema.py / writer.py / probe.py ...
   scripts/
+    setup_simple.sh               # 一键配置 + 环境 doctor
+    doctor_secrets.sh             # 密钥/跟踪卫生（不打印内容）
     backfill_cpa_xai_from_accounts.py
     backup_registered_accounts.py
     export_cpa_xai_from_grok_auth.py
+    remint_expired_and_sync_authdir.py
   config.example.json             # 配置模板（含注释键）
+  config.simple.example.json      # 对外简易模板
   mail_credentials.example.txt
   .env.example
   turnstilePatch/                 # Cloudflare Turnstile 辅助扩展
@@ -590,6 +603,8 @@ grok-register/
 ```bash
 uv sync --extra dev
 uv run python -m pytest -q          # 离线单测（CI 同款）
+bash -n scripts/setup_simple.sh scripts/doctor_secrets.sh
+bash scripts/doctor_secrets.sh      # exit 0 clean / 2 warn / 1 tracked secret
 mise run test                       # 若使用 mise
 mise run check                      # py_compile
 ```
@@ -600,15 +615,20 @@ Live Hotmail REST（**不要**在 CI 开）：
 GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 ```
 
-贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub Actions 在 `main` 上跑语法检查 + 离线 pytest + 密钥路径守卫。
+贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub Actions 在 `main` 上跑 shell 语法 + py_compile + 离线 pytest + 密钥路径守卫。
 
 ---
 
 ## 安全与合规
 
 - **切勿提交密钥：** `config.json`、邮箱 refresh_token、账本密码/SSO、`cpa_auths` 的 access/refresh token
-- 本地文件建议权限 `600`
+- **本地密钥卫生：**
+  - `chmod 600 config.json .env mail_credentials.txt accounts_cli.txt`（若存在）
+  - 不要把含 `cpa_auths/` / `mail_credentials.txt` 的目录放进 iCloud/Dropbox 明文同步
+  - 提交前：`bash scripts/doctor_secrets.sh`（**不**打印文件内容）
+  - 泄露后立刻轮换 Microsoft refresh_token、xAI/SSO、SSH 密码；见 [SECURITY.md](SECURITY.md)
 - 分享本项目时只分享代码仓库或去掉运行时目录的干净拷贝
+- 本工具**不能**生成 free Build 权限；`entitlement_denied` 时不要 remint 空转
 - 免费 Build 有额度与风控；批量注册 / mint 请控速，合理使用
 - 完整边界见 [DISCLAIMER.md](DISCLAIMER.md)；泄露处理见 [SECURITY.md](SECURITY.md)
 
