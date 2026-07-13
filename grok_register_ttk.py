@@ -68,6 +68,16 @@ DEFAULT_CONFIG = {
     "hotmail_imap_last_n": 30,
     "hotmail_require_recipient_match": True,
     "hotmail_manual_code": False,
+    # Gmail app-password IMAP (CF Email Routing catch-all → Gmail)
+    "gmail_imap_user": "",
+    "gmail_imap_password": "",
+    "gmail_imap_host": "imap.gmail.com",
+    "gmail_imap_port": 993,
+    "gmail_imap_folder": "INBOX",
+    "gmail_poll_interval": 2,
+    "gmail_recent_seconds": 900,
+    "gmail_imap_last_n": 30,
+    "gmail_require_recipient_match": True,
     # browser recycle: soft=clear_session; hard=always quit; hybrid=soft then periodic hard
     "browser_recycle_mode": "soft",
     "browser_recycle_every": 25,
@@ -113,6 +123,10 @@ def mark_used(email: str, password: str = ""):
         _hotmail_release_alias(email)
     except Exception:
         pass
+    try:
+        _gmail_release_email(email)
+    except Exception:
+        pass
 
 
 def mark_error(email: str, password: str = "", reason: str = ""):
@@ -122,6 +136,10 @@ def mark_error(email: str, password: str = "", reason: str = ""):
             f.write(f"{email}----{password}----{reason}\n")
     try:
         _hotmail_release_alias(email)
+    except Exception:
+        pass
+    try:
+        _gmail_release_email(email)
     except Exception:
         pass
 
@@ -289,10 +307,18 @@ def load_env():
 
 
 # Env → config key overlays (process env / .env win over config.json when set).
-# Never put mailbox passwords or MS refresh tokens in .env — use HOTMAIL_ACCOUNTS_FILE.
+# Hotmail MS refresh tokens stay in HOTMAIL_ACCOUNTS_FILE (not .env).
+# Gmail app password may live in GMAIL_IMAP_PASSWORD (.env only; never commit).
 _ENV_CONFIG_OVERLAYS = (
     ("HOTMAIL_ACCOUNTS_FILE", "hotmail_accounts_file"),
     ("EMAIL_PROVIDER", "email_provider"),
+    ("GMAIL_IMAP_USER", "gmail_imap_user"),
+    ("GMAIL_IMAP_PASSWORD", "gmail_imap_password"),
+    ("GMAIL_APP_PASSWORD", "gmail_imap_password"),
+    ("GMAIL_IMAP_HOST", "gmail_imap_host"),
+    ("GMAIL_IMAP_PORT", "gmail_imap_port"),
+    ("GMAIL_IMAP_FOLDER", "gmail_imap_folder"),
+    ("DEFAULT_DOMAINS", "defaultDomains"),
     ("CPA_REMOTE_SSH_HOST", "cpa_remote_ssh_host"),
     ("CPA_REMOTE_SSH_USER", "cpa_remote_ssh_user"),
     ("CPA_REMOTE_AUTH_DIRS", "cpa_remote_auth_dirs"),
@@ -324,6 +350,7 @@ def apply_env_config_overrides(cfg: dict | None = None) -> dict:
         ("CPA_PROBE_CHAT", "cpa_probe_chat", "bool"),
         ("CPA_PROBE_CHAT_REQUIRED", "cpa_probe_chat_required", "bool"),
         ("CPA_AUTH_PRIORITY", "cpa_auth_priority", "int"),
+        ("GMAIL_IMAP_PORT", "gmail_imap_port", "int"),
     ):
         raw = (os.environ.get(env_key) or "").strip()
         if not raw:
@@ -2333,6 +2360,264 @@ def hotmail_get_oai_code(
     raise Exception(f"Hotmail/Outlook 在 {timeout}s 内未收到验证码邮件: {email}")
 
 
+# ──────────────────────── Gmail app-password IMAP (CF catch-all) ────────────────────────
+# CF Email Routing / domain catch-all → Gmail inbox; poll imap.gmail.com with app password.
+# Generate independent local-parts on defaultDomains (not Hotmail plus-alias farm).
+
+_gmail_token_map = {}
+_gmail_token_lock = threading.Lock()
+_gmail_reserved_emails = set()
+_gmail_selection_lock = threading.Lock()
+
+
+def get_gmail_imap_user():
+    return str(
+        os.environ.get("GMAIL_IMAP_USER")
+        or config.get("gmail_imap_user", "")
+        or ""
+    ).strip()
+
+
+def get_gmail_imap_password():
+    # Prefer env / .env; never commit app password.
+    return str(
+        os.environ.get("GMAIL_IMAP_PASSWORD")
+        or os.environ.get("GMAIL_APP_PASSWORD")
+        or config.get("gmail_imap_password", "")
+        or ""
+    ).strip().replace(" ", "")
+
+
+def get_gmail_imap_host():
+    return str(config.get("gmail_imap_host", "imap.gmail.com") or "imap.gmail.com").strip()
+
+
+def get_gmail_imap_port():
+    try:
+        return int(config.get("gmail_imap_port", 993) or 993)
+    except Exception:
+        return 993
+
+
+def get_gmail_imap_folder():
+    return str(config.get("gmail_imap_folder", "INBOX") or "INBOX").strip() or "INBOX"
+
+
+def _gmail_default_domains():
+    raw = str(config.get("defaultDomains", "") or "")
+    return [x.strip() for x in re.split(r"[,，\s]+", raw) if x.strip()]
+
+
+def _gmail_release_email(email):
+    if not email:
+        return
+    with _gmail_selection_lock:
+        _gmail_reserved_emails.discard(email.strip().lower())
+
+
+def gmail_get_email_and_token():
+    """Generate one catch-all address on defaultDomains; codes land in Gmail IMAP."""
+    user = get_gmail_imap_user()
+    password = get_gmail_imap_password()
+    if not user:
+        raise Exception("Gmail 模式需要 gmail_imap_user / GMAIL_IMAP_USER")
+    if not password:
+        raise Exception("Gmail 模式需要 gmail_imap_password / GMAIL_IMAP_PASSWORD（应用专用密码）")
+    domains = _gmail_default_domains()
+    if not domains:
+        raise Exception("Gmail catch-all 需要在 defaultDomains 中配置已路由到该 Gmail 的域名")
+
+    global _cf_domain_index
+    with _gmail_selection_lock:
+        for _ in range(200):
+            domain = domains[_cf_domain_index % len(domains)]
+            _cf_domain_index += 1
+            username = generate_username(10)
+            address = f"{username}@{domain}"
+            key = address.lower()
+            if key in _gmail_reserved_emails or is_email_used(address):
+                continue
+            _gmail_reserved_emails.add(key)
+            token = f"gmail:{secrets.token_hex(8)}"
+            with _gmail_token_lock:
+                _gmail_token_map[token] = {
+                    "mailbox": user,
+                    "target": address,
+                    "created_at": time.time(),
+                }
+            return address, token
+    raise Exception("Gmail 无法生成可用域名邮箱（碰撞过多或 defaultDomains 不可用）")
+
+
+def _gmail_imap_get_code(mailbox_email, target_email, app_password, log_callback=None):
+    import email as email_lib
+    import imaplib
+    from datetime import timezone
+    from email.utils import parsedate_to_datetime
+
+    try:
+        recent_seconds = int(config.get("gmail_recent_seconds", 900) or 900)
+    except Exception:
+        recent_seconds = 900
+    try:
+        last_n = int(config.get("gmail_imap_last_n", 30) or 30)
+    except Exception:
+        last_n = 30
+    require_recipient = _config_bool(
+        config.get("gmail_require_recipient_match", True), default=True
+    )
+    filter_after_ts = int((time.time() - max(60, recent_seconds)) * 1000)
+    target_lower = (target_email or "").strip().lower()
+    keywords = ["x.ai", "xai", "grok", "verification", "code", "confirm", "验证码", "确认"]
+    host = get_gmail_imap_host()
+    port = get_gmail_imap_port()
+    folder = get_gmail_imap_folder()
+
+    if log_callback:
+        log_callback(
+            f"[Debug] Gmail IMAP 连接: host={host}:{port} user={mailbox_email} folder={folder}"
+        )
+    imap = imaplib.IMAP4_SSL(host, port, timeout=45)
+    try:
+        imap.login(mailbox_email, app_password)
+        status, _ = imap.select(folder)
+        if status != "OK":
+            raise Exception(f"Gmail IMAP select {folder} 失败: {status}")
+        # Prefer recent UNSEEN/ALL; fall back to ALL and slice last N.
+        status, data = imap.search(None, "ALL")
+        if status != "OK" or not data or not data[0]:
+            return None
+        msg_ids = data[0].split()[-max(1, last_n) :]
+        for mid in reversed(msg_ids):
+            _, msg_data = imap.fetch(mid, "(RFC822)")
+            if not msg_data or not msg_data[0] or not isinstance(msg_data[0][1], bytes):
+                continue
+            msg = email_lib.message_from_bytes(msg_data[0][1])
+
+            date_str = msg.get("Date")
+            if date_str:
+                try:
+                    dt = parsedate_to_datetime(date_str)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if int(dt.timestamp() * 1000) < filter_after_ts:
+                        continue
+                except Exception:
+                    pass
+
+            subject = _hotmail_decode_header(msg.get("Subject", ""))
+            sender = _hotmail_decode_header(msg.get("From", ""))
+            recipient_blob = " ".join(
+                _hotmail_decode_header(msg.get(h, ""))
+                for h in (
+                    "To",
+                    "Cc",
+                    "Delivered-To",
+                    "X-Original-To",
+                    "Original-Recipient",
+                    "Envelope-To",
+                    "X-Forwarded-To",
+                    "X-Gm-Original-To",
+                )
+            ).lower()
+            recipient_matched = not target_lower or target_lower in recipient_blob
+            if require_recipient and not recipient_matched:
+                continue
+
+            body = _hotmail_message_body(msg)
+            combined = f"{subject}\n{sender}\n{recipient_blob}\n{body}"
+            combined_lower = combined.lower()
+            if not any(kw in combined_lower for kw in keywords):
+                if "xai" not in subject.lower() and "confirmation" not in subject.lower():
+                    continue
+            code = extract_verification_code(combined, subject)
+            if code:
+                if log_callback:
+                    log_callback(
+                        f"[*] Gmail IMAP 提取到验证码: {code} (to={target_email or mailbox_email})"
+                    )
+                return code
+        return None
+    finally:
+        try:
+            imap.close()
+        except Exception:
+            pass
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def gmail_get_oai_code(
+    dev_token,
+    email,
+    timeout=180,
+    poll_interval=3,
+    log_callback=None,
+    cancel_callback=None,
+    resend_callback=None,
+):
+    mailbox = get_gmail_imap_user()
+    app_password = get_gmail_imap_password()
+    if not mailbox or not app_password:
+        raise Exception("Gmail IMAP 凭证未配置（gmail_imap_user / gmail_imap_password）")
+
+    token_info = _gmail_token_map.get(dev_token) if dev_token else None
+    target_email = email
+    if token_info:
+        mailbox = token_info.get("mailbox") or mailbox
+        target_email = token_info.get("target") or email
+
+    try:
+        configured_interval = float(config.get("gmail_poll_interval", 2) or 2)
+    except Exception:
+        configured_interval = 2.0
+    base_interval = max(0.8, configured_interval or float(poll_interval or 2) or 2.0)
+    current_interval = 0.0
+    empty_rounds = 0
+    deadline = time.time() + timeout
+    next_resend_at = time.time() + 60
+    consecutive_fails = 0
+
+    while time.time() < deadline:
+        raise_if_cancelled(cancel_callback)
+        if resend_callback and time.time() >= next_resend_at:
+            try:
+                resend_callback()
+                if log_callback:
+                    log_callback("[*] 已触发重新发送验证码")
+            except Exception as exc:
+                if log_callback:
+                    log_callback(f"[Debug] 触发重发验证码失败: {exc}")
+            next_resend_at = time.time() + 60
+        try:
+            code = _gmail_imap_get_code(
+                mailbox,
+                target_email,
+                app_password,
+                log_callback=log_callback,
+            )
+            if code:
+                return code
+            consecutive_fails = 0
+            if log_callback:
+                log_callback(f"[Debug] Gmail 本轮未找到验证码: {target_email}")
+        except Exception as exc:
+            consecutive_fails += 1
+            if log_callback:
+                log_callback(f"[Debug] Gmail 拉取验证码失败: {exc}")
+            if consecutive_fails >= 5:
+                raise Exception(f"Gmail IMAP 连续失败: {exc}") from exc
+        empty_rounds += 1
+        if empty_rounds <= 1:
+            current_interval = base_interval
+        else:
+            current_interval = min(5.0, base_interval + 0.5 * (empty_rounds - 1))
+        sleep_with_cancel(current_interval, cancel_callback)
+    raise Exception(f"Gmail 在 {timeout}s 内未收到验证码邮件: {target_email}")
+
+
 # ──────────────────────── 公共邮箱工具 ────────────────────────
 
 def get_email_provider():
@@ -2343,6 +2628,8 @@ def get_email_and_token(api_key=None):
     provider = get_email_provider()
     if provider in ("hotmail", "outlook", "outlookmail", "microsoft"):
         return hotmail_get_email_and_token()
+    if provider in ("gmail", "google", "googlemail"):
+        return gmail_get_email_and_token()
     if provider == "yyds":
         return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
     if provider == "cloudmail":
@@ -2412,6 +2699,16 @@ def get_oai_code(
     provider = get_email_provider()
     if provider in ("hotmail", "outlook", "outlookmail", "microsoft"):
         return hotmail_get_oai_code(
+            dev_token,
+            email,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+            resend_callback=resend_callback,
+        )
+    if provider in ("gmail", "google", "googlemail"):
+        return gmail_get_oai_code(
             dev_token,
             email,
             timeout=timeout,
@@ -4470,7 +4767,7 @@ class GrokRegisterGUI:
         config_frame.pack(fill=tk.X, pady=5)
         ttk.Label(config_frame, text="邮箱服务商:").grid(row=0, column=0, sticky=tk.W)
         self.email_provider_var = tk.StringVar(value=config.get("email_provider", "duckmail"))
-        self.email_provider_combo = ttk.Combobox(config_frame, textvariable=self.email_provider_var, values=["duckmail", "yyds", "cloudflare", "cloudmail", "hotmail", "outlookmail"], width=12, state="readonly")
+        self.email_provider_combo = ttk.Combobox(config_frame, textvariable=self.email_provider_var, values=["duckmail", "yyds", "cloudflare", "cloudmail", "hotmail", "outlookmail", "gmail"], width=12, state="readonly")
         self.email_provider_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
         ttk.Label(config_frame, text="注册数量:").grid(row=0, column=2, sticky=tk.W, padx=10)
         self.count_var = tk.StringVar(value=str(config.get("register_count", 1)))
@@ -4651,6 +4948,7 @@ class GrokRegisterGUI:
 - cloudflare: 需要 Cloudflare API Base（cloudflare_temp_email 临时邮箱）
 - cloudmail: 需要 CloudMail URL + 密码 + defaultDomains（maillab/cloud-mail 完整邮箱）
 - hotmail/outlookmail: 需要 Hotmail账号文件，格式为 邮箱----密码----ClientID----Token
+- gmail: Gmail 应用专用密码 IMAP + defaultDomains（CF Email Routing catch-all 到该 Gmail）
 
 2) Cloudflare API Base（cloudflare 模式必填）
 - 示例: https://xxxx.pages.dev
@@ -4685,6 +4983,14 @@ class GrokRegisterGUI:
 - 每行格式: your@hotmail.com----mailPassword----client-id----refresh-token
 - 默认先用原邮箱，后续使用随机 plus alias（如 name+k8s2p9qa@domain）
 - 成功、失败、当前运行占用的 alias 都会去重，并通过 outlook.office365.com XOAUTH2 IMAP 收验证码
+
+8) Gmail 模式配置（CF 域名 catch-all → Gmail）
+- gmail_imap_user: 接收 catch-all 的 Gmail 地址
+- gmail_imap_password: Google 应用专用密码（16 位，建议放 .env 的 GMAIL_IMAP_PASSWORD，勿提交 git）
+- 默认 IMAP: imap.gmail.com:993 SSL，文件夹 INBOX
+- defaultDomains: 已在 Cloudflare Email Routing 转到该 Gmail 的域名
+- 注册地址生成: random@domain（一号一箱，不是 plus-alias 农场）
+- 收码: IMAP 轮询匹配 To/Delivered-To/X-Original-To 中的目标地址
 
 【第三步：并发与稳定性】
 6) 注册数量
@@ -4723,6 +5029,7 @@ class GrokRegisterGUI:
 3) 若第一步就失败：
 - cloudflare 模式: 检查 API Base / CF 路径 / 鉴权模式
 - cloudmail 模式: 检查 URL / 密码 / defaultDomains / 注册接口是否可用
+- gmail 模式: 检查 GMAIL_IMAP_USER/PASSWORD、defaultDomains、CF Email Routing 是否进 INBOX
 
 提示:
 - 点“开始注册”会自动保存当前配置到 config.json。
@@ -4825,6 +5132,16 @@ class GrokRegisterGUI:
             hotmail_path = get_hotmail_accounts_file()
             if not os.path.exists(hotmail_path):
                 self.log(f"[!] Hotmail/Outlook 模式账号文件不存在: {hotmail_path}")
+                return
+        if config["email_provider"] in ("gmail", "google", "googlemail"):
+            if not get_gmail_imap_user():
+                self.log("[!] Gmail 模式需要 gmail_imap_user / GMAIL_IMAP_USER")
+                return
+            if not get_gmail_imap_password():
+                self.log("[!] Gmail 模式需要 gmail_imap_password / GMAIL_IMAP_PASSWORD（应用专用密码）")
+                return
+            if not _gmail_default_domains():
+                self.log("[!] Gmail 模式需要在 defaultDomains 配置 catch-all 域名")
                 return
         try:
             count = int(self.count_var.get())
