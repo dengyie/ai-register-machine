@@ -864,6 +864,10 @@ def export_cpa_xai_for_account(
     prefer_protocol = _config_bool(cfg.get("cpa_prefer_protocol"), default=True)
     protocol_only = _config_bool(cfg.get("cpa_protocol_only"), default=False)
     protocol_poll_timeout = float(cfg.get("cpa_protocol_poll_timeout_sec", 90) or 90)
+    # PKCE authorization-code flow (default) yields chat-usable tokens; legacy
+    # device-code flow is known to produce /models-ok-but-chat-403 tokens.
+    protocol_flow = (str(cfg.get("cpa_protocol_flow") or "pkce")).strip().lower() or "pkce"
+    allow_device_flow_fallback = _config_bool(cfg.get("cpa_allow_device_flow_fallback"), default=False)
     auth_priority = _config_priority(cfg)
 
     from cpa_xai.accounts import normalize_sso_cookie
@@ -933,6 +937,8 @@ def export_cpa_xai_for_account(
         prefer_protocol=prefer_protocol,
         protocol_only=protocol_only,
         protocol_poll_timeout_sec=protocol_poll_timeout,
+        protocol_flow=protocol_flow,
+        allow_device_flow_fallback=allow_device_flow_fallback,
         priority=auth_priority,
         log=_log,
     )

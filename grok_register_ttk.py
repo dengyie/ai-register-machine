@@ -111,6 +111,9 @@ DEFAULT_CONFIG = {
     "clash_node_include": "",
     "clash_flush_connections": True,
     "clash_restore_on_exit": True,
+    # CPA mint protocol: pkce (authorization-code, chat-usable) | device (legacy device-code, chat-403)
+    "cpa_protocol_flow": "pkce",
+    "cpa_allow_device_flow_fallback": False,
 }
 
 config = DEFAULT_CONFIG.copy()
@@ -371,6 +374,7 @@ _ENV_CONFIG_OVERLAYS = (
     ("CLASH_VERGE_RULES_FILE", "clash_verge_rules_file"),
     ("CLASH_NODE_EXCLUDE", "clash_node_exclude"),
     ("CLASH_NODE_INCLUDE", "clash_node_include"),
+    ("CPA_PROTOCOL_FLOW", "cpa_protocol_flow"),
 )
 
 
@@ -387,6 +391,7 @@ def apply_env_config_overrides(cfg: dict | None = None) -> dict:
         ("CPA_REMOTE_LIVE_REQUIRED", "cpa_remote_live_required", "bool"),
         ("CPA_REMOTE_INJECT_REQUIRED", "cpa_remote_inject_required", "bool"),
         ("CPA_PROTOCOL_ONLY", "cpa_protocol_only", "bool"),
+        ("CPA_ALLOW_DEVICE_FLOW_FALLBACK", "cpa_allow_device_flow_fallback", "bool"),
         ("CPA_EXPORT_ENABLED", "cpa_export_enabled", "bool"),
         ("CPA_PROBE_CHAT", "cpa_probe_chat", "bool"),
         ("CPA_PROBE_CHAT_REQUIRED", "cpa_probe_chat_required", "bool"),
