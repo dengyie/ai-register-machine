@@ -5439,6 +5439,20 @@ class GrokRegisterGUI:
                 except Exception:
                     pass
             raise
+        # Account activation: accept TOS + set birth date + enable NSFW feature flag.
+        # Mirrors the reference register machine (register_one): these gRPC calls
+        # complete the account so free-Build chat is not gated on missing TOS/birth.
+        # Failure is logged but never aborts — the account is already registered.
+        if config.get("enable_nsfw", True):
+            try:
+                logf("[*] 6. 激活账号 (TOS + 生日 + NSFW)")
+                act_ok, act_msg = enable_nsfw_for_token(sso, log_callback=logf)
+                if not act_ok:
+                    logf(f"[!] 账号激活未完成: {act_msg}")
+                else:
+                    logf("[*] 账号激活完成")
+            except Exception as act_exc:
+                logf(f"[!] 账号激活异常(不中断注册): {act_exc}")
         password = profile.get("password", "") or ""
         result_record = {"email": email, "sso": sso, "profile": profile}
         with self.stats_lock:
