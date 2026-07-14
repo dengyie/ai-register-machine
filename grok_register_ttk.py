@@ -837,10 +837,11 @@ CHROMIUM_SLIM_FLAGS = [
     "--disable-software-rasterizer",
     "--no-sandbox",
     "--disable-dev-shm-usage",
-    "--disable-images",
+    # 不禁用图片：Turnstile / challenges.cloudflare.com 依赖图片与 widget 资源
     "--mute-audio",
     "--disable-background-networking",
     "--no-first-run",
+    "--disable-blink-features=AutomationControlled",
 ]
 
 
@@ -3408,50 +3409,125 @@ def refresh_active_page():
     return _get_page()
 
 
+def _email_input_ready(page):
+    """True when the email form input is visible on the current page."""
+    if page is None:
+        return False
+    try:
+        return bool(
+            page.run_js(
+                r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const input = Array.from(document.querySelectorAll(
+  'input[data-testid="email"], input[name="email"], input[type="email"], input[autocomplete="email"]'
+)).find((node) => isVisible(node) && !node.disabled && !node.readOnly) || null;
+return !!input;
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
 def click_email_signup_button(timeout=10, log_callback=None, cancel_callback=None):
     page = _get_page()
-    deadline = time.time() + timeout
+    # Prefer config timeout when caller uses the default.
+    if timeout == 10 and isinstance(config, dict):
+        try:
+            timeout = int(config.get("nav_email_button_timeout") or timeout)
+        except Exception:
+            pass
+    deadline = time.time() + max(3.0, float(timeout or 10))
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
-        if log_callback:
-            log_callback("[Debug] 尝试查找“使用邮箱注册”按钮...")
-
-        clicked = page.run_js(r"""
-const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-const target = candidates.find((node) => {
-    const text = (node.innerText || node.textContent || '').replace(/\s+/g, '');
-    const lower = text.toLowerCase();
-    return (
-        text.includes('使用邮箱注册') ||
-        lower.includes('signupwithemail') ||
-        lower.includes('continuewithemail') ||
-        lower.includes('email')
-    );
-});
-if (!target) {
-    return false;
-}
-target.click();
-return true;
-        """)
-
-        if clicked:
+        # Already on email form — nothing to click.
+        if _email_input_ready(page):
             if log_callback:
-                log_callback("[*] 已点击「使用邮箱注册」按钮")
-            human_sleep(2, cancel_callback)
+                log_callback("[*] 邮箱输入框已就绪，跳过按钮点击")
             return True
 
         if log_callback:
+            log_callback("[Debug] 尝试查找“使用邮箱注册”按钮...")
+
+        clicked = page.run_js(
+            r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function score(node) {
+  const text = (node.innerText || node.textContent || '').replace(/\s+/g, '');
+  const lower = text.toLowerCase();
+  if (text.includes('使用邮箱注册') || lower.includes('signupwithemail') || lower.includes('continuewithemail') || lower.includes('sign up with email')) return 0;
+  if (text.includes('邮箱注册') || lower.includes('with email') || lower === 'email') return 1;
+  if (text.includes('邮箱') && !text.includes('登录') && !lower.includes('login')) return 2;
+  return -1;
+}
+const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'))
+  .filter((node) => isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true')
+  .map((node) => [score(node), node])
+  .filter((pair) => pair[0] >= 0)
+  .sort((a, b) => a[0] - b[0]);
+if (!candidates.length) return 'not-found';
+const target = candidates[0][1];
+try { target.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+const rect = target.getBoundingClientRect();
+const x = rect.left + Math.min(Math.max(rect.width / 2, 4), Math.max(rect.width - 4, 4));
+const y = rect.top + Math.min(Math.max(rect.height / 2, 4), Math.max(rect.height - 4, 4));
+const opts = {bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0};
+try { target.focus(); } catch (e) {}
+for (const type of ['pointerover','pointerenter','mouseover','mouseenter','pointerdown','mousedown','pointerup','mouseup','click']) {
+  try {
+    if (type.startsWith('pointer')) target.dispatchEvent(new PointerEvent(type, Object.assign({pointerId: 1, pointerType: 'mouse', isPrimary: true}, opts)));
+    else target.dispatchEvent(new MouseEvent(type, opts));
+  } catch (e) {}
+}
+try { target.click(); } catch (e) {}
+return 'clicked:' + ((target.innerText || target.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40));
+            """
+        )
+
+        if clicked and str(clicked).startswith("clicked"):
+            if log_callback:
+                log_callback(f"[*] 已点击「使用邮箱注册」按钮 ({clicked})")
+            # Wait for the email form to actually appear after the click.
+            form_deadline = time.time() + 8.0
+            while time.time() < form_deadline:
+                raise_if_cancelled(cancel_callback)
+                if _email_input_ready(page):
+                    if log_callback:
+                        log_callback("[*] 邮箱输入框已出现")
+                    return True
+                human_sleep(0.4, cancel_callback, min_seconds=0.2)
+            if log_callback:
+                snap = _page_form_snapshot(page) if "_page_form_snapshot" in globals() else {}
+                log_callback(f"[Debug] 点击后未出现邮箱输入框，将重试: {snap}")
+            # Fall through and click again before deadline.
+            continue
+
+        if log_callback:
             current_url = page.url if page else "none"
-            log_callback(f"[Debug] 当前URL: {current_url}")
+            log_callback(f"[Debug] 当前URL: {current_url} click={clicked!r}")
 
         human_sleep(1, cancel_callback)
 
     if log_callback:
-        page_html = page.html[:500] if page else "no page"
+        try:
+            page_html = (page.html[:500] if page else "no page")
+        except Exception as html_exc:
+            page_html = f"<html-read-failed: {html_exc}>"
         log_callback(f"[Debug] 页面内容片段: {page_html}")
 
-    raise Exception("未找到「使用邮箱注册」按钮")
+    raise Exception("未找到「使用邮箱注册」按钮或邮箱表单未出现")
 
 
 def open_signup_page(log_callback=None, cancel_callback=None):
@@ -3670,6 +3746,12 @@ def fill_email_and_submit(timeout=15, log_callback=None, cancel_callback=None):
     page = _get_page()
     raise_if_cancelled(cancel_callback)
     check_timeout(time.time())
+    # Prefer longer config timeout; keep arg as floor.
+    if isinstance(config, dict):
+        try:
+            timeout = max(float(timeout or 15), float(config.get("email_form_timeout") or 0) or 0)
+        except Exception:
+            pass
     email, dev_token = get_email_and_token()
     if not email or not dev_token:
         raise Exception("获取邮箱失败")
@@ -3677,7 +3759,18 @@ def fill_email_and_submit(timeout=15, log_callback=None, cancel_callback=None):
         raise Exception("页面未就绪，无法填写邮箱")
     if log_callback:
         log_callback(f"[*] 已创建邮箱: {email}")
-    deadline = time.time() + timeout
+    # If still on provider chooser, re-click email signup before waiting on the input.
+    if not _email_input_ready(page):
+        try:
+            click_email_signup_button(
+                timeout=min(12, max(6, int(timeout // 2) or 6)),
+                log_callback=log_callback,
+                cancel_callback=cancel_callback,
+            )
+        except Exception as reclick_exc:
+            if log_callback:
+                log_callback(f"[Debug] 二次点击邮箱注册失败: {reclick_exc}")
+    deadline = time.time() + max(5.0, float(timeout or 15))
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
         filled = page.run_js(
@@ -4007,7 +4100,14 @@ def getTurnstileToken(log_callback=None, cancel_callback=None):
     except Exception:
         pass
 
-    for _ in range(0, 20):
+    # 单次尝试上限：避免 20s×N 次在 token=0 上空转（外层 retry 由 turnstile_retry_limit 控制）
+    try:
+        attempts = int((config.get("turnstile_attempt_loops") if isinstance(config, dict) else None) or 12)
+    except Exception:
+        attempts = 12
+    attempts = max(4, min(attempts, 20))
+
+    for i in range(0, attempts):
         raise_if_cancelled(cancel_callback)
         try:
             token = page.run_js(
@@ -4036,6 +4136,24 @@ try {
                     iframe = wrapper.shadow_root.ele("tag:iframe")
                 except Exception:
                     iframe = None
+                if iframe is None:
+                    try:
+                        iframe = page.ele('tag:iframe@src():challenges.cloudflare.com')
+                    except Exception:
+                        iframe = None
+                if iframe is None:
+                    try:
+                        for fr in page.eles("tag:iframe") or []:
+                            src = ""
+                            try:
+                                src = str(fr.attr("src") or "")
+                            except Exception:
+                                src = ""
+                            if "challenges.cloudflare.com" in src or "turnstile" in src:
+                                iframe = fr
+                                break
+                    except Exception:
+                        pass
                 if iframe:
                     try:
                         iframe.run_js(
@@ -4050,28 +4168,44 @@ Object.defineProperty(MouseEvent.prototype, 'screenY', { value: sy });
                         )
                     except Exception:
                         pass
+                    clicked = False
                     try:
                         body_sr = iframe.ele("tag:body").shadow_root
                         btn = body_sr.ele("tag:input")
                         if btn:
                             btn.click()
+                            clicked = True
                     except Exception:
                         pass
+                    if not clicked:
+                        try:
+                            iframe.click()
+                            clicked = True
+                        except Exception:
+                            pass
+                    if log_callback and i == 0:
+                        log_callback(f"[Debug] Turnstile iframe click attempted={clicked}")
             else:
                 # 兜底：尝试触发页面上可见的 Turnstile 容器
                 page.run_js(
                     """
 const nodes = Array.from(document.querySelectorAll('div,span,iframe')).filter((n) => {
   const txt = (n.className || '') + ' ' + (n.id || '') + ' ' + (n.getAttribute?.('src') || '');
-  return String(txt).toLowerCase().includes('turnstile');
+  return String(txt).toLowerCase().includes('turnstile') || String(txt).includes('challenges.cloudflare');
 });
 if (nodes.length && typeof nodes[0].click === 'function') nodes[0].click();
                     """
                 )
-        except Exception:
-            pass
-        human_sleep(1, cancel_callback)
+        except Exception as exc:
+            if log_callback and i == 0:
+                log_callback(f"[Debug] Turnstile poll error: {exc}")
+        human_sleep(0.8, cancel_callback, min_seconds=0.4)
 
+    try:
+        take_screenshot(page, "turnstile-token-fail")
+        dump_state(page, "turnstile-token-fail")
+    except Exception:
+        pass
     raise Exception("Turnstile 获取 token 失败")
 
 
@@ -4138,6 +4272,33 @@ def fill_profile_and_submit(timeout=None, log_callback=None, cancel_callback=Non
     last_diag_at = 0.0
     not_ready_count = 0
     last_filled = None
+    cf_retry_count = 0
+    try:
+        cf_stuck_timeout = float(
+            (config.get("turnstile_stuck_timeout") if isinstance(config, dict) else None) or 60
+        )
+    except Exception:
+        cf_stuck_timeout = 60.0
+    cf_stuck_timeout = max(15.0, min(cf_stuck_timeout, 180.0))
+    try:
+        cf_retry_limit = int(
+            (config.get("turnstile_retry_limit") if isinstance(config, dict) else None) or 3
+        )
+    except Exception:
+        cf_retry_limit = 3
+    cf_retry_limit = max(1, min(cf_retry_limit, 8))
+
+    def _cf_fail_fast(reason: str):
+        try:
+            take_screenshot(page, "turnstile-stuck")
+            dump_state(page, "turnstile-stuck")
+        except Exception:
+            pass
+        snap = _page_form_snapshot(page)
+        raise Exception(
+            f"Turnstile 卡住 fail-fast: {reason} "
+            f"stuck_timeout={cf_stuck_timeout}s retries={cf_retry_count}/{cf_retry_limit} snap={snap}"
+        )
 
     profile_fill_js = r"""
 const givenName = arguments[0];
@@ -4265,10 +4426,19 @@ return 'filled-no-submit';
                 now = time.time()
                 if wait_cf_since is None:
                     wait_cf_since = now
+                if now - wait_cf_since >= cf_stuck_timeout:
+                    _cf_fail_fast(f"profile-fill wait {now - wait_cf_since:.0f}s token_len={token_len}")
                 # 卡住后自动二次复用 Turnstile 组件
                 if now - wait_cf_since >= 12 and now - last_cf_retry_at >= 8:
+                    if cf_retry_count >= cf_retry_limit:
+                        _cf_fail_fast(
+                            f"profile-fill retries exhausted token_len={token_len}"
+                        )
                     if log_callback:
-                        log_callback("[*] Cloudflare 验证卡住，开始二次复用 Turnstile...")
+                        log_callback(
+                            f"[*] Cloudflare 验证卡住，开始二次复用 Turnstile... "
+                            f"({cf_retry_count + 1}/{cf_retry_limit})"
+                        )
                     try:
                         token = getTurnstileToken(log_callback=log_callback, cancel_callback=cancel_callback)
                         if token:
@@ -4291,6 +4461,7 @@ return String(cfInput.value || '').trim().length;
                     except Exception as cf_exc:
                         if log_callback:
                             log_callback(f"[Debug] Turnstile 二次复用失败: {cf_exc}")
+                    cf_retry_count += 1
                     last_cf_retry_at = now
                 human_sleep(0.8, cancel_callback, min_seconds=0.4)
                 continue
@@ -4360,9 +4531,16 @@ return 'wait-cloudflare:' + token.length;
             now = time.time()
             if wait_cf_since is None:
                 wait_cf_since = now
+            if now - wait_cf_since >= cf_stuck_timeout:
+                _cf_fail_fast(f"pre-submit wait {now - wait_cf_since:.0f}s token_len={token_len}")
             if now - wait_cf_since >= 12 and now - last_cf_retry_at >= 8:
+                if cf_retry_count >= cf_retry_limit:
+                    _cf_fail_fast(f"pre-submit retries exhausted token_len={token_len}")
                 if log_callback:
-                    log_callback("[*] 提交前仍卡住，自动再次复用 Turnstile...")
+                    log_callback(
+                        f"[*] 提交前仍卡住，自动再次复用 Turnstile... "
+                        f"({cf_retry_count + 1}/{cf_retry_limit})"
+                    )
                 try:
                     token = getTurnstileToken(log_callback=log_callback, cancel_callback=cancel_callback)
                     if token:
@@ -4385,6 +4563,7 @@ return String(cfInput.value || '').trim().length;
                 except Exception as cf_exc:
                     if log_callback:
                         log_callback(f"[Debug] Turnstile 二次复用失败: {cf_exc}")
+                cf_retry_count += 1
                 last_cf_retry_at = now
             human_sleep(0.8, cancel_callback, min_seconds=0.4)
             continue

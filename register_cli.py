@@ -90,10 +90,25 @@ def _patched_create_browser_options(browser_proxy=None, *, apply_config_proxy=Tr
     except Exception:
         pass
 
+    # pxed/k8s / Xvfb: force sandbox-less flags even if upstream options omitted them
+    for flag in (
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+    ):
+        try:
+            opts.set_argument(flag)
+        except Exception:
+            pass
+
+    # Prefer Playwright CFT chrome on pxed, then common system paths
     for cand in (
+        "/personal/browsers/ms-playwright/chromium-1228/chrome-linux64/chrome",
+        "/usr/bin/google-chrome",
+        "/usr/local/bin/google-chrome",
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
-        "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
     ):
         if os.path.isfile(cand):
@@ -102,6 +117,19 @@ def _patched_create_browser_options(browser_proxy=None, *, apply_config_proxy=Tr
             except Exception:
                 pass
             break
+
+    # Never leave --disable-images on: Turnstile widget needs image/cdn assets
+    try:
+        args = getattr(opts, "arguments", None)
+        if isinstance(args, (list, tuple)):
+            cleaned = [a for a in args if a != "--disable-images" and not str(a).startswith("--disable-images=")]
+            if len(cleaned) != len(args):
+                try:
+                    opts._arguments = cleaned  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     ext_path = os.path.join(os.path.dirname(os.path.abspath(reg.__file__)), "turnstilePatch")
     if os.path.isdir(ext_path):
@@ -212,6 +240,8 @@ def is_fatal_register_error(msg: str) -> bool:
         "Gmail IMAP 认证失败",
         "AUTHENTICATIONFAILED",
         "Invalid credentials",
+        # Xvfb/datacenter 上 Turnstile 恒 0 时，整批空转无意义；单号失败后停止本批
+        "Turnstile 卡住 fail-fast",
     )
     return any(m in text for m in markers)
 
@@ -525,11 +555,20 @@ def register_one(
                 profile_timeout = int(reg.config.get("profile_timeout", 120) or 120)
             except Exception:
                 profile_timeout = 120
-            profile = reg.fill_profile_and_submit(
-                timeout=profile_timeout,
-                log_callback=lambda m: log(worker_id, m),
-                cancel_callback=cancel,
-            )
+            try:
+                profile = reg.fill_profile_and_submit(
+                    timeout=profile_timeout,
+                    log_callback=lambda m: log(worker_id, m),
+                    cancel_callback=cancel,
+                )
+            except Exception as profile_exc:
+                # Turnstile/datacenter hard stuck: stop whole batch, do not slot-retry spin
+                if is_fatal_register_error(str(profile_exc)):
+                    log(worker_id, f"! 致命错误，停止整批（不空转）: {profile_exc}")
+                    _inc("reg_fail")
+                    request_fatal_stop(str(profile_exc))
+                    raise FatalRegisterError(str(profile_exc)) from profile_exc
+                raise
             log(worker_id, f"资料已填: {profile.get('given_name')} {profile.get('family_name')}")
             log(worker_id, "5. 等待 sso cookie")
             sso = reg.wait_for_sso_cookie(
