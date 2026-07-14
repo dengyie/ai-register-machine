@@ -13,6 +13,7 @@ from .accounts import (
     parse_accounts_file,
 )
 from .mint import mint_and_export
+from .pkce_mint import PKCEMintError, mint_with_sso_pkce
 from .probe import classify_chat_probe, probe_mini_response, probe_models
 from .protocol_mint import (
     ProtocolMintError,
@@ -52,6 +53,7 @@ __all__ = [
     "DEFAULT_REDIRECT_URI",
     "DEFAULT_TOKEN_ENDPOINT",
     "OAUTH_CLIENT_ID",
+    "PKCEMintError",
     "ProtocolMintError",
     "build_cpa_xai_auth",
     "classify_chat_probe",
@@ -65,6 +67,7 @@ __all__ = [
     "is_chat_retryable_auth",
     "load_entitlement_denied_emails",
     "mint_and_export",
+    "mint_with_sso_pkce",
     "mint_with_sso_protocol",
     "normalize_sso_cookie",
     "parse_accounts_file",
