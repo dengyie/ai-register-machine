@@ -3223,10 +3223,14 @@ def enable_nsfw_for_token(token, cf_clearance="", log_callback=None):
     user_agent = get_user_agent()
     try:
         with requests.Session(impersonate="chrome120", proxies=proxies) as session:
+            # Never send empty cf_clearance= — accounts.x.ai Cloudflare 403s on it.
+            cookie_parts = [f"sso={token}", f"sso-rw={token}"]
+            if cf_clearance:
+                cookie_parts.append(f"cf_clearance={cf_clearance}")
             session.headers.update(
                 {
                     "user-agent": user_agent,
-                    "cookie": f"sso={token}; sso-rw={token}; cf_clearance={cf_clearance}",
+                    "cookie": "; ".join(cookie_parts),
                 }
             )
             ok, msg = set_tos_accepted(session, log_callback)
