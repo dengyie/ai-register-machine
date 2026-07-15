@@ -19,15 +19,41 @@ auth-file pools (CLIProxyAPI / codex-lb consumers), **not** a chat2api gateway.
 ```bash
 ./register.sh chatgpt [count]
 # or layered:
-./register.sh core run -p chatgpt -n 1 --email-source tinyhost
+./register.sh core run -p chatgpt -n 1 --email-source gmail_imap
 CHATGPT_PROXY=http://127.0.0.1:7897 ./providers/chatgpt/run-register.sh 1
+
+# Self-controlled nodes (no Clash selector dependency):
+CHATGPT_PROXY_LIST='http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080' \
+  ./providers/chatgpt/run-register.sh 3
+# equivalent:
+./register.sh core run -p chatgpt -n 3 --email-source gmail_imap \
+  --proxy-list 'http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080'
 ```
+
+## Egress (self-controlled)
+
+Register machine owns the node pool. **Preferred:** `list` mode with explicit
+proxy URLs — each attempt binds `curl_cffi` to a concrete upstream from
+`CHATGPT_PROXY_LIST` / `--proxy-list`. This does **not** call Clash API to
+pick a GLOBAL/PROXY node.
+
+| Mode | How | Clash dependency |
+|------|-----|------------------|
+| fixed `CHATGPT_PROXY` | single URL (often local mixed port) | optional local forwarder only |
+| `list` + `CHATGPT_PROXY_LIST` | rotate explicit URLs per attempt | **none** |
+| `clash` | dedicated group only (legacy Grok path) | controller API; never main selector |
+
+Empty list + no mode → fixed proxy (default `http://127.0.0.1:7897`).
+Setting a non-empty proxy list auto-enables `list` mode.
 
 ## Env
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `CHATGPT_PROXY` | `http://127.0.0.1:7897` | Outbound proxy (Clash/mihomo) |
+| `CHATGPT_PROXY` | `http://127.0.0.1:7897` | Fixed outbound proxy when not rotating |
+| `CHATGPT_PROXY_LIST` / `PROXY_LIST` | empty | Self-controlled node pool (comma/newline/`.txt`) |
+| `CHATGPT_PROXY_ROTATE_MODE` / `PROXY_ROTATE_MODE` | auto | `off` \| `list` \| `clash` (list auto if pool set) |
+| `CHATGPT_PROXY_ROTATE_EVERY` | `1` | Rotate every N attempts |
 | `CHATGPT_EMAIL_DOMAIN` | `publicvm.com` | Force tinyhost domain (higher OTP deliverability) |
 | `CHATGPT_OTP_TIMEOUT` | `180` | OTP poll seconds |
 | `CHATGPT_SINK` | `providers/chatgpt/output/pipeline.jsonl` | private JSONL |

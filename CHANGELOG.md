@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] - 2026-07-15
+
+### Added
+
+- **Self-controlled egress for layered providers**: `register_core/util/proxy.py` wires existing `proxy_rotate` **list** mode into `Pipeline` + `register_core` CLI + ChatGPT runner
+- CLI: `--proxy`, `--proxy-list`, `--proxy-rotate {off,list,clash}`, `--proxy-rotate-every`, `--proxy-rotate-required`
+- Env: `CHATGPT_PROXY_LIST` / `PROXY_LIST` auto-enables list mode (no Clash node selection)
+
+### Notes
+
+- Preferred path is **list** of explicit upstream URLs — register machine owns the node pool; Clash may only be a local forwarder, not a selector dependency
+- Clash domain-group mode remains available for Grok browser paths; ChatGPT docs steer operators to list mode
+
 ## [1.4.0] - 2026-07-15
 
 ### Added

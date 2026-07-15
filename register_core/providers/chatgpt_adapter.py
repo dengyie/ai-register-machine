@@ -73,7 +73,20 @@ class ChatGPTProvider:
             save_result,
         )
 
-        extra = extra or {}
+        extra = dict(extra or {})
+        # Prefer pipeline-injected proxy (self-controlled list rotation); fall back
+        # to constructor/env. Never require Clash UI node selection.
+        if not str(extra.get("proxy") or "").strip():
+            try:
+                from register_core.util.proxy import resolve_attempt_proxy
+
+                resolved, rot_info = resolve_attempt_proxy(extra)
+                if resolved:
+                    extra["proxy"] = resolved
+                if rot_info:
+                    extra.setdefault("_proxy_rotate", rot_info)
+            except Exception:
+                pass
         proxy = str(extra.get("proxy") or self.proxy or "").strip()
         otp_timeout = float(extra.get("otp_timeout_s") or self.otp_timeout_s)
         domain = str(extra.get("email_domain") or self.email_domain or "").strip() or None
@@ -120,12 +133,15 @@ class ChatGPTProvider:
             )
             return otp.code
 
+        rot_meta = extra.get("_proxy_rotate") if isinstance(extra.get("_proxy_rotate"), dict) else {}
         arts: dict[str, Any] = {
             "runtime": str(PROTOCOL_DIR),
             "email_source": getattr(source, "name", self.email_source_name),
             "mailbox_provider": mailbox.provider,
             "proxy": proxy or "(none)",
-            "note": "in-process openai platform oauth; no cpa inject",
+            "proxy_mode": str(rot_meta.get("mode") or "fixed"),
+            "proxy_label": str(rot_meta.get("label") or proxy or "(none)"),
+            "note": "in-process openai platform oauth; no cpa inject; egress self-controlled",
         }
 
         try:

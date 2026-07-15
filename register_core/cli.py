@@ -53,6 +53,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
     if headless is not None:
         extra["headless"] = headless
+    # Self-controlled egress (preferred): explicit proxy URL pool.
+    # Does not depend on Clash selecting a node.
+    if getattr(args, "proxy", None):
+        extra["proxy"] = args.proxy
+    if getattr(args, "proxy_list", None):
+        extra["proxy_list"] = args.proxy_list
+    if getattr(args, "proxy_rotate", None):
+        extra["proxy_rotate_mode"] = args.proxy_rotate
+    if getattr(args, "proxy_rotate_every", None) is not None and args.proxy_rotate_every >= 1:
+        extra["proxy_rotate_every"] = int(args.proxy_rotate_every)
+    if getattr(args, "proxy_rotate_required", False):
+        extra["proxy_rotate_required"] = True
 
     job = RegisterJob(
         provider=args.provider,
@@ -114,6 +126,36 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--timeout", type=int, default=1200)
     pr.add_argument("--threads", type=int, default=1, help="grok register threads")
     pr.add_argument("--headless", type=int, choices=(0, 1), default=None)
+    pr.add_argument(
+        "--proxy",
+        default="",
+        help="fixed outbound proxy URL for this run (overrides CHATGPT_PROXY)",
+    )
+    pr.add_argument(
+        "--proxy-list",
+        default="",
+        help=(
+            "self-controlled node pool: comma/newline URLs or .txt path. "
+            "When set, rotation defaults to list mode (no Clash selector)."
+        ),
+    )
+    pr.add_argument(
+        "--proxy-rotate",
+        choices=("off", "list", "clash"),
+        default="",
+        help="egress rotation: list=pool URLs (preferred); clash=dedicated group only",
+    )
+    pr.add_argument(
+        "--proxy-rotate-every",
+        type=int,
+        default=-1,
+        help="rotate every N attempts (default 1)",
+    )
+    pr.add_argument(
+        "--proxy-rotate-required",
+        action="store_true",
+        help="fail-fast if rotation fails (no silent reuse of bad egress)",
+    )
     pr.add_argument("-v", "--verbose", action="store_true")
     pr.set_defaults(func=cmd_run)
     return p

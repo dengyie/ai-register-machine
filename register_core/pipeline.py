@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -82,12 +83,42 @@ class Pipeline:
     def run(self, count: int = 1, *, extra: dict[str, Any] | None = None) -> "PipelineStats":
         stats = PipelineStats()
         n = max(1, int(count))
+        base_extra = dict(extra or {})
         for i in range(1, n + 1):
             log.info("pipeline attempt %s/%s provider=%s", i, n, self.provider.name)
+            # Self-controlled egress: rotate proxy_list (or clash group) per attempt.
+            # List mode never depends on Clash UI selecting a node.
+            try:
+                from register_core.util.proxy import inject_attempt_proxy
+
+                attempt_extra = inject_attempt_proxy(
+                    base_extra,
+                    log_fn=lambda m: log.info("%s", m),
+                )
+            except Exception as exc:
+                # Hard fail when operator required rotation (fail-fast egress).
+                raw_req = base_extra.get("proxy_rotate_required")
+                if raw_req is None:
+                    raw_req = os.environ.get("PROXY_ROTATE_REQUIRED") or os.environ.get(
+                        "CHATGPT_PROXY_ROTATE_REQUIRED"
+                    )
+                if isinstance(raw_req, bool):
+                    required = raw_req
+                else:
+                    required = str(raw_req or "").strip().lower() in {
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    }
+                if required:
+                    raise
+                log.warning("proxy rotation skipped: %s", exc)
+                attempt_extra = dict(base_extra)
             try:
                 result = self.provider.register_one(
                     email_source=self.email_source,
-                    extra=extra or {},
+                    extra=attempt_extra,
                 )
             except FailFastError as exc:
                 result = RegisterResult(
