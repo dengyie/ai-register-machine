@@ -10,6 +10,11 @@ import_gate via ``stamp_auth_chat_fields``. Entitlement denials also append
 the ledger. Does NOT remint OAuth and does NOT remote-inject (use remint for
 that after stamps exist).
 
+Mid-tier probe (tebi CPA):
+  - ``cpa_probe_via`` / ``--probe-via``: direct | cpa | hybrid (default hybrid)
+  - unpinned ``cpa`` falls back to hybrid (direct gate + optional CPA smoke)
+  - observational ``probe_via_cpa_ok`` never replaces ``chat_ok`` for inject
+
 Examples (from project root):
   .venv/bin/python -u scripts/backfill_chat_stamps.py --inventory-only
   .venv/bin/python -u scripts/backfill_chat_stamps.py --probe --only-missing --limit 20
@@ -20,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -29,8 +35,14 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from cpa_xai.probe import apply_chat_probe_to_result, probe_chat_with_retries, probe_models  # noqa: E402
-from cpa_xai.schema import DEFAULT_BASE_URL  # noqa: E402
+from cpa_xai.probe import (  # noqa: E402
+    apply_chat_probe_to_result,
+    build_probe_transport,
+    probe_chat_with_retries,
+    probe_models,
+    resolve_gate_probe_policy,
+)
+from cpa_xai.schema import DEFAULT_BASE_URL, credential_file_name  # noqa: E402
 from cpa_xai.writer import (  # noqa: E402
     inventory_chat_stamps,
     is_entitlement_denied_auth,
@@ -88,12 +100,38 @@ def _iter_auth_files(
     return out
 
 
+def _resolve_probe_pin(
+    *,
+    email: str,
+    path: Path,
+    pin_mode: str,
+    explicit_pin: str = "",
+) -> str:
+    if (explicit_pin or "").strip():
+        return explicit_pin.strip()
+    mode = (pin_mode or "auth_filename").strip().lower()
+    if mode == "email":
+        return (email or "").strip()
+    if mode == "auth_filename":
+        if email:
+            return credential_file_name(email=email)
+        return path.name
+    return ""
+
+
 def _probe_and_stamp(
     path: Path,
     *,
     base_url: str,
     proxy: str | None,
     log,
+    probe_via: str = "hybrid",
+    cpa_probe_base_url: str = "",
+    cpa_probe_api_key: str = "",
+    pin_mode: str = "auth_filename",
+    pin_header: str = "X-CPA-Credential",
+    allow_unpinned_cpa_gate: bool = False,
+    probe_credential_pin: str = "",
 ) -> dict:
     try:
         d = json.loads(path.read_text(encoding="utf-8"))
@@ -106,15 +144,47 @@ def _probe_and_stamp(
     if not token:
         return {"ok": False, "email": email, "path": str(path), "error": "missing access_token"}
 
-    pr = probe_models(token, base_url=base_url, proxy=proxy)
+    pin = _resolve_probe_pin(
+        email=email,
+        path=path,
+        pin_mode=pin_mode,
+        explicit_pin=probe_credential_pin,
+    )
+    policy = resolve_gate_probe_policy(
+        via=probe_via,
+        cpa_base_url=cpa_probe_base_url,
+        cpa_api_key=cpa_probe_api_key,
+        credential_pin=pin if str(probe_via or "").strip().lower() != "direct" else "",
+        allow_unpinned_cpa_gate=bool(allow_unpinned_cpa_gate),
+    )
+    gate_via = str(policy.get("gate_via") or "direct")
+    gate_transport = build_probe_transport(
+        via=gate_via,
+        upstream_base_url=base_url,
+        cpa_base_url=cpa_probe_base_url,
+        cpa_api_key=cpa_probe_api_key,
+        access_token=token,
+        credential_pin=pin if gate_via == "cpa" else "",
+        pin_header=pin_header or "X-CPA-Credential",
+    )
+    log(
+        f"probe policy via={probe_via!r} gate={gate_via} "
+        f"cpa_smoke={policy.get('cpa_smoke')} reason={policy.get('reason')}"
+    )
+
+    pr = probe_models(token, base_url=base_url, proxy=proxy, transport=gate_transport)
     result: dict = {
         "email": email,
         "path": str(path),
         "probe_models": pr,
+        "probe_gate_via": gate_via,
+        "probe_policy_reason": policy.get("reason") or "",
+        "probe_via_cpa_ok": None,
     }
     log(
         f"models ok={pr.get('ok')} status={pr.get('status')} "
-        f"has_grok_45={pr.get('has_grok_45')} err={str(pr.get('error') or '')[:120]}"
+        f"has_grok_45={pr.get('has_grok_45')} mode={pr.get('transport_mode')!r} "
+        f"err={str(pr.get('error') or '')[:120]}"
     )
 
     if not pr.get("has_grok_45"):
@@ -131,13 +201,57 @@ def _probe_and_stamp(
             proxy=proxy,
             max_attempts=3,
             log=log,
+            transport=gate_transport,
         )
         apply_chat_probe_to_result(result, ch)
         if result.get("entitlement_denied"):
             log("FAIL-FAST: chat entitlement_denied — ledger + stamp only (no remint)")
 
+    # Observational CPA smoke only after gate chat_ok (never inject latch).
+    if (
+        policy.get("cpa_smoke")
+        and result.get("chat_ok") is True
+        and not result.get("entitlement_denied")
+        and (cpa_probe_base_url or "").strip()
+        and (cpa_probe_api_key or "").strip()
+    ):
+        cpa_t = build_probe_transport(
+            via="cpa",
+            upstream_base_url=base_url,
+            cpa_base_url=cpa_probe_base_url,
+            cpa_api_key=cpa_probe_api_key,
+            access_token=token,
+            credential_pin=pin,
+            pin_header=pin_header or "X-CPA-Credential",
+        )
+        try:
+            smoke = probe_chat_with_retries(
+                token,
+                base_url=base_url,
+                proxy=proxy,
+                max_attempts=1,
+                log=log,
+                transport=cpa_t,
+            )
+            result["probe_cpa_smoke"] = smoke
+            result["probe_via_cpa_ok"] = bool(smoke.get("ok"))
+            log(
+                f"cpa smoke ok={smoke.get('ok')} status={smoke.get('status')} "
+                f"mode={smoke.get('transport_mode')!r}"
+            )
+        except Exception as e:  # noqa: BLE001
+            result["probe_via_cpa_ok"] = False
+            result["probe_cpa_smoke_error"] = str(e)
+            log(f"cpa smoke failed: {e}")
+
     try:
-        stamped = stamp_auth_chat_fields(path, result)
+        updates = {
+            "probe_gate_via": result.get("probe_gate_via"),
+            "probe_policy_reason": result.get("probe_policy_reason"),
+        }
+        if result.get("probe_via_cpa_ok") is True or result.get("probe_via_cpa_ok") is False:
+            updates["probe_via_cpa_ok"] = bool(result.get("probe_via_cpa_ok"))
+        stamped = stamp_auth_chat_fields(path, result, updates=updates)
         result["import_gate"] = stamped.get("import_gate")
         if stamped.get("chat_ok") is None and "chat_ok" not in stamped:
             # incomplete stamp should not happen after full probe; surface for ops
@@ -180,6 +294,11 @@ def main() -> int:
         help=f"Override probe base (default config/DEFAULT {DEFAULT_BASE_URL})",
     )
     ap.add_argument(
+        "--probe-via",
+        default="",
+        help="Override cpa_probe_via: direct|cpa|hybrid (default hybrid)",
+    )
+    ap.add_argument(
         "--state",
         default=str(_ROOT / "logs" / "backfill_chat_stamps_state.json"),
     )
@@ -207,6 +326,25 @@ def main() -> int:
 
     base_url = (args.base_url or cfg.get("cpa_base_url") or DEFAULT_BASE_URL).rstrip("/")
     proxy = (cfg.get("proxy") or cfg.get("https_proxy") or "").strip() or None
+    probe_via = (
+        str(args.probe_via or cfg.get("cpa_probe_via") or "hybrid").strip().lower() or "hybrid"
+    )
+    if probe_via not in {"direct", "cpa", "hybrid"}:
+        probe_via = "hybrid"
+    cpa_probe_base_url = str(
+        cfg.get("cpa_probe_base_url") or os.environ.get("CPA_PROBE_BASE_URL") or ""
+    ).strip()
+    cpa_probe_api_key = str(
+        cfg.get("cpa_probe_api_key") or os.environ.get("CPA_PROBE_API_KEY") or ""
+    ).strip()
+    pin_mode = str(
+        cfg.get("cpa_probe_credential_pin_mode") or "auth_filename"
+    ).strip().lower() or "auth_filename"
+    pin_header = str(
+        cfg.get("cpa_probe_pin_header") or "X-CPA-Credential"
+    ).strip() or "X-CPA-Credential"
+    allow_unpinned = bool(cfg.get("cpa_probe_allow_unpinned_cpa_gate") is True)
+
     files = _iter_auth_files(
         auth_dir,
         only_email=args.email,
@@ -216,7 +354,7 @@ def main() -> int:
     )
     print(
         f"probe candidates={len(files)} only_missing={args.only_missing} "
-        f"base_url={base_url} sleep={args.sleep}",
+        f"base_url={base_url} probe_via={probe_via} sleep={args.sleep}",
         flush=True,
     )
     if not files:
@@ -235,7 +373,18 @@ def main() -> int:
             print(f"[{time.strftime('%H:%M:%S')}] [{_i}/{len(files)}] [{_p}] {msg}", flush=True)
 
         log("start")
-        r = _probe_and_stamp(p, base_url=base_url, proxy=proxy, log=log)
+        r = _probe_and_stamp(
+            p,
+            base_url=base_url,
+            proxy=proxy,
+            log=log,
+            probe_via=probe_via,
+            cpa_probe_base_url=cpa_probe_base_url,
+            cpa_probe_api_key=cpa_probe_api_key,
+            pin_mode=pin_mode,
+            pin_header=pin_header,
+            allow_unpinned_cpa_gate=allow_unpinned,
+        )
         if r.get("entitlement_denied"):
             denied_n += 1
             log(f"DENIED gate={r.get('import_gate')}")
@@ -258,6 +407,7 @@ def main() -> int:
                 "last_path": str(p),
                 "last_chat_ok": r.get("chat_ok"),
                 "last_import_gate": r.get("import_gate"),
+                "probe_via": probe_via,
             }
             state_path.write_text(
                 json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

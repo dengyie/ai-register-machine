@@ -141,7 +141,10 @@ def test_cli_multi_inject_stats() -> None:
 
 
 def test_live_gate_inventory_only_fails() -> None:
-    """live fail + inventory ok must hard-fail export (one-click product gate)."""
+    """live fail + inventory ok must hard-fail export (one-click product gate).
+
+    Fixture must be chat_ok so we exercise multi-dir inject, not chat_not_ok skip.
+    """
     exp = _load("cpa_export_live_gate", ROOT / "cpa_export.py")
     calls: list[str] = []
 
@@ -155,10 +158,27 @@ def test_live_gate_inventory_only_fails() -> None:
     with tempfile.TemporaryDirectory() as td:
         auth = Path(td) / "xai-t@e.com.json"
         auth.write_text(
-            json.dumps({"type": "xai", "email": "t@e.com", "priority": 1000}) + "\n",
+            json.dumps(
+                {
+                    "type": "xai",
+                    "email": "t@e.com",
+                    "priority": 1000,
+                    "chat_ok": True,
+                    "usable": True,
+                    "import_gate": "chat_ok",
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
-        result = {"ok": True, "path": str(auth), "email": "t@e.com"}
+        result = {
+            "ok": True,
+            "path": str(auth),
+            "email": "t@e.com",
+            "chat_ok": True,
+            "usable": True,
+            "import_gate": "chat_ok",
+        }
         cfg = {
             "cpa_remote_inject": True,
             "cpa_remote_auth_dirs": "/root/.cli-proxy-api,/personal/cpa/auths",
@@ -182,7 +202,14 @@ def test_live_gate_live_ok_keeps_success() -> None:
         rdir = str((config or {}).get("cpa_remote_auth_dir") or "")
         return {"ok": True, "remote_path": f"{rdir}/xai-t.json"}
 
-    result = {"ok": True, "path": "/tmp/xai-t.json", "email": "t@e.com"}
+    result = {
+        "ok": True,
+        "path": "/tmp/xai-t.json",
+        "email": "t@e.com",
+        "chat_ok": True,
+        "usable": True,
+        "import_gate": "chat_ok",
+    }
     cfg = {
         "cpa_remote_inject": True,
         "cpa_remote_auth_dirs": "/root/.cli-proxy-api,/personal/cpa/auths",

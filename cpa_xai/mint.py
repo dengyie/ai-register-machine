@@ -8,10 +8,16 @@ from typing import Any, Callable
 from .accounts import normalize_sso_cookie
 from .browser_confirm import mint_with_browser
 from .pkce_mint import PKCEMintError, mint_with_sso_pkce
-from .probe import apply_chat_probe_to_result, probe_chat_with_retries, probe_models
+from .probe import (
+    apply_chat_probe_to_result,
+    build_probe_transport,
+    probe_chat_with_retries,
+    probe_models,
+    resolve_gate_probe_policy,
+)
 from .protocol_mint import ProtocolMintError, extract_sso_from_cookies, mint_with_sso_protocol
 from .proxyutil import proxy_log_label, resolve_proxy, set_runtime_proxy
-from .schema import DEFAULT_BASE_URL, build_cpa_xai_auth
+from .schema import DEFAULT_BASE_URL, build_cpa_xai_auth, credential_file_name
 from .writer import stamp_auth_chat_fields, write_cpa_xai_auth
 
 LogFn = Callable[[str], None]
@@ -44,6 +50,12 @@ def mint_and_export(
     allow_device_flow_fallback: bool = True,
     protocol_flow: str = "pkce",
     priority: int = 1000,
+    probe_via: str = "hybrid",
+    cpa_probe_base_url: str = "",
+    cpa_probe_api_key: str = "",
+    probe_credential_pin: str = "",
+    probe_pin_header: str = "X-CPA-Credential",
+    allow_unpinned_cpa_gate: bool = False,
     log: LogFn | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -59,8 +71,16 @@ def mint_and_export(
 
     priority: CPA auth-file routing weight (CLIProxyAPI). Default 1000.
 
+    Mid-tier probe (tebi CPA):
+      - ``probe_via``: direct | cpa | hybrid (product default hybrid until pin proven).
+      - Unpinned ``cpa`` never stamps chat_ok; policy falls back to hybrid
+        (direct gate + optional observational ``probe_via_cpa_ok`` smoke).
+      - Auth file ``base_url`` remains upstream cli-chat-proxy (argument ``base_url``),
+        never the public CPA OpenAI base.
+
     Returns dict with keys: ok, path, email, probe_*, error?, mint_method?,
-    entitlement_denied?, chat_retryable?, chat_ok?.
+    entitlement_denied?, chat_retryable?, chat_ok?, probe_gate_via?,
+    probe_via_cpa_ok?, probe_policy_reason?.
 
     Product rule: when probe_chat=True, models-only success is not enough —
     free Build chat must pass /v1/responses. 403 permission-denied is
@@ -253,14 +273,51 @@ def mint_and_export(
     if protocol_err and result["mint_method"] != "protocol":
         result["protocol_error"] = protocol_err
 
+    # Resolve product gate vs optional CPA observational smoke.
+    # Auth write always uses upstream base_url (cli-chat-proxy), never CPA public host.
+    pin = (probe_credential_pin or "").strip()
+    if not pin and email:
+        # Default pin identity is the CPA auth filename (safe ops handle).
+        pin = credential_file_name(email=email)
+    policy = resolve_gate_probe_policy(
+        via=probe_via,
+        cpa_base_url=cpa_probe_base_url,
+        cpa_api_key=cpa_probe_api_key,
+        credential_pin=pin if str(probe_via or "").strip().lower() != "direct" else "",
+        allow_unpinned_cpa_gate=bool(allow_unpinned_cpa_gate),
+    )
+    result["probe_gate_via"] = policy.get("gate_via") or "direct"
+    result["probe_policy_reason"] = policy.get("reason") or ""
+    result["probe_via_cpa_ok"] = None
+    log(
+        f"probe policy: via={probe_via!r} gate={result['probe_gate_via']} "
+        f"cpa_smoke={policy.get('cpa_smoke')} reason={result['probe_policy_reason']}"
+    )
+
+    gate_transport = build_probe_transport(
+        via=str(policy.get("gate_via") or "direct"),
+        upstream_base_url=base_url,
+        cpa_base_url=cpa_probe_base_url,
+        cpa_api_key=cpa_probe_api_key,
+        access_token=tokens["access_token"],
+        credential_pin=pin if str(policy.get("gate_via")) == "cpa" else "",
+        pin_header=probe_pin_header or "X-CPA-Credential",
+    )
+
     # Chat gate implies models probe (need has_grok_45 before /responses).
     run_models = bool(probe or probe_chat)
     if run_models:
-        pr = probe_models(tokens["access_token"], base_url=base_url, proxy=resolved or None)
+        pr = probe_models(
+            tokens["access_token"],
+            base_url=base_url,
+            proxy=resolved or None,
+            transport=gate_transport,
+        )
         result["probe_models"] = pr
         log(
             f"probe models: ok={pr.get('ok')} status={pr.get('status')} "
             f"has_grok_45={pr.get('has_grok_45')} ids={pr.get('model_ids')} "
+            f"mode={pr.get('transport_mode')!r} "
             f"error={str(pr.get('error') or '')[:200]}"
         )
         if not pr.get("has_grok_45"):
@@ -284,6 +341,7 @@ def mint_and_export(
                 proxy=resolved or None,
                 max_attempts=3,
                 log=log,
+                transport=gate_transport,
             )
             apply_chat_probe_to_result(result, ch)
             if result.get("entitlement_denied"):
@@ -291,10 +349,53 @@ def mint_and_export(
                     "FAIL-FAST: chat entitlement_denied — skip remint/retry for this account"
                 )
 
+    # Observational CPA mid-tier smoke: never replaces chat_ok for inject.
+    if (
+        policy.get("cpa_smoke")
+        and result.get("chat_ok") is True
+        and not result.get("entitlement_denied")
+        and (cpa_probe_base_url or "").strip()
+        and (cpa_probe_api_key or "").strip()
+    ):
+        cpa_t = build_probe_transport(
+            via="cpa",
+            upstream_base_url=base_url,
+            cpa_base_url=cpa_probe_base_url,
+            cpa_api_key=cpa_probe_api_key,
+            access_token=tokens["access_token"],
+            credential_pin=pin,
+            pin_header=probe_pin_header or "X-CPA-Credential",
+        )
+        try:
+            smoke = probe_chat_with_retries(
+                tokens["access_token"],
+                base_url=base_url,
+                proxy=resolved or None,
+                max_attempts=1,
+                log=log,
+                transport=cpa_t,
+            )
+            result["probe_cpa_smoke"] = smoke
+            result["probe_via_cpa_ok"] = bool(smoke.get("ok"))
+            log(
+                f"cpa smoke: ok={smoke.get('ok')} status={smoke.get('status')} "
+                f"code={smoke.get('error_code')!r} mode={smoke.get('transport_mode')!r}"
+            )
+        except Exception as e:  # noqa: BLE001
+            result["probe_via_cpa_ok"] = False
+            result["probe_cpa_smoke_error"] = str(e)
+            log(f"cpa smoke failed: {e}")
+
     # Stamp local auth so remint/ops can skip denied and re-probe transient.
     if result.get("path"):
         try:
-            stamped = stamp_auth_chat_fields(result["path"], result)
+            updates = {
+                "probe_gate_via": result.get("probe_gate_via"),
+                "probe_policy_reason": result.get("probe_policy_reason"),
+            }
+            if result.get("probe_via_cpa_ok") is True or result.get("probe_via_cpa_ok") is False:
+                updates["probe_via_cpa_ok"] = bool(result.get("probe_via_cpa_ok"))
+            stamped = stamp_auth_chat_fields(result["path"], result, updates=updates)
             if stamped.get("import_gate"):
                 result["import_gate"] = stamped["import_gate"]
         except Exception as e:  # noqa: BLE001

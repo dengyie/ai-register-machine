@@ -854,6 +854,26 @@ def export_cpa_xai_for_account(
     probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=True)
     # When chat probe runs, deny soft-pass unless explicitly disabled.
     probe_chat_required = _config_bool(cfg.get("cpa_probe_chat_required"), default=True)
+    # Mid-tier probe via tebi CPA (hybrid default until pin proven).
+    # resolve_gate_probe_policy runs inside mint_and_export after these kwargs.
+    probe_via = str(cfg.get("cpa_probe_via") or "hybrid").strip().lower() or "hybrid"
+    if probe_via not in {"direct", "cpa", "hybrid"}:
+        probe_via = "hybrid"
+    cpa_probe_base_url = str(
+        cfg.get("cpa_probe_base_url") or os.environ.get("CPA_PROBE_BASE_URL") or ""
+    ).strip()
+    cpa_probe_api_key = str(
+        cfg.get("cpa_probe_api_key") or os.environ.get("CPA_PROBE_API_KEY") or ""
+    ).strip()
+    pin_mode = str(
+        cfg.get("cpa_probe_credential_pin_mode") or "auth_filename"
+    ).strip().lower() or "auth_filename"
+    pin_header = str(
+        cfg.get("cpa_probe_pin_header") or "X-CPA-Credential"
+    ).strip() or "X-CPA-Credential"
+    allow_unpinned_cpa_gate = _config_bool(
+        cfg.get("cpa_probe_allow_unpinned_cpa_gate"), default=False
+    )
     timeout = float(cfg.get("cpa_mint_timeout_sec", 240))
     base_url = cfg.get("cpa_base_url") or "https://cli-chat-proxy.grok.com/v1"
     force_standalone = _config_bool(cfg.get("cpa_force_standalone"), default=True)
@@ -922,6 +942,32 @@ def export_cpa_xai_for_account(
     def _log(msg: str) -> None:
         log(f"[cpa] {msg}")
 
+    from cpa_xai.schema import credential_file_name  # type: ignore
+    from cpa_xai.probe import resolve_gate_probe_policy  # type: ignore
+
+    if pin_mode == "email":
+        probe_pin = (email or "").strip()
+    elif pin_mode == "auth_filename":
+        probe_pin = credential_file_name(email=email) if email else ""
+    else:
+        probe_pin = ""
+
+    # Preflight product policy (mint re-resolves with same inputs).
+    _pre_policy = resolve_gate_probe_policy(
+        via=probe_via,
+        cpa_base_url=cpa_probe_base_url,
+        cpa_api_key=cpa_probe_api_key,
+        credential_pin=probe_pin if probe_via != "direct" else "",
+        allow_unpinned_cpa_gate=allow_unpinned_cpa_gate,
+    )
+    log(
+        f"[cpa] probe_via={probe_via} pin_mode={pin_mode} "
+        f"gate={_pre_policy.get('gate_via')} cpa_smoke={_pre_policy.get('cpa_smoke')} "
+        f"reason={_pre_policy.get('reason')} "
+        f"cpa_probe_base={'yes' if cpa_probe_base_url else 'no'} "
+        f"cpa_probe_key={'yes' if cpa_probe_api_key else 'no'}"
+    )
+
     result = mint_and_export(
         email=email,
         password=password,
@@ -944,6 +990,12 @@ def export_cpa_xai_for_account(
         protocol_flow=protocol_flow,
         allow_device_flow_fallback=allow_device_flow_fallback,
         priority=auth_priority,
+        probe_via=probe_via,
+        cpa_probe_base_url=cpa_probe_base_url,
+        cpa_probe_api_key=cpa_probe_api_key,
+        probe_credential_pin=probe_pin,
+        probe_pin_header=pin_header,
+        allow_unpinned_cpa_gate=allow_unpinned_cpa_gate,
         log=_log,
     )
     if result.get("mint_method"):
