@@ -127,6 +127,38 @@ def cmd_core(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_import(args: argparse.Namespace) -> int:
+    """Convert Clash YAML / V2Ray JSON / share URIs into project artifacts."""
+    from pathlib import Path
+
+    from register_core.nodes.convert.cli_import import run_import
+    from register_core.nodes.convert.types import DEFAULT_CONTROLLER, DEFAULT_MIXED_PORT
+
+    clash_home = None
+    if not args.no_clash_home:
+        clash_home = Path(args.clash_home).expanduser() if args.clash_home else None
+    nh = (args.nodes_home or "").strip()
+    nj = (args.nodes_json or "").strip()
+    return run_import(
+        list(args.paths or []),
+        format_hint=args.format or "",
+        nodes_home=Path(nh).expanduser() if nh else None,
+        nodes_json=Path(nj).expanduser() if nj else None,
+        mixed_port=int(args.mixed_port or DEFAULT_MIXED_PORT),
+        controller=str(args.controller or DEFAULT_CONTROLLER),
+        max_profile_proxies=int(args.max_profile_proxies),
+        dry_run=bool(args.dry_run),
+        clash_home=clash_home,
+    )
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Validate profiles without writing (legality, not liveness)."""
+    from register_core.nodes.convert.cli_import import run_validate
+
+    return run_validate(list(args.paths or []), format_hint=args.format or "")
+
+
 def cmd_egress(args: argparse.Namespace) -> int:
     """Get/set egress backend switch (core vs clash vs list vs direct)."""
     from register_core.util.egress import (
@@ -241,6 +273,45 @@ def build_parser() -> argparse.ArgumentParser:
     pcore.add_argument("--no-start", action="store_true", help="url: do not auto-start")
     pcore.add_argument("--json", action="store_true")
     pcore.set_defaults(func=cmd_core)
+
+    pimp = sub.add_parser(
+        "import",
+        help="Import Clash YAML / V2Ray JSON / share URI → nodes.json + runtime.yaml",
+    )
+    pimp.add_argument("paths", nargs="*", help="files/dirs (YAML/JSON/txt URI list); empty=stdin")
+    pimp.add_argument(
+        "--format",
+        default="",
+        help="force format: clash_yaml | v2ray_json | uri_list (default: auto-detect)",
+    )
+    pimp.add_argument("--dry-run", action="store_true", help="parse+validate only, no write")
+    pimp.add_argument("--nodes-home", default="", help="default: ./.nodes")
+    pimp.add_argument("--nodes-json", default="", help="default: ./nodes.json")
+    pimp.add_argument("--mixed-port", type=int, default=17897)
+    pimp.add_argument("--controller", default="127.0.0.1:19097")
+    pimp.add_argument("--max-profile-proxies", type=int, default=400)
+    pimp.add_argument(
+        "--clash-home",
+        default=str(
+            Path.home()
+            / "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
+        ),
+        help="optional Clash Verge data dir (mac default)",
+    )
+    pimp.add_argument(
+        "--no-clash-home",
+        action="store_true",
+        help="do not auto-scan Clash Verge profiles",
+    )
+    pimp.set_defaults(func=cmd_import)
+
+    pval = sub.add_parser(
+        "validate",
+        help="Validate Clash/V2Ray/URI profiles (legality report, no write)",
+    )
+    pval.add_argument("paths", nargs="*", help="files; empty=stdin")
+    pval.add_argument("--format", default="", help="force format (auto default)")
+    pval.set_defaults(func=cmd_validate)
 
     peg = sub.add_parser(
         "egress",

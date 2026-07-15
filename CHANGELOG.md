@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.6.2] - 2026-07-16
+
+### Added
+
+- **Light node convert pipeline** (`register_core/nodes/convert/`): parse → validate → split → pack
+- Inputs: Clash/mihomo YAML, V2Ray/Xray JSON outbounds, share URI lines (ss/vmess/vless/trojan/http/socks)
+- CLI: `python -m register_core nodes import|validate` (dry-run, format force, no register-path weight)
+- Legality report rejects missing type/server/port/uuid/…; dialable → `nodes.json`, protocol → `runtime.yaml`
+- Compat: `scripts/import_clash_to_nodes.py` is a thin wrapper over the same pipeline
+- Tests: `test_nodes_convert.py`
+
+### Notes
+
+- mihomo remains optional runtime for protocol nodes only; HTTP/SOCKS path needs no core
+- Conversion is opt-in CLI — register pipeline only consumes artifacts
+
 ## [1.6.1] - 2026-07-16
 
 ### Added

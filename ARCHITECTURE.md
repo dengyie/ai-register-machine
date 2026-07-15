@@ -108,12 +108,14 @@ REGISTER_EGRESS / --egress / nodes egress set
 |------|-----------|
 | Switch | `register_core/util/egress.py` + `.nodes/config/egress.mode` |
 | HTTP catalog | `nodes.json` + `register_core/nodes/` |
-| Protocol YAML | `.nodes/config/runtime.yaml` (imported Clash profiles) |
-| Mini-core | `.nodes/bin/mihomo` via `nodes core start` |
-| CLI | `python -m register_core nodes egress\|list\|check\|core …` |
-| Import | `scripts/import_clash_to_nodes.py` |
+| Convert (opt-in) | `register_core/nodes/convert/` — parse/validate/pack only |
+| Protocol YAML | `.nodes/config/runtime.yaml` (from `nodes import`) |
+| Mini-core | `.nodes/bin/mihomo` via `nodes core start` (optional) |
+| CLI | `python -m register_core nodes import\|validate\|egress\|list\|check\|core …` |
+| Import compat | `scripts/import_clash_to_nodes.py` |
 
 VLESS/SS/… need `egress=core` (or auto with empty list); plain HTTP/SOCKS can use `list`.
+Import/validate is **not** on the hot register path — only the written artifacts are.
 
 ## Production authority (do not invert)
 

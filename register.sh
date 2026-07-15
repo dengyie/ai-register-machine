@@ -54,6 +54,11 @@ Egress switch (core=project mihomo / clash=external / list / direct / auto):
   REGISTER_EGRESS=core ./register.sh chatgpt 1
   python -m register_core nodes list|check|core start|add
 
+Node import (light convert; not on register hot path):
+  python -m register_core nodes validate profile.yaml
+  python -m register_core nodes import profile.yaml --no-clash-home
+  python -m register_core nodes import links.txt --format uri_list
+
 Deploy layout example (pxed):
   /personal/grok-register or ai-register-machine   this monorepo
   /personal/mimo-register                       optional Node runtime
