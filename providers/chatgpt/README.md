@@ -39,34 +39,37 @@ CHATGPT_PROXY_LIST='http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080' \
   --proxy-list 'http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080'
 ```
 
-## Egress (project-owned; no Clash)
+## Egress switch (core vs Clash)
 
-Register machine owns the node pool via `nodes.json` / `PROXY_LIST`.
-**No Clash / mihomo / system VPN is required.** Each attempt binds `curl_cffi`
-to a concrete upstream HTTP/SOCKS proxy URL.
+| Backend | Meaning |
+|---------|---------|
+| `core` | project mihomo `.nodes` → `http://127.0.0.1:17897` |
+| `clash` | external Clash Verge/mihomo → `http://127.0.0.1:7897` |
+| `list` | only `nodes.json` / `PROXY_LIST` HTTP-SOCKS |
+| `direct` | no proxy |
+| `auto` | list → core → clash (default) |
 
-| Source | How | External VPN |
-|--------|-----|--------------|
-| `nodes.json` / `nodes.txt` | project catalog; auto list rotation | **none** |
-| `CHATGPT_PROXY_LIST` / `--proxy-list` | rotate explicit URLs per attempt | **none** |
-| fixed `CHATGPT_PROXY` | single URL | optional only |
-| `clash` mode | dedicated group (legacy Grok) | controller API |
-
-Priority: explicit list → `nodes.json` → fixed `CHATGPT_PROXY` → none.
-Empty everything → no proxy (direct). Setting a non-empty pool auto-enables `list`.
+```bash
+python -m register_core nodes egress show
+python -m register_core nodes egress set core   # or clash|list|direct|auto
+REGISTER_EGRESS=core ./providers/chatgpt/run-register.sh 1
+```
 
 ```bash
 python -m register_core nodes list|check|add 'http://u:p@host:port'
+python -m register_core nodes core start|select
 ```
 
 ## Env
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `REGISTER_NODES_FILE` / `NODES_FILE` | `./nodes.json` | Project-owned egress catalog |
+| `REGISTER_EGRESS` / `CHATGPT_EGRESS` | `auto` | Backend: `core`\|`clash`\|`list`\|`direct`\|`auto` |
+| `REGISTER_NODES_FILE` / `NODES_FILE` | `./nodes.json` | HTTP/SOCKS catalog |
 | `REGISTER_NODES` | `1` | Set `0` to ignore catalog |
-| `CHATGPT_PROXY` | empty | Fixed outbound proxy when not rotating |
-| `CHATGPT_PROXY_LIST` / `PROXY_LIST` | empty (falls back to nodes) | Self-controlled node pool |
+| `CLASH_PROXY` | `http://127.0.0.1:7897` | External Clash mixed port (`egress=clash`) |
+| `CHATGPT_PROXY` | empty | Fixed URL override |
+| `CHATGPT_PROXY_LIST` / `PROXY_LIST` | empty | Self-controlled HTTP pool |
 | `CHATGPT_PROXY_ROTATE_MODE` / `PROXY_ROTATE_MODE` | auto | `off` \| `list` \| `nodes` \| `clash` |
 | `CHATGPT_PROXY_ROTATE_EVERY` | `1` | Rotate every N attempts |
 | `CHATGPT_EMAIL_DOMAIN` | `publicvm.com` | Force tinyhost domain (higher OTP deliverability) |
