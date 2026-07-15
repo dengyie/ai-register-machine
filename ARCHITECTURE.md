@@ -95,19 +95,26 @@ REGISTER_EGRESS / --egress / nodes egress set
         ├─ clash  → external Clash mixed port :7897 (+ optional API rotate)
         ├─ list   → nodes.json / PROXY_LIST only
         ├─ direct → no proxy
-        └─ auto   → list → core → clash URL → direct
+        └─ auto   → healthy list → core → clash URL → direct
+                │
+                ▼
+        preflight (list/auto): probe nodes → healthy-only pool
                 │
                 ▼
         proxy_rotate → concrete URL per attempt
                 │
                 ▼
         provider curl_cffi session (proxy=URL)
+                │
+                ▼
+        feedback: proxy/network fail → mark/quarantine/drop; success → clear fails
 ```
 
 | Path | Authority |
 |------|-----------|
 | Switch | `register_core/util/egress.py` + `.nodes/config/egress.mode` |
 | HTTP catalog | `nodes.json` + `register_core/nodes/` (import **merges** by URL) |
+| Preflight + quarantine | `NodeManager.preflight/mark_result` + `util/proxy.preflight_nodes_for_register` |
 | Convert (opt-in) | `register_core/nodes/convert/` — parse/validate/pack only |
 | Protocol YAML | `.nodes/config/runtime.yaml` (from `nodes import`) |
 | Mini-core | `.nodes/bin/mihomo` via `nodes core start` (optional) |
@@ -115,6 +122,7 @@ REGISTER_EGRESS / --egress / nodes egress set
 | Import script | `scripts/import_nodes.py` (`import_clash_to_nodes.py` deprecated) |
 
 Primary backends: `list` \| `core` \| `direct`. Advanced: `auto` (healthy list → core → clash-if-set), `clash`.
+Register path **probes first** (`REGISTER_NODES_PREFLIGHT=1`); dead nodes are quarantined after `REGISTER_NODES_MAX_FAIL`.
 VLESS/SS/… need `egress=core`. Import/validate is **not** on the hot register path.
 
 ## Production authority (do not invert)

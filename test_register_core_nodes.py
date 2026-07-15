@@ -114,6 +114,7 @@ class TestManager(unittest.TestCase):
                 "REGISTER_NODES": "1",
                 "REGISTER_EGRESS": "list",
                 "REGISTER_CORE": "0",
+                "REGISTER_NODES_PREFLIGHT": "0",
             }
             with patch.dict(os.environ, env_clear, clear=False):
                 reset_manager_for_tests()
@@ -166,14 +167,233 @@ class TestManager(unittest.TestCase):
                     "REGISTER_NODES": "1",
                     "REGISTER_EGRESS": "list",
                     "REGISTER_CORE": "0",
+                    "REGISTER_NODES_PREFLIGHT": "0",
                 },
                 clear=False,
             ):
                 reset_manager_for_tests()
                 core_proxy.reset_rotation_for_tests()
                 pipe = Pipeline(Stub(), verifier=NoopVerifier(), fail_fast=False)
-                pipe.run(1, extra={"egress": "list"})
+                pipe.run(1, extra={"egress": "list", "nodes_preflight": False})
         self.assertEqual(seen, ["http://pipe-node:1"])
+
+    def test_mark_result_quarantines_after_max_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes(
+                [
+                    Node(url="http://good:1", id="g", last_ok=True),
+                    Node(url="http://bad:1", id="b", last_ok=True),
+                ],
+                path,
+            )
+            with patch.dict(
+                os.environ,
+                {"REGISTER_NODES_MAX_FAIL": "2", "REGISTER_NODES_SKIP_FAILED": "1"},
+                clear=False,
+            ):
+                mgr = NodeManager(path)
+                mgr.mark_result("http://bad:1", ok=False, error="timeout")
+                self.assertEqual(len(mgr.enabled_nodes(healthy_only=True)), 1)
+                mgr.mark_result("http://bad:1", ok=False, error="timeout")
+                bad = mgr.find_by_url("http://bad:1")
+                assert bad is not None
+                self.assertTrue(mgr._is_quarantined(bad))
+                urls = mgr.urls(healthy_only=False)
+                self.assertNotIn("http://bad:1", urls)
+                self.assertIn("http://good:1", urls)
+
+    def test_preflight_seeds_healthy_only_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes(
+                [
+                    Node(url="http://alive:1", id="a"),
+                    Node(url="http://dead:1", id="d"),
+                ],
+                path,
+            )
+
+            def fake_probe(node, **kwargs):
+                ok = node.url.endswith("alive:1")
+                node.last_ok = ok
+                node.fail_count = 0 if ok else 1
+                node.last_error = "" if ok else "down"
+                return {"id": node.id, "label": node.label, "ok": ok, "error": node.last_error}
+
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES": "1",
+                    "REGISTER_EGRESS": "list",
+                    "REGISTER_CORE": "0",
+                    "PROXY_LIST": "",
+                    "CHATGPT_PROXY_LIST": "",
+                    "REGISTER_NODES_PREFLIGHT": "1",
+                },
+                clear=False,
+            ), patch("register_core.nodes.manager.probe_node", side_effect=fake_probe):
+                reset_manager_for_tests()
+                core_proxy.reset_rotation_for_tests()
+                extra = core_proxy.preflight_nodes_for_register({"egress": "list"})
+                self.assertFalse(extra["_nodes_preflight"].get("skipped"))
+                self.assertEqual(extra["_nodes_preflight"]["healthy"], 1)
+                self.assertEqual(extra.get("proxy_list"), "http://alive:1")
+                p, info = core_proxy.resolve_attempt_proxy(extra)
+                self.assertEqual(p, "http://alive:1")
+                self.assertEqual(info.get("mode"), "list")
+
+    def test_preflight_zero_healthy_fail_fast_on_list(self) -> None:
+        from register_core.errors import FailFastError
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes([Node(url="http://dead:1", id="d")], path)
+
+            def fake_probe(node, **kwargs):
+                node.last_ok = False
+                node.fail_count = 1
+                node.last_error = "down"
+                return {"id": node.id, "label": node.label, "ok": False, "error": "down"}
+
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES": "1",
+                    "REGISTER_EGRESS": "list",
+                    "REGISTER_CORE": "0",
+                    "PROXY_LIST": "",
+                    "REGISTER_NODES_PREFLIGHT": "1",
+                },
+                clear=False,
+            ), patch("register_core.nodes.manager.probe_node", side_effect=fake_probe):
+                reset_manager_for_tests()
+                core_proxy.reset_rotation_for_tests()
+                with self.assertRaises(FailFastError):
+                    core_proxy.preflight_nodes_for_register({"egress": "list"})
+
+    def test_report_attempt_drops_dead_proxy_from_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes(
+                [
+                    Node(url="http://n1:1", id="n1", last_ok=True),
+                    Node(url="http://n2:2", id="n2", last_ok=True),
+                ],
+                path,
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES": "1",
+                    "REGISTER_EGRESS": "list",
+                    "REGISTER_CORE": "0",
+                    "REGISTER_NODES_MAX_FAIL": "1",
+                    "PROXY_LIST": "",
+                    "REGISTER_NODES_PREFLIGHT": "0",
+                },
+                clear=False,
+            ):
+                reset_manager_for_tests()
+                core_proxy.reset_rotation_for_tests()
+                extra = {
+                    "egress": "list",
+                    "proxy_list": "http://n1:1,http://n2:2",
+                    "proxy_rotate_mode": "list",
+                    "proxy_rotate_on_start": True,
+                    "nodes_preflight": False,
+                }
+                p1, _ = core_proxy.resolve_attempt_proxy(extra)
+                self.assertEqual(p1, "http://n1:1")
+                info = core_proxy.report_attempt_proxy_result(
+                    {"proxy": "http://n1:1", "egress": "list", "proxy_list": "http://n1:1,http://n2:2"},
+                    ok=False,
+                    error="connection timeout via proxy",
+                    error_kind="other",
+                )
+                self.assertTrue(info.get("marked"))
+                self.assertTrue(info.get("removed_from_pool") or info.get("quarantined"))
+                # next resolve should not stick on dead n1 if pool rebuilt
+                p2, _ = core_proxy.resolve_attempt_proxy(
+                    {
+                        "egress": "list",
+                        "proxy_list": "http://n2:2",
+                        "proxy_rotate_mode": "list",
+                        "proxy_rotate_on_start": True,
+                    }
+                )
+                self.assertEqual(p2, "http://n2:2")
+
+    def test_pipeline_preflight_and_skip_dead_node(self) -> None:
+        from register_core.contracts import RegisterResult
+        from register_core.pipeline import Pipeline
+        from register_core.verify.noop import NoopVerifier
+
+        seen: list[str] = []
+
+        class Stub:
+            name = "stub"
+
+            def register_one(self, *, email_source=None, extra=None):
+                proxy = str((extra or {}).get("proxy") or "")
+                seen.append(proxy)
+                if "dead" in proxy:
+                    return RegisterResult(
+                        ok=False,
+                        provider=self.name,
+                        error="connection refused proxy",
+                        error_kind="other",
+                        secret_kind="none",
+                    )
+                return RegisterResult(
+                    ok=False,
+                    provider=self.name,
+                    error="registration_disallowed",
+                    error_kind="provider",
+                    secret_kind="none",
+                )
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes(
+                [
+                    Node(url="http://dead:1", id="dead"),
+                    Node(url="http://alive:2", id="alive"),
+                ],
+                path,
+            )
+
+            def fake_probe(node, **kwargs):
+                ok = "alive" in node.url
+                node.last_ok = ok
+                node.fail_count = 0 if ok else 3
+                node.last_error = "" if ok else "down"
+                return {"id": node.id, "label": node.label, "ok": ok, "error": node.last_error}
+
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES": "1",
+                    "REGISTER_EGRESS": "list",
+                    "REGISTER_CORE": "0",
+                    "PROXY_LIST": "",
+                    "CHATGPT_PROXY_LIST": "",
+                    "REGISTER_NODES_PREFLIGHT": "1",
+                    "REGISTER_NODES_MAX_FAIL": "1",
+                },
+                clear=False,
+            ), patch("register_core.nodes.manager.probe_node", side_effect=fake_probe):
+                reset_manager_for_tests()
+                core_proxy.reset_rotation_for_tests()
+                pipe = Pipeline(Stub(), verifier=NoopVerifier(), fail_fast=False)
+                stats = pipe.run(2, extra={"egress": "list"})
+        self.assertTrue(all("alive" in p for p in seen))
+        self.assertFalse(any("dead" in p for p in seen))
+        self.assertEqual(stats.nodes_preflight.get("healthy"), 1)
 
 
 if __name__ == "__main__":

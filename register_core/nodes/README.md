@@ -53,7 +53,7 @@ Compat scripts: `scripts/import_nodes.py` (canonical); `import_clash_to_nodes.py
 ```bash
 python -m register_core nodes list          # summary (sample)
 python -m register_core nodes list --all
-python -m register_core nodes check
+python -m register_core nodes check         # probe all → last_ok / fail_count
 python -m register_core nodes add 'http://u:p@host:port' --label us1
 ```
 
@@ -61,6 +61,31 @@ python -m register_core nodes add 'http://u:p@host:port' --label us1
 |------|--------|
 | `nodes.json` | `{ "version": 1, "nodes": [ { "url", "id", "label", "tags", "enabled" } ] }` |
 | `nodes.txt` / `nodes.list` | one URL per line |
+
+### Register adaptation (preflight + quarantine)
+
+Registration **probes first**, then rotates only healthy URLs:
+
+```text
+pipeline.run
+  → preflight_nodes_for_register   # probe catalog (list/auto)
+  → healthy proxy_list only
+  → each attempt: inject_attempt_proxy (rotate)
+  → on proxy/network fail: mark fail_count, drop from live pool
+  → quarantine after REGISTER_NODES_MAX_FAIL (default 3)
+  → 0 healthy on egress=list → FailFastError (no burn)
+```
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `REGISTER_NODES_PREFLIGHT` | `1` | Probe catalog before register |
+| `REGISTER_NODES_MAX_FAIL` | `3` | Failures before quarantine |
+| `REGISTER_NODES_SKIP_FAILED` | `1` | Skip quarantined in rotation |
+| `REGISTER_NODES_REQUIRED` | list-backend true | Zero healthy → fail-fast |
+| `REGISTER_NODES_PROBE_TIMEOUT` | `12` | Probe timeout seconds |
+| `REGISTER_NODES_PROBE_LIMIT` | `40` | Max probes per preflight (`0` = unlimited) |
+
+Non-proxy failures (`mail_miss`, captcha, `registration_disallowed`) **do not** quarantine nodes.
 
 ## 3) Protocol core (only if needed)
 

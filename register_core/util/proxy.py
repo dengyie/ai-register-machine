@@ -384,6 +384,385 @@ def inject_attempt_proxy(extra: dict[str, Any] | None = None, *, log_fn: LogFn =
     return base
 
 
+def _env_truthy_name(*names: str, default: bool = False) -> bool:
+    raw = _env_first(*names, default="")
+    if raw == "":
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _nodes_preflight_enabled(extra: dict[str, Any] | None) -> bool:
+    extra = extra if isinstance(extra, dict) else {}
+    if "nodes_preflight" in extra:
+        v = extra.get("nodes_preflight")
+        if isinstance(v, bool):
+            return v
+        return str(v or "").strip().lower() in {"1", "true", "yes", "on"}
+    return _env_truthy_name(
+        "REGISTER_NODES_PREFLIGHT",
+        "NODES_PREFLIGHT",
+        default=True,
+    )
+
+
+def _nodes_required_for_backend(backend: str, extra: dict[str, Any] | None) -> bool:
+    """Whether zero healthy dialable nodes must stop the batch."""
+    extra = extra if isinstance(extra, dict) else {}
+    if "nodes_required" in extra:
+        v = extra.get("nodes_required")
+        if isinstance(v, bool):
+            return v
+        return str(v or "").strip().lower() in {"1", "true", "yes", "on"}
+    if _env_truthy_name("REGISTER_NODES_REQUIRED", "NODES_REQUIRED", default=False):
+        return True
+    # explicit list backend with catalog intent: empty healthy pool is fatal
+    if backend == "list":
+        return True
+    return False
+
+
+def preflight_nodes_for_register(
+    extra: dict[str, Any] | None = None,
+    *,
+    log_fn: LogFn = None,
+) -> dict[str, Any]:
+    """Probe project nodes and seed register rotation with healthy-only pool.
+
+    Called once before a pipeline batch. Rules:
+    - Only when backend is ``list`` or ``auto`` and nodes catalog is enabled
+    - Skipped for ``core`` / ``clash`` / ``direct`` (no HTTP catalog rotation)
+    - ``REGISTER_NODES_PREFLIGHT=0`` disables probe (not recommended)
+    - On ``list`` (or required), zero healthy nodes → FailFastError
+    - Mutates a copy of ``extra``: sets ``proxy_list`` to healthy URLs and forces reconfig
+    """
+    from register_core.errors import FailFastError
+
+    base = dict(extra or {})
+    backend = resolve_backend(base)
+
+    # already preflighted this extra payload
+    if base.get("_nodes_preflight_done"):
+        return base
+
+    if backend in {"direct", "core", "clash"}:
+        base["_nodes_preflight_done"] = True
+        base["_nodes_preflight"] = {
+            "skipped": True,
+            "reason": f"backend={backend}",
+            "healthy": 0,
+        }
+        return base
+
+    # explicit PROXY_LIST from operator skips catalog probe (they own the pool)
+    explicit_list = (
+        base.get("proxy_list")
+        or base.get("proxy_pool")
+        or _env_first("CHATGPT_PROXY_LIST", "PROXY_LIST", "PROXY_POOL")
+        or ""
+    )
+    nodes_disabled = _env_first("REGISTER_NODES", "USE_NODES", default="1").lower() in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+    if nodes_disabled:
+        base["_nodes_preflight_done"] = True
+        base["_nodes_preflight"] = {"skipped": True, "reason": "REGISTER_NODES=0", "healthy": 0}
+        return base
+
+    if str(explicit_list).strip() and not base.get("force_nodes_preflight"):
+        # operator-provided list: still optional probe if they ask; default skip network gate
+        base["_nodes_preflight_done"] = True
+        base["_nodes_preflight"] = {
+            "skipped": True,
+            "reason": "explicit_proxy_list",
+            "healthy": 0,
+        }
+        return base
+
+    if not _nodes_preflight_enabled(base):
+        # still prefer known-healthy for auto; list without preflight uses full catalog
+        if backend == "auto":
+            healthy = _load_nodes_proxy_list(healthy_only=None)
+            if healthy:
+                base["proxy_list"] = healthy
+                base["egress"] = "list"
+        base["_nodes_preflight_done"] = True
+        base["_nodes_preflight"] = {"skipped": True, "reason": "preflight_disabled", "healthy": 0}
+        configure_rotation_once(base, log_fn=log_fn, force=True)
+        return base
+
+    try:
+        from register_core.nodes import get_manager
+
+        mgr = get_manager()
+    except Exception as exc:
+        if _nodes_required_for_backend(backend, base):
+            raise FailFastError(f"nodes catalog unavailable: {exc}") from exc
+        base["_nodes_preflight_done"] = True
+        base["_nodes_preflight"] = {"skipped": True, "reason": str(exc), "healthy": 0}
+        return base
+
+    timeout_raw = base.get("nodes_probe_timeout") or _env_first(
+        "REGISTER_NODES_PROBE_TIMEOUT", "NODES_PROBE_TIMEOUT", default="12"
+    )
+    try:
+        timeout = max(3.0, float(timeout_raw))
+    except Exception:
+        timeout = 12.0
+    limit_raw = base.get("nodes_probe_limit")
+    if limit_raw is None or limit_raw == "":
+        limit_raw = _env_first("REGISTER_NODES_PROBE_LIMIT", "NODES_PROBE_LIMIT", default="")
+    limit: int | None
+    # None → NodeManager.preflight default budget (40); 0 → unlimited
+    try:
+        if limit_raw is None or str(limit_raw).strip() == "":
+            limit = None  # manager default
+        else:
+            parsed = int(limit_raw)
+            limit = None if parsed == 0 else max(1, parsed)
+    except Exception:
+        limit = None
+
+    def _log(msg: str) -> None:
+        if log_fn:
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+        else:
+            log.info("%s", msg)
+
+    summary = mgr.preflight(timeout=timeout, log=_log, persist=True, limit=limit)
+    healthy_list = summary.get("proxy_list") or ""
+    healthy_n = int(summary.get("healthy") or 0)
+
+    if healthy_n <= 0:
+        msg = (
+            f"nodes preflight found 0 healthy proxies "
+            f"(probed={summary.get('probed')} fail={summary.get('fail')} path={summary.get('path')})"
+        )
+        if _nodes_required_for_backend(backend, base) or backend == "list":
+            raise FailFastError(msg)
+        # auto: fall through to core without list pool
+        _log(f"[nodes] {msg}; falling through to core/auto")
+        base["_nodes_preflight_done"] = True
+        base["_nodes_preflight"] = {**summary, "skipped": False, "healthy": 0}
+        # ensure empty list doesn't block core: leave proxy_list unset
+        base.pop("proxy_list", None)
+        configure_rotation_once(base, log_fn=log_fn, force=True)
+        return base
+
+    # Seed rotation with only probed-ok URLs; force list mode for this batch.
+    base["proxy_list"] = healthy_list
+    if backend == "auto":
+        base["egress"] = "list"
+    if not base.get("proxy_rotate_mode"):
+        base["proxy_rotate_mode"] = "list"
+    base["_nodes_preflight_done"] = True
+    base["_nodes_preflight"] = {
+        "skipped": False,
+        "ok": summary.get("ok"),
+        "fail": summary.get("fail"),
+        "healthy": healthy_n,
+        "probed": summary.get("probed"),
+        "path": summary.get("path"),
+    }
+    _log(f"[nodes] preflight ready healthy={healthy_n} → list rotation")
+    configure_rotation_once(base, log_fn=log_fn, force=True)
+    return base
+
+
+_PROXY_FAIL_MARKERS = (
+    "proxy",
+    "connect",
+    "connection",
+    "timeout",
+    "timed out",
+    "tunnel",
+    "socks",
+    "curl:",
+    "curl error",
+    "network",
+    "unreachable",
+    "refused",
+    "reset by peer",
+    "ssl",
+    "tls",
+    "eof",
+    "name or service not known",
+    "nodename nor servname",
+    "failed to connect",
+    "proxyerror",
+    "max retries",
+    "temporarily unavailable",
+)
+
+
+def is_proxy_network_failure(
+    *,
+    ok: bool,
+    error: str = "",
+    error_kind: str = "",
+) -> bool:
+    """Heuristic: treat attempt failure as likely egress/proxy damage (quarantine candidate)."""
+    if ok:
+        return False
+    kind = (error_kind or "").strip().lower()
+    # Business / mailbox failures must never burn nodes.
+    if kind in {
+        "mail_miss",
+        "captcha",
+        "verify",
+        "fatal",
+        "registration_disallowed",
+        "disallowed",
+    }:
+        return False
+    if kind in {"proxy", "network", "egress", "timeout"}:
+        return True
+    text = (error or "").lower()
+    if not text:
+        return False
+    # OpenAI risk rejection is not a dead proxy.
+    if "registration_disallowed" in text or "disallowed" in text and "registration" in text:
+        return False
+    return any(m in text for m in _PROXY_FAIL_MARKERS)
+
+
+def report_attempt_proxy_result(
+    extra: dict[str, Any] | None,
+    *,
+    ok: bool,
+    error: str = "",
+    error_kind: str = "",
+    log_fn: LogFn = None,
+) -> dict[str, Any]:
+    """Feed registration outcome back into node health + live rotation pool.
+
+    - success → clear fail_count on that URL
+    - proxy/network failure → mark fail; if quarantined, drop from rotator list and force next
+    - non-proxy failure → no quarantine (avoid killing good IPs for OTP/captcha/risk)
+    """
+    base = dict(extra or {})
+    proxy = str(base.get("proxy") or "").strip()
+    info: dict[str, Any] = {
+        "proxy": _redact(proxy),
+        "ok": ok,
+        "marked": False,
+        "quarantined": False,
+        "removed_from_pool": False,
+    }
+    if not proxy:
+        return info
+
+    # only mark nodes that live in the project catalog (not core/clash fixed local ports)
+    try:
+        from register_core.nodes import get_manager
+
+        mgr = get_manager()
+        node = mgr.find_by_url(proxy)
+    except Exception as exc:
+        info["error"] = str(exc)
+        return info
+
+    if node is None:
+        info["reason"] = "not_in_catalog"
+        return info
+
+    network_fail = is_proxy_network_failure(ok=ok, error=error, error_kind=error_kind)
+    if ok:
+        mgr.mark_result(proxy, ok=True, error="", persist=True)
+        info["marked"] = True
+        info["action"] = "success_clear"
+        return info
+
+    if not network_fail:
+        info["reason"] = "non_proxy_failure"
+        return info
+
+    marked = mgr.mark_result(proxy, ok=False, error=error or error_kind or "proxy_fail", persist=True)
+    info["marked"] = marked is not None
+    info["action"] = "fail_mark"
+    if marked is not None:
+        info["fail_count"] = int(marked.fail_count or 0)
+        info["quarantined"] = mgr.is_quarantined(marked)
+
+    # Drop quarantined (or immediately failed) URL from live list pool so next attempt skips it.
+    removed = _drop_url_from_rotator(proxy, log_fn=log_fn)
+    info["removed_from_pool"] = removed
+    if removed and log_fn:
+        try:
+            log_fn(
+                f"[nodes] quarantined/removed dead proxy {_redact(proxy)} "
+                f"fail_count={info.get('fail_count', '?')}"
+            )
+        except Exception:
+            pass
+
+    # Rebuild healthy proxy_list on extra for subsequent configure if needed
+    try:
+        healthy = mgr.as_proxy_list_value(healthy_only=True)
+        if healthy:
+            base["proxy_list"] = healthy
+            configure_rotation_once(base, log_fn=log_fn, force=True)
+        elif _nodes_required_for_backend(resolve_backend(base), base):
+            from register_core.errors import FailFastError
+
+            raise FailFastError(
+                "all catalog nodes failed/quarantined during register; refusing to continue"
+            )
+    except Exception as exc:
+        # re-raise fail-fast; swallow soft reconfigure errors
+        from register_core.errors import FailFastError
+
+        if isinstance(exc, FailFastError):
+            raise
+        info["reconfigure_error"] = str(exc)[:160]
+
+    return info
+
+
+def _drop_url_from_rotator(url: str, *, log_fn: LogFn = None) -> bool:
+    """Remove a dead URL from the process-wide list pool immediately."""
+    url = (url or "").strip()
+    if not url:
+        return False
+    try:
+        from proxy_rotate import get_rotator
+
+        rot = get_rotator()
+        with rot._lock:  # noqa: SLF001
+            if rot.mode != "list":
+                return False
+            pool = list(rot.list_pool or [])
+            if url not in pool:
+                return False
+            pool = [p for p in pool if p != url]
+            rot.list_pool = pool
+            if not pool:
+                rot.current_proxy = ""
+                rot.current_label = "(empty)"
+                rot.list_index = 0
+                return True
+            # advance away from removed slot
+            rot.list_index = rot.list_index % len(pool)
+            # if current was removed, point at next
+            if rot.current_proxy == url:
+                rot.current_proxy = pool[rot.list_index]
+                try:
+                    from proxy_bridge import proxy_log_label
+
+                    rot.current_label = proxy_log_label(rot.current_proxy) or rot.current_proxy
+                except Exception:
+                    rot.current_label = rot.current_proxy
+            return True
+    except Exception as exc:
+        log.debug("drop_url_from_rotator failed: %s", exc)
+        return False
+
+
 def _redact(url: str) -> str:
     try:
         from proxy_bridge import proxy_log_label
@@ -398,7 +777,10 @@ __all__ = [
     "configure_rotation_once",
     "describe_egress",
     "inject_attempt_proxy",
+    "is_proxy_network_failure",
     "normalize_backend",
+    "preflight_nodes_for_register",
+    "report_attempt_proxy_result",
     "reset_rotation_for_tests",
     "resolve_attempt_proxy",
     "resolve_backend",

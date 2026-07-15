@@ -84,6 +84,38 @@ class Pipeline:
         stats = PipelineStats()
         n = max(1, int(count))
         base_extra = dict(extra or {})
+
+        # Gate: probe project nodes before any register attempt (list/auto).
+        # Dead catalog must not enter the registration hot path.
+        try:
+            from register_core.util.proxy import preflight_nodes_for_register
+
+            base_extra = preflight_nodes_for_register(
+                base_extra,
+                log_fn=lambda m: log.info("%s", m),
+            )
+            pf = base_extra.get("_nodes_preflight") if isinstance(base_extra, dict) else None
+            if isinstance(pf, dict):
+                stats.nodes_preflight = {
+                    k: pf.get(k)
+                    for k in ("skipped", "reason", "ok", "fail", "healthy", "probed", "path")
+                    if k in pf
+                }
+        except FailFastError as exc:
+            result = RegisterResult(
+                ok=False,
+                provider=self.provider.name,
+                error=str(exc),
+                error_kind="fatal",
+                secret_kind="none",
+            )
+            stats.results.append(result)
+            stats.fail += 1
+            self._emit(result)
+            stats.stopped_reason = f"fail_fast: {exc}"
+            log.error("fail-fast stop (nodes preflight): %s", exc)
+            return stats
+
         for i in range(1, n + 1):
             log.info("pipeline attempt %s/%s provider=%s", i, n, self.provider.name)
             # Self-controlled egress: rotate proxy_list (or clash group) per attempt.
@@ -128,6 +160,7 @@ class Pipeline:
                     error_kind="fatal",
                     secret_kind="none",
                 )
+                self._feedback_proxy(attempt_extra, result)
                 stats.results.append(result)
                 stats.fail += 1
                 self._emit(result)
@@ -142,6 +175,7 @@ class Pipeline:
                     error_kind="mail_miss",
                     secret_kind="none",
                 )
+                # mail miss is not a dead proxy — do not quarantine
                 stats.results.append(result)
                 stats.fail += 1
                 self._emit(result)
@@ -157,6 +191,15 @@ class Pipeline:
                     error_kind="provider",
                     secret_kind="none",
                 )
+                try:
+                    self._feedback_proxy(attempt_extra, result)
+                except FailFastError as ff:
+                    stats.results.append(result)
+                    stats.fail += 1
+                    self._emit(result)
+                    stats.stopped_reason = f"fail_fast: {ff}"
+                    log.error("fail-fast stop: %s", ff)
+                    break
                 stats.results.append(result)
                 stats.fail += 1
                 self._emit(result)
@@ -172,6 +215,15 @@ class Pipeline:
                     error_kind="other",
                     secret_kind="none",
                 )
+                try:
+                    self._feedback_proxy(attempt_extra, result)
+                except FailFastError as ff:
+                    stats.results.append(result)
+                    stats.fail += 1
+                    self._emit(result)
+                    stats.stopped_reason = f"fail_fast: {ff}"
+                    log.error("fail-fast stop: %s", ff)
+                    break
                 stats.results.append(result)
                 stats.fail += 1
                 self._emit(result)
@@ -197,6 +249,20 @@ class Pipeline:
                     result.error = f"verify: {exc}"
                     result.error_kind = "verify"
 
+            # Feedback node health: success clears fails; proxy/network fail quarantines.
+            try:
+                self._feedback_proxy(attempt_extra, result)
+            except FailFastError as ff:
+                stats.results.append(result)
+                if result.ok:
+                    stats.ok += 1
+                else:
+                    stats.fail += 1
+                self._emit(result)
+                stats.stopped_reason = f"fail_fast: {ff}"
+                log.error("fail-fast stop: %s", ff)
+                break
+
             stats.results.append(result)
             if result.ok:
                 stats.ok += 1
@@ -210,6 +276,23 @@ class Pipeline:
                 break
 
         return stats
+
+    def _feedback_proxy(self, attempt_extra: dict[str, Any] | None, result: RegisterResult) -> None:
+        """Mark catalog node success/failure and drop quarantined URLs from rotator."""
+        try:
+            from register_core.util.proxy import report_attempt_proxy_result
+
+            report_attempt_proxy_result(
+                attempt_extra,
+                ok=bool(result.ok),
+                error=str(result.error or ""),
+                error_kind=str(result.error_kind or ""),
+                log_fn=lambda m: log.info("%s", m),
+            )
+        except FailFastError:
+            raise
+        except Exception as exc:
+            log.debug("proxy feedback skipped: %s", exc)
 
     def _emit(self, result: RegisterResult) -> None:
         if self.sink:
@@ -231,3 +314,4 @@ class PipelineStats:
     results: list[RegisterResult] = field(default_factory=list)
     verifies: list[VerifyResult] = field(default_factory=list)
     stopped_reason: str = ""
+    nodes_preflight: dict[str, Any] = field(default_factory=dict)

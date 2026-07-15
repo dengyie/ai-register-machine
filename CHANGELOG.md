@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.6.4] - 2026-07-16
+
+### Added
+
+- **Register ↔ nodes adaptation**: preflight probe gate before batch registration
+  - `NodeManager.preflight` / `mark_result` / quarantine after `REGISTER_NODES_MAX_FAIL`
+  - `preflight_nodes_for_register` seeds healthy-only `proxy_list` for list/auto
+  - `report_attempt_proxy_result` feeds register outcomes back into catalog + live rotator
+  - Pipeline runs preflight once, then marks/drops dead proxies per attempt
+- Heuristic `is_proxy_network_failure` — never quarantines mail_miss / captcha / registration_disallowed
+- Fail-fast when `egress=list` has zero healthy nodes after probe
+- Tests: preflight, quarantine, pipeline skip-dead, pool drop
+
+### Changed
+
+- `enabled_nodes(healthy_only=True)` now means `last_ok is True` only (register path)
+- Hard-failed nodes excluded from rotation until they pass probe again
+
 ## [1.6.3] - 2026-07-16
 
 ### Changed

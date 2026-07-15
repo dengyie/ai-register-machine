@@ -68,9 +68,12 @@ python -m register_core nodes core start|select
 | `REGISTER_EGRESS` / `CHATGPT_EGRESS` | `auto` | Backend: `core`\|`clash`\|`list`\|`direct`\|`auto` |
 | `REGISTER_NODES_FILE` / `NODES_FILE` | `./nodes.json` | HTTP/SOCKS catalog |
 | `REGISTER_NODES` | `1` | Set `0` to ignore catalog |
+| `REGISTER_NODES_PREFLIGHT` | `1` | Probe catalog before register (list/auto) |
+| `REGISTER_NODES_MAX_FAIL` | `3` | Proxy fails before quarantine |
+| `REGISTER_NODES_SKIP_FAILED` | `1` | Skip quarantined nodes in rotation |
 | `CLASH_PROXY` | `http://127.0.0.1:7897` | External Clash mixed port (`egress=clash`) |
 | `CHATGPT_PROXY` | empty | Fixed URL override |
-| `CHATGPT_PROXY_LIST` / `PROXY_LIST` | empty | Self-controlled HTTP pool |
+| `CHATGPT_PROXY_LIST` / `PROXY_LIST` | empty | Self-controlled HTTP pool (skips catalog preflight) |
 | `CHATGPT_PROXY_ROTATE_MODE` / `PROXY_ROTATE_MODE` | auto | `off` \| `list` \| `nodes` \| `clash` |
 | `CHATGPT_PROXY_ROTATE_EVERY` | `1` | Rotate every N attempts |
 | `CHATGPT_EMAIL_DOMAIN` | `publicvm.com` | Force tinyhost domain (higher OTP deliverability) |
