@@ -48,9 +48,11 @@ Env (shared):
   HEADLESS / HEADLESS_FLAG  browser mode
   OTP_RETRIES               MiMo temp-mail polls
 
-Nodes (project-owned egress — no external VPN required):
-  python -m register_core nodes list|check|add
-  cp nodes.example.json nodes.json   # edit real HTTP proxy URLs
+Egress switch (core=project mihomo / clash=external / list / direct / auto):
+  python -m register_core nodes egress show
+  python -m register_core nodes egress set core   # or clash|list|direct|auto
+  REGISTER_EGRESS=core ./register.sh chatgpt 1
+  python -m register_core nodes list|check|core start|add
 
 Deploy layout example (pxed):
   /personal/grok-register or ai-register-machine   this monorepo

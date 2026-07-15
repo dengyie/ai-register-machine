@@ -35,17 +35,27 @@ Import packs medium profiles into `.nodes/config/runtime.yaml` (gitignored).
 Mega free lists (>400 proxies/file) are skipped for core; their HTTP/SOCKS still
 go into `nodes.json`.
 
-## How registration picks egress
+## Egress switch (core vs Clash)
 
-```text
-extra.proxy_list / PROXY_LIST
-  → nodes.json enabled HTTP/SOCKS
-  → project mihomo mixed-port (.nodes core, auto-start)
-  → fixed CHATGPT_PROXY
+```bash
+python -m register_core nodes egress show
+python -m register_core nodes egress set core    # project mihomo only
+python -m register_core nodes egress set clash   # external Clash :7897 only
+python -m register_core nodes egress set list    # nodes.json / PROXY_LIST only
+python -m register_core nodes egress set direct
+python -m register_core nodes egress set auto    # list → core → clash
 ```
 
-Env: `REGISTER_CORE=auto|1|0`, `REGISTER_CORE_AUTOSTART=1`, `REGISTER_NODES=0` to
-skip HTTP catalog only.
+| Backend | Meaning |
+|---------|---------|
+| `core` | project `.nodes` mihomo `http://127.0.0.1:17897` |
+| `clash` | external Clash Verge/mihomo `http://127.0.0.1:7897` |
+| `list` | HTTP/SOCKS catalog only |
+| `direct` | no proxy |
+| `auto` | list → core → clash fixed URL |
+
+Env/CLI: `REGISTER_EGRESS=core` or `./register.sh core run -p chatgpt --egress core`.
+Persisted in `.nodes/config/egress.mode` (gitignored).
 
 ## Not in scope
 

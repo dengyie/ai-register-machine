@@ -32,7 +32,8 @@ def cmd_list(_: argparse.Namespace) -> int:
     print("providers:", ", ".join(list_providers()))
     print("email_sources:", ", ".join(list_email_sources()))
     print("layers: contracts → email → providers → verify → sink → pipeline → cli")
-    print("nodes: python -m register_core nodes list|check|add  (project-owned egress)")
+    print("nodes: python -m register_core nodes list|check|add|core|egress")
+    print("egress: core|clash|list|direct|auto  (REGISTER_EGRESS / --egress / nodes egress set)")
     print(
         "note: grok/mimo are black-box (email_source=provider). "
         "chatgpt is in-process (use --email-source tinyhost|auto). "
@@ -67,8 +68,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
     if headless is not None:
         extra["headless"] = headless
-    # Self-controlled egress (preferred): explicit proxy URL pool.
-    # Does not depend on Clash selecting a node.
+    # Egress backend switch: core (project mihomo) | clash | list | direct | auto
+    if getattr(args, "egress", None):
+        extra["egress"] = args.egress
     if getattr(args, "proxy", None):
         extra["proxy"] = args.proxy
     if getattr(args, "proxy_list", None):
@@ -153,6 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--threads", type=int, default=1, help="grok register threads")
     pr.add_argument("--headless", type=int, choices=(0, 1), default=None)
     pr.add_argument(
+        "--egress",
+        choices=("auto", "core", "clash", "list", "direct"),
+        default="",
+        help=(
+            "egress backend switch: core=project mihomo (.nodes); "
+            "clash=external Clash :7897; list=nodes.json/PROXY_LIST; "
+            "direct=no proxy; auto=list→core→clash (env REGISTER_EGRESS)"
+        ),
+    )
+    pr.add_argument(
         "--proxy",
         default="",
         help="fixed outbound proxy URL for this run (overrides CHATGPT_PROXY)",
@@ -162,16 +174,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "self-controlled node pool: comma/newline URLs or .txt path. "
-            "When set, rotation defaults to list mode (no Clash selector)."
+            "When set with --egress list/auto, rotation uses list mode."
         ),
     )
     pr.add_argument(
         "--proxy-rotate",
-        choices=("off", "list", "nodes", "clash"),
+        choices=("off", "list", "nodes", "clash", "core"),
         default="",
         help=(
-            "egress rotation: list/nodes=pool URLs from --proxy-list or nodes.json "
-            "(preferred, no Clash); clash=dedicated group only (legacy)"
+            "low-level rotation: list/nodes/core=URL pool; clash=external controller; "
+            "prefer --egress for backend choice"
         ),
     )
     pr.add_argument(

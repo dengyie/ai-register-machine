@@ -17,6 +17,11 @@ auth-file pools (CLIProxyAPI / codex-lb consumers), **not** a chat2api gateway.
 ## Hub
 
 ```bash
+# pick egress: core=project mihomo, clash=external Clash, list, direct, auto
+python -m register_core nodes egress set core
+REGISTER_EGRESS=core ./register.sh chatgpt [count]
+# or per-run:
+./register.sh core run -p chatgpt -n 1 --egress clash --email-source gmail_imap
 ./register.sh chatgpt [count]
 # or layered:
 ./register.sh core run -p chatgpt -n 1 --email-source gmail_imap

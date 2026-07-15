@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.6.1] - 2026-07-16
+
+### Added
+
+- **Egress backend switch**: `core` | `clash` | `list` | `direct` | `auto`
+- CLI: `python -m register_core nodes egress show|set|which`
+- CLI/env: `--egress` / `REGISTER_EGRESS` / `CHATGPT_EGRESS`
+- Persist preference: `.nodes/config/egress.mode`
+- Tests cover clash vs core isolation and direct no-proxy
+
 ## [1.6.0] - 2026-07-16
 
 ### Added

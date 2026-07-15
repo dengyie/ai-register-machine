@@ -127,6 +127,75 @@ def cmd_core(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_egress(args: argparse.Namespace) -> int:
+    """Get/set egress backend switch (core vs clash vs list vs direct)."""
+    from register_core.util.egress import (
+        describe,
+        normalize_backend,
+        resolve_backend,
+        write_persisted_backend,
+    )
+    from register_core.util import proxy as core_proxy
+
+    action = args.egress_action
+    if action in (None, "", "show", "get", "status"):
+        info = describe()
+        # also show what resolve would pick for a dry run
+        core_proxy.reset_rotation_for_tests()
+        cfg = core_proxy.rotation_config_from_env_and_extra({"egress": info["backend"]})
+        info["resolved"] = {
+            "backend": cfg.get("egress_backend"),
+            "source": cfg.get("egress_source"),
+            "rotate": cfg.get("proxy_rotate_mode"),
+            "proxy": cfg.get("proxy") or "",
+            "core_pool": cfg.get("core_pool"),
+            "clash_pool": cfg.get("clash_pool"),
+            "nodes_pool": cfg.get("nodes_pool"),
+        }
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+        return 0
+    if action == "set":
+        backend = normalize_backend(args.backend or "")
+        if backend not in {"auto", "core", "clash", "list", "direct"}:
+            print(
+                "backend required: auto|core|clash|list|direct",
+                file=sys.stderr,
+            )
+            return 2
+        path = write_persisted_backend(backend)
+        print(
+            json.dumps(
+                {"ok": True, "backend": backend, "path": str(path), **describe(backend)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    if action == "which":
+        # resolve with optional override
+        extra = {}
+        if args.backend:
+            extra["egress"] = args.backend
+        b = resolve_backend(extra)
+        core_proxy.reset_rotation_for_tests()
+        cfg = core_proxy.rotation_config_from_env_and_extra(extra if extra else {"egress": b})
+        print(
+            json.dumps(
+                {
+                    "backend": b,
+                    "source": cfg.get("egress_source"),
+                    "proxy": cfg.get("proxy") or "",
+                    "rotate": cfg.get("proxy_rotate_mode"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    print(f"unknown egress action: {action}", file=sys.stderr)
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="register_core.nodes",
@@ -172,6 +241,25 @@ def build_parser() -> argparse.ArgumentParser:
     pcore.add_argument("--no-start", action="store_true", help="url: do not auto-start")
     pcore.add_argument("--json", action="store_true")
     pcore.set_defaults(func=cmd_core)
+
+    peg = sub.add_parser(
+        "egress",
+        help="Switch egress backend: core (project) vs clash (external) vs list/direct",
+    )
+    peg.add_argument(
+        "egress_action",
+        nargs="?",
+        default="show",
+        choices=("show", "get", "status", "set", "which"),
+        help="show current switch / set backend / which resolves now",
+    )
+    peg.add_argument(
+        "backend",
+        nargs="?",
+        default="",
+        help="for set/which: auto|core|clash|list|direct",
+    )
+    peg.set_defaults(func=cmd_egress)
 
     return p
 

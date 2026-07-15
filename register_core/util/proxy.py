@@ -1,12 +1,12 @@
 """Register-scoped egress selection for layered providers.
 
-Self-controlled nodes (preferred):
-  1. Project catalog ``nodes.json`` / ``REGISTER_NODES_FILE`` via ``register_core.nodes``
-  2. Explicit ``PROXY_LIST`` / ``proxy_list`` / ``CHATGPT_PROXY_LIST``
-  3. Single fixed ``CHATGPT_PROXY`` / ``proxy`` URL
+User switch (``REGISTER_EGRESS`` / ``--egress`` / ``nodes egress set``):
 
-None of the above require Clash/mihomo UI. Clash mode remains an optional
-legacy path for Grok browser only — never the ChatGPT default.
+- ``core``   — project-embedded mihomo (``.nodes/``)
+- ``clash``  — external Clash Verge / system mixed port
+- ``list``   — HTTP/SOCKS pool only (``nodes.json`` / ``PROXY_LIST``)
+- ``direct`` — no proxy
+- ``auto``   — list → core → clash URL → direct
 """
 
 from __future__ import annotations
@@ -14,6 +14,13 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Callable
+
+from register_core.util.egress import (
+    clash_proxy_url,
+    describe as describe_egress,
+    normalize_backend,
+    resolve_backend,
+)
 
 log = logging.getLogger("register_core.util.proxy")
 
@@ -45,39 +52,41 @@ def _load_nodes_proxy_list() -> str:
         return ""
 
 
-def _load_core_proxy_url() -> str:
+def _load_core_proxy_url(*, require: bool = False, autostart: bool | None = None) -> str:
     """Ensure project mihomo core and return its mixed-port URL (or empty)."""
-    mode = _env_first("REGISTER_CORE", "USE_CORE", "REGISTER_MIHOMO", default="auto").lower()
-    if mode in {"0", "false", "off", "no"}:
-        return ""
     try:
         from register_core.nodes import core_runtime as core
 
         st = core.status()
         if not st.get("bin_exists") or not st.get("config_exists"):
-            if mode in {"1", "true", "on", "yes", "require", "force"}:
+            if require:
                 log.warning("project mihomo core missing bin/config under .nodes/")
             return ""
-        if mode == "auto" and not st.get("running"):
-            # auto: only attach if already running, unless REGISTER_CORE_AUTOSTART=1
-            autostart = _env_first("REGISTER_CORE_AUTOSTART", "CORE_AUTOSTART", default="1").lower()
-            if autostart not in {"1", "true", "yes", "on"}:
-                return ""
+        if autostart is None:
+            autostart = _env_first("REGISTER_CORE_AUTOSTART", "CORE_AUTOSTART", default="1").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        if not st.get("running") and not autostart and not require:
+            return ""
         url = core.ensure_proxy_url(start_core=True)
         return (url or "").strip()
     except Exception as exc:
-        log.debug("project core unavailable: %s", exc)
+        if require:
+            log.warning("project core unavailable: %s", exc)
+        else:
+            log.debug("project core unavailable: %s", exc)
         return ""
 
 
 def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Build proxy_rotate.configure() dict from extra + env + nodes catalog.
-
-    Priority for pool: extra.proxy_list > env PROXY_LIST > nodes.json.
-    If a proxy list is present and mode is unset, auto-select ``list``.
-    """
+    """Build proxy_rotate.configure() dict from extra + env + egress backend switch."""
     extra = extra if isinstance(extra, dict) else {}
+    backend = resolve_backend(extra)
 
+    # Legacy rotate mode can still force clash-group rotation when backend=clash.
     mode_raw = str(
         extra.get("proxy_rotate_mode")
         if extra.get("proxy_rotate_mode") is not None
@@ -87,8 +96,10 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
     mode = mode_raw
     if mode in {"none", "disabled", "0", "false", ""}:
         mode = "off"
+    if mode in {"proxy_list", "pool", "url", "urls", "nodes", "core"}:
+        mode = "list"
 
-    proxy_list = (
+    explicit_list = (
         extra.get("proxy_list")
         or extra.get("proxy_pool")
         or _env_first("CHATGPT_PROXY_LIST", "PROXY_LIST", "PROXY_POOL")
@@ -96,47 +107,99 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
     )
     nodes_source = ""
     core_source = ""
-    if not proxy_list:
-        nodes_source = _load_nodes_proxy_list()
-        if nodes_source:
+    clash_source = ""
+    proxy_list = ""
+    base_proxy = ""
+    source = "none"
+
+    if backend == "direct":
+        mode = "off"
+        source = "direct"
+    elif backend == "list":
+        proxy_list = str(explicit_list or "")
+        if not proxy_list:
+            nodes_source = _load_nodes_proxy_list()
             proxy_list = nodes_source
-    # Embedded mihomo core local mixed port (protocol nodes from YAML).
-    # Used when no explicit pool; can also be merged if REGISTER_CORE_MERGE=1.
-    if not proxy_list:
-        core_source = _load_core_proxy_url()
-        if core_source:
-            proxy_list = core_source
-    elif _env_first("REGISTER_CORE_MERGE", default="").lower() in {"1", "true", "yes", "on"}:
-        core_source = _load_core_proxy_url()
-        if core_source and core_source not in str(proxy_list):
-            proxy_list = f"{proxy_list},{core_source}" if proxy_list else core_source
-
-    base_proxy = str(
-        extra.get("proxy")
-        or _env_first(
-            "CHATGPT_PROXY",
-            "MIMO_PROXY",
-            "https_proxy",
-            "HTTPS_PROXY",
-            "http_proxy",
-            "HTTP_PROXY",
-        )
-        or ""
-    ).strip()
-    # If pool from nodes/core and no fixed proxy, seed base with first URL for status.
-    if not base_proxy and proxy_list:
-        first = str(proxy_list).split(",")[0].strip()
-        if first:
-            base_proxy = first
-    if not base_proxy and core_source:
+        base_proxy = str(extra.get("proxy") or "").strip()
+        if not base_proxy and proxy_list:
+            base_proxy = str(proxy_list).split(",")[0].strip()
+        if not mode_explicit:
+            mode = "list" if proxy_list else "off"
+        source = "list"
+    elif backend == "core":
+        # Project mini-core only — do not fall back to Clash.
+        core_source = _load_core_proxy_url(require=True, autostart=True)
+        proxy_list = core_source
         base_proxy = core_source
-
-    # Self-control default: unset mode + explicit pool ⇒ list (no Clash selector).
-    # Explicit proxy_rotate_mode=off stays off even if a list is present.
-    if not mode_explicit and proxy_list:
-        mode = "list"
-    if mode in {"proxy_list", "pool", "url", "urls", "nodes"}:
-        mode = "list"
+        if not mode_explicit:
+            mode = "list" if core_source else "off"
+        source = "core"
+    elif backend == "clash":
+        clash_source = clash_proxy_url(extra)
+        base_proxy = clash_source
+        # Optional: if user also set PROXY_LIST while on clash backend, ignore unless explicit list mode.
+        if mode_explicit and mode == "list" and explicit_list:
+            proxy_list = str(explicit_list)
+            if not base_proxy and proxy_list:
+                base_proxy = str(proxy_list).split(",")[0].strip()
+        else:
+            # Prefer clash controller rotation when available; else fixed mixed port.
+            if not mode_explicit:
+                # If clash API configured, use clash rotate; else fixed off+proxy URL.
+                api = _env_first("CLASH_API", "CLASH_CONTROLLER")
+                mode = "clash" if api else "off"
+            proxy_list = ""
+        source = "clash"
+    else:
+        # auto: list → core → clash fixed → direct
+        proxy_list = str(explicit_list or "")
+        if proxy_list:
+            source = "list"
+        else:
+            nodes_source = _load_nodes_proxy_list()
+            if nodes_source:
+                proxy_list = nodes_source
+                source = "list"
+        if not proxy_list:
+            # honor REGISTER_CORE off inside auto
+            core_mode = _env_first("REGISTER_CORE", "USE_CORE", "REGISTER_MIHOMO", default="auto").lower()
+            if core_mode not in {"0", "false", "off", "no"}:
+                core_source = _load_core_proxy_url(
+                    require=core_mode in {"1", "true", "on", "yes", "require", "force"},
+                    autostart=True,
+                )
+                if core_source:
+                    proxy_list = core_source
+                    source = "core"
+        base_proxy = str(
+            extra.get("proxy")
+            or _env_first(
+                "CHATGPT_PROXY",
+                "MIMO_PROXY",
+                "https_proxy",
+                "HTTPS_PROXY",
+                "http_proxy",
+                "HTTP_PROXY",
+            )
+            or ""
+        ).strip()
+        if not base_proxy and proxy_list:
+            base_proxy = str(proxy_list).split(",")[0].strip()
+        if not base_proxy and not proxy_list:
+            # last resort external clash port if listening intent via env default
+            # only when user has CHATGPT_PROXY/MIMO_PROXY style or CLASH_PROXY set
+            if _env_first("CLASH_PROXY", "USE_CLASH", default=""):
+                clash_source = clash_proxy_url(extra)
+                base_proxy = clash_source
+                source = "clash"
+        if not mode_explicit:
+            if proxy_list:
+                mode = "list"
+            elif source == "clash":
+                api = _env_first("CLASH_API", "CLASH_CONTROLLER")
+                mode = "clash" if api else "off"
+            else:
+                mode = "off"
 
     every_raw = extra.get("proxy_rotate_every")
     if every_raw is None or every_raw == "":
@@ -167,6 +230,8 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
         on_start = str(on_start_raw).strip().lower() in {"1", "true", "yes", "on"}
 
     cfg: dict[str, Any] = {
+        "egress_backend": backend,
+        "egress_source": source,
         "proxy_rotate_mode": mode,
         "proxy_rotate_every": every,
         "proxy_rotate_on_start": on_start,
@@ -175,11 +240,11 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
         "proxy": base_proxy,
         "proxy_rotate_update_cpa": False,
         "nodes_pool": bool(nodes_source),
-        "core_pool": bool(core_source),
+        "core_pool": bool(core_source) or source == "core",
+        "clash_pool": source == "clash" or bool(clash_source),
     }
 
-    # Optional clash knobs only if operator explicitly chose clash.
-    if mode == "clash":
+    if mode == "clash" or backend == "clash":
         cfg["clash_api"] = _env_first("CLASH_API", "CLASH_CONTROLLER") or None
         cfg["clash_secret"] = _env_first("CLASH_SECRET")
         cfg["clash_proxy_group"] = _env_first("CLASH_GROUP", "CLASH_PROXY_GROUP") or None
@@ -188,7 +253,8 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
             or _env_first("CLASH_DOMAINS", "CLASH_RULE_DOMAINS")
             or None
         )
-        # Drop Nones so proxy_rotate keeps its defaults.
+        if not cfg.get("proxy"):
+            cfg["proxy"] = clash_proxy_url(extra)
         cfg = {k: v for k, v in cfg.items() if v is not None}
 
     return cfg
@@ -217,6 +283,10 @@ def configure_rotation_once(
         else:
             log.info("%s", msg)
 
+    _log(
+        f"[egress] backend={cfg.get('egress_backend')} source={cfg.get('egress_source')} "
+        f"rotate={cfg.get('proxy_rotate_mode')} proxy={_redact(cfg.get('proxy') or '')}"
+    )
     configure_proxy_rotation(cfg, log=_log)
     _CONFIGURED = True
     return cfg
@@ -233,27 +303,33 @@ def resolve_attempt_proxy(
     *,
     log_fn: LogFn = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Rotate (if enabled) and return (proxy_url, rotate_info) for one attempt.
-
-    List mode: returns the concrete pool URL — self-controlled node.
-    Clash mode: returns base_proxy (usually local mixed port); node switch is
-    side-effect on Clash dedicated group only.
-    Off mode: returns explicit/extra/env proxy unchanged.
-    """
+    """Rotate (if enabled) and return (proxy_url, rotate_info) for one attempt."""
     from proxy_rotate import current_proxy_override, maybe_rotate_proxy
 
     cfg = configure_rotation_once(extra, log_fn=log_fn)
     info = maybe_rotate_proxy(log=log_fn, config=cfg)
+    if isinstance(info, dict):
+        info = {
+            **info,
+            "egress_backend": cfg.get("egress_backend"),
+            "egress_source": cfg.get("egress_source"),
+        }
 
     override = (current_proxy_override() or "").strip()
     if override:
         return override, info
 
-    # clash / off: use configured base proxy from extra/env
     base = str(
         (extra or {}).get("proxy")
         or cfg.get("proxy")
-        or _env_first(
+        or ""
+    ).strip()
+    # In direct backend force empty even if env has proxy leftovers — only when
+    # resolve_backend says direct and extra didn't set proxy explicitly for clash tests.
+    if cfg.get("egress_backend") == "direct" and not (extra or {}).get("proxy"):
+        return "", info
+    if not base and cfg.get("egress_backend") != "direct":
+        base = _env_first(
             "CHATGPT_PROXY",
             "MIMO_PROXY",
             "https_proxy",
@@ -261,8 +337,6 @@ def resolve_attempt_proxy(
             "http_proxy",
             "HTTP_PROXY",
         )
-        or ""
-    ).strip()
     return base, info
 
 
@@ -272,6 +346,8 @@ def inject_attempt_proxy(extra: dict[str, Any] | None = None, *, log_fn: LogFn =
     proxy, info = resolve_attempt_proxy(base, log_fn=log_fn)
     if proxy:
         base["proxy"] = proxy
+    elif base.get("egress") in {"direct", "off"} or resolve_backend(base) == "direct":
+        base.pop("proxy", None)
     if info:
         base["_proxy_rotate"] = {
             k: info.get(k)
@@ -284,7 +360,31 @@ def inject_attempt_proxy(extra: dict[str, Any] | None = None, *, log_fn: LogFn =
                 "group",
                 "error",
                 "scope",
+                "egress_backend",
+                "egress_source",
             )
             if k in info
         }
     return base
+
+
+def _redact(url: str) -> str:
+    try:
+        from proxy_bridge import proxy_log_label
+
+        return proxy_log_label(url) or url or "(none)"
+    except Exception:
+        return url or "(none)"
+
+
+# re-export helpers for CLI
+__all__ = [
+    "configure_rotation_once",
+    "describe_egress",
+    "inject_attempt_proxy",
+    "normalize_backend",
+    "reset_rotation_for_tests",
+    "resolve_attempt_proxy",
+    "resolve_backend",
+    "rotation_config_from_env_and_extra",
+]
