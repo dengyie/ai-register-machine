@@ -11,8 +11,8 @@ Thanks for considering a contribution.
 ## Development setup
 
 ```bash
-git clone https://github.com/dengyie/register-machine.git
-cd register-machine
+git clone https://github.com/dengyie/ai-register-machine.git
+cd ai-register-machine
 # outsider path (Grok simple config)
 bash scripts/setup_simple.sh
 # or full template

@@ -9,17 +9,18 @@ project versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Universal multi-provider hub**: `./register.sh` (`grok` / `mimo` / `core` / `smoke`)
+- **Multi-provider hub**: `./register.sh` (`grok` / `mimo` / `core` / `smoke`)
 - **`register_core/`** layered framework: contracts, email sources, provider adapters, verify, sink, pipeline, CLI
 - **`providers/mimo/`**: Xiaomi MiMo API Key registration (Node/Playwright `register-one.js`, Geetest slide, tinyhost OTP)
 - MiMo → CPA OpenAI-compat helper (optional, local): `providers/mimo/inject_cpa_openai.py` (does **not** touch production by default)
 - Unit tests: `test_register_core_layers.py`, `test_mimo_cpa_openai_inject.py`
 - Grok Gmail IMAP: HTTP CONNECT via configured proxy (container/no-public egress)
+- Positioning docs vs [ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register): higher production usability, richer pipeline, **TTK UI** (form input + live log/status)
 
 ### Changed
 
-- Project rename: **`grok-register` → `register-machine`** (GitHub + package metadata); Grok remains first-class provider
-- README / CONTRIBUTING oriented as multi-provider monorepo; Grok path docs retained under the same tree
+- Project rename path: **`grok-register` → `register-machine` → `ai-register-machine`** (GitHub + package metadata)
+- README highlights desktop UI (`grok_register_ttk.py`): count/threads/mail/proxy form, start/stop, status, scrolling logs, tutorial
 - Fail-fast + this-run result attribution (no historical tail as success); public redact password/secret
 
 ### Security

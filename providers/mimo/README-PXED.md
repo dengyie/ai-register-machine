@@ -1,6 +1,6 @@
-# MiMo @ pxed（register-machine monorepo）
+# MiMo @ pxed（ai-register-machine monorepo）
 
-**源码权威**：部署目录下 `providers/mimo`（常见 `/personal/grok-register` 或 `register-machine`）  
+**源码权威**：部署目录下 `providers/mimo`（常见 `/personal/grok-register` 或 `ai-register-machine`）  
 **Node runtime**：`/personal/mimo-register`（`npm ci` + playwright + 上游 `dist/`）
 
 上游参考：[Rossevelt1313/MimoAuto](https://github.com/Rossevelt1313/MimoAuto)  

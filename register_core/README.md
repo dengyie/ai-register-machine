@@ -1,6 +1,6 @@
 # register_core — 分层通用注册框架
 
-以 **register-machine monorepo** 为主仓，把 Grok / MiMo（及后续产品）挂到同一套层边界上。
+以 **ai-register-machine monorepo** 为主仓，把 Grok / MiMo（及后续产品）挂到同一套层边界上。
 
 ```text
 CLI / register.sh

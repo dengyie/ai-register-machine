@@ -1,4 +1,4 @@
-# MiMo provider（register-machine）
+# MiMo provider（ai-register-machine）
 
 Xiaomi MiMo API Key 注册机，位于 monorepo 的 `providers/mimo`。
 

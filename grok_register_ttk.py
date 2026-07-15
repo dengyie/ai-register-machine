@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Grok 注册机 - TTK GUI 版本
+AI 注册机 (ai-register-machine) - TTK GUI
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 """
 
@@ -5084,7 +5084,7 @@ def export_cpa_after_success(email, password, sso, page=None, log_callback=None)
 class GrokRegisterGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Grok 注册机")
+        self.root.title("AI 注册机 · ai-register-machine")
         self.root.geometry("980x860")
         self.root.minsize(900, 760)
         self.is_running = False
@@ -5270,7 +5270,7 @@ class GrokRegisterGUI:
             self.show_tutorial()
 
     def _tutorial_text(self):
-        return """欢迎使用 Grok 注册机。建议按下面顺序填写（从最关键到可选）：
+        return """欢迎使用 AI 注册机（ai-register-machine）。建议按下面顺序填写（从最关键到可选）：
 
 【第一步：先确定邮箱后端信息从哪里来】
 如果你使用 cloudflare 模式（你当前主要是这套），先去你的临时邮箱服务配置接口查信息：

@@ -1,10 +1,12 @@
-# 通用注册机（register-machine）
+# AI 通用注册机（ai-register-machine）
 
-多产品账号 / API Key **分层注册框架**：统一入口 `./register.sh`，共享邮箱策略、fail-fast、代理运维；各产品保留自己的浏览器栈与生产 runner。
+在常见「多模型注册脚本合集」之上，做成 **可维护、可验收、可 UI 操作** 的 monorepo：分层编排 + 多 provider 生产路径 + 桌面 UI（进度 / 表单输入 / 日志）。
+
+对标开源 [ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register) 一类项目：**方向相同，实现更偏生产可用性**——本轮结果归因、fail-fast、契约脱敏、CPA/OIDC 门禁诚实、统一 hub、成熟 TTK 界面，而不是只堆脚本。
 
 | Provider | 入口 | 栈 | 产物方向 |
 |----------|------|----|----------|
-| **Grok / xAI** | `./register.sh grok` | Python + DrissionPage + turnstilePatch | SSO 账本 → CPA OIDC mint → chat 探针（可选远端 live） |
+| **Grok / xAI** | `./register.sh grok` · **GUI** | Python + DrissionPage + turnstilePatch | SSO 账本 → CPA OIDC mint → chat 探针（可选远端 live） |
 | **Xiaomi MiMo** | `./register.sh mimo` | Node + Playwright | `sk-` API Key（TTS 等）；CPA 侧按 **OpenAI-compat** 导入，非 xai auth |
 | **分层编排** | `./register.sh core` | `register_core/` | 邮箱 / 注册 / 验证 / 落盘 编排（不替代产品内核） |
 
@@ -12,7 +14,7 @@
 
 > **安全提示：** 不要提交 `config.json`、`mail_credentials.txt`、`accounts_*.txt`、`cpa_auths/*.json`、`backups/`、`.env`、`logs/`、`screenshots/`、`providers/*/output/`。仓库已 gitignore；只用 `*.example*` 模板。  
 > **合规提示：** 可能违反第三方服务条款。见 [DISCLAIMER.md](DISCLAIMER.md) / [SECURITY.md](SECURITY.md)。**MIT，无担保。**  
-> **命名：** GitHub 仓库现为 [`dengyie/register-machine`](https://github.com/dengyie/register-machine)（原 `grok-register` 会重定向）。本地/pxed 目录名可仍叫 `grok-register`，以本仓代码为准。
+> **命名：** [`dengyie/ai-register-machine`](https://github.com/dengyie/ai-register-machine)（历经 `grok-register` → `register-machine`）。本地/pxed 目录可仍叫旧名，以本仓代码为准。
 
 | 文档 | 说明 |
 |------|------|
@@ -32,8 +34,8 @@
 
 ```bash
 # 1) 安装依赖并生成简易配置 + 环境检查
-git clone https://github.com/dengyie/register-machine.git
-cd register-machine
+git clone https://github.com/dengyie/ai-register-machine.git
+cd ai-register-machine
 bash scripts/setup_simple.sh
 
 # 2) 编辑 config.json（Grok 路径）
@@ -44,11 +46,13 @@ bash scripts/setup_simple.sh
 
 # 3) 统一入口
 ./register.sh help
-./register.sh grok 1 1                 # xAI / Grok（推荐有头浏览器）
-# 等价：uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
+./register.sh grok 1 1                 # xAI / Grok CLI
 ./register.sh mimo                     # Xiaomi MiMo API Key（需 Node runtime）
 ./register.sh core list
 ./register.sh core run -p mimo -n 1
+
+# 3b) 桌面 UI（推荐日常操作：表单输入 + 状态 + 滚动日志）
+uv run python grok_register_ttk.py
 
 # 4) 看结果
 ls accounts_cli.txt cpa_auths/                 # Grok
@@ -57,6 +61,33 @@ ls providers/mimo/output/ 2>/dev/null || true  # MiMo（或 pxed /personal/mimo-
 # 5) 可选：本地密钥卫生（不打印文件内容）
 bash scripts/doctor_secrets.sh
 ```
+
+### 相对 ai-register 类项目：我们多做了什么
+
+| 维度 | 常见 ai-register 脚本合集 | **ai-register-machine** |
+|------|---------------------------|-------------------------|
+| 架构 | 多脚本并列，边界模糊 | `register_core` 分层：email / providers / verify / sink / pipeline |
+| 入口 | 各产品各敲命令 | `./register.sh` 统一 hub + CLI + **TTK GUI** |
+| 成功判定 | 易用历史日志/exit 0 误判 | **本轮归因**（ledger 增量 / `RESULT_JSON` / 文件 offset） |
+| 失败策略 | 容易空转重试 | **fail-fast**；超时杀进程组 |
+| 产物契约 | 常混 SSO / token / sk | Grok→xai OIDC+chat 门禁；MiMo→OpenAI-compat `sk-`，文档写清 |
+| 安全 | 密钥易进仓 | doctor、gitignore、public 脱敏、sink 0600 |
+| UI | 多为纯 CLI | **成熟桌面页**：数量/线程/邮箱/代理等表单、开始停止、状态、实时日志、内置教程 |
+
+### 桌面 UI（进度与输入）
+
+```bash
+uv run python grok_register_ttk.py
+```
+
+`GrokRegisterGUI`（Tk/ttk）支持：
+
+- **表单输入**：注册数量、并发线程、邮箱服务商、代理、DuckMail/CF/CloudMail/Hotmail 凭证路径、NSFW 开关、grok2api 入池等
+- **看进度**：状态栏 + 滚动日志（注册/收码/mint/探针全过程）
+- **操作**：开始注册 / 停止 / 清空日志 / 内置教程弹窗
+- 与 CLI 共用同一套注册与 CPA 链路，不是演示壳
+
+> MiMo 当前以 `./register.sh mimo` 生产路径为主；GUI 先覆盖 Grok 全链路（最重、字段最多）。hub 可继续扩展。
 
 ### 分层架构（register_core）
 
@@ -78,13 +109,14 @@ bash scripts/doctor_secrets.sh
 
 详见 [register_core/README.md](register_core/README.md) · [providers/mimo/README.md](providers/mimo/README.md)。
 
-部署布局示例（pxed）：代码仓 `/personal/grok-register`（或 `register-machine`）+ Node runtime `/personal/mimo-register` + clash `:7897`。
+部署布局示例（pxed）：代码仓 `/personal/grok-register`（或 `ai-register-machine`）+ Node runtime `/personal/mimo-register` + clash `:7897`。
 
 **Python：** 需要 **3.13**（`pyproject.toml` → `requires-python`）。请用 [uv](https://docs.astral.sh/uv/)：`uv python install 3.13 && uv sync`。系统自带 3.11/3.12 不够。
 
 | 你想… | 看哪里 |
 |--------|--------|
 | 从零跑通本地链路 | [最短路径上手](#最短路径上手对外简易模式) |
+| **UI 看进度 / 表单输入** | [桌面 UI](#桌面-ui进度与输入) · `uv run python grok_register_ttk.py` |
 | 成功/失败怎么判断 | [什么叫「成功」](#什么叫成功) |
 | Hotmail 四段凭证 | [邮箱：Hotmail / Outlook](#邮箱hotmail--outlook) |
 | 全量配置项 | [配置说明](#配置说明) · `config.example.json` |
@@ -93,8 +125,6 @@ bash scripts/doctor_secrets.sh
 | 卡住了 | [常见卡点](#常见卡点) · [故障排查](#故障排查) |
 | MiMo TTS Key | [providers/mimo/README.md](providers/mimo/README.md) · `./register.sh mimo` |
 | 分层通用框架 | [register_core/README.md](register_core/README.md) · `./register.sh core` |
-
-GUI：`uv run python grok_register_ttk.py`
 
 ---
 
@@ -199,8 +229,8 @@ OIDC 相关代码自包含在 `cpa_xai/`：
 ### 1. Clone + bootstrap（含 doctor）
 
 ```bash
-git clone https://github.com/dengyie/register-machine.git
-cd register-machine
+git clone https://github.com/dengyie/ai-register-machine.git
+cd ai-register-machine
 bash scripts/setup_simple.sh
 ```
 
@@ -711,5 +741,5 @@ GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 
 - **CLIProxyAPI / CPA：** 自备；将 `cpa_auths/xai-*.json` 放到 CPA auth-dir 即可热加载
 - **免费 Grok 4.5：** 只走 Build OIDC + `cli-chat-proxy`，不是网页 SSO
-- **仓库：** https://github.com/dengyie/register-machine
-- **最新发布：** https://github.com/dengyie/register-machine/releases/tag/v1.3.0
+- **仓库：** https://github.com/dengyie/ai-register-machine
+- **最新发布：** https://github.com/dengyie/ai-register-machine/releases/tag/v1.3.0

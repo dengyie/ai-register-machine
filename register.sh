@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unified multi-provider hub for register-machine.
+# Unified multi-provider hub for ai-register-machine.
 #
 # Usage:
 #   ./register.sh grok [count] [threads]
@@ -20,7 +20,7 @@ cd "$ROOT"
 
 usage() {
   cat <<'EOF'
-register.sh — multi-provider hub (register-machine)
+register.sh — multi-provider hub (ai-register-machine)
 
   ./register.sh grok [count] [threads]   Register xAI/Grok (Python production path)
   ./register.sh mimo [count]             Register Xiaomi MiMo API key (Node)
@@ -41,7 +41,7 @@ Env (shared):
   OTP_RETRIES               MiMo temp-mail polls
 
 Deploy layout example (pxed):
-  /personal/grok-register or register-machine   this monorepo
+  /personal/grok-register or ai-register-machine   this monorepo
   /personal/mimo-register                       optional Node runtime
   /personal/clash                               mihomo
 EOF
