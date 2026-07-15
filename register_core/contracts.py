@@ -118,7 +118,19 @@ class VerifyResult:
 def _public_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:
     if not artifacts:
         return {}
-    allow = {"runtime", "keys_path", "accounts_path", "note", "exit_code", "timed_out", "ledger"}
+    allow = {
+        "runtime",
+        "keys_path",
+        "accounts_path",
+        "auth_path",
+        "note",
+        "exit_code",
+        "timed_out",
+        "ledger",
+        "email_source",
+        "has_id_token",
+        "steps",
+    }
     out: dict[str, Any] = {}
     for k, v in artifacts.items():
         if k in allow:

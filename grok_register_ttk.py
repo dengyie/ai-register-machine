@@ -2047,7 +2047,19 @@ def _hotmail_rest_get_code(mailbox_email, target_email, access_token, log_callba
     )
     filter_after_ts = int((time.time() - max(60, recent_seconds)) * 1000)
     target_lower = (target_email or "").strip().lower()
-    keywords = ["x.ai", "xai", "grok", "verification", "code", "confirm", "验证码", "确认", "confirmation"]
+    keywords = [
+        "x.ai",
+        "xai",
+        "grok",
+        "openai",
+        "verification",
+        "code",
+        "confirm",
+        "temporary",
+        "验证码",
+        "确认",
+        "confirmation",
+    ]
 
     # $orderby 含空格，必须编码；否则 urllib/部分客户端会拒收
     query = (
@@ -2201,7 +2213,18 @@ def _hotmail_imap_get_code(mailbox_email, target_email, access_token, log_callba
     )
     filter_after_ts = int((time.time() - max(60, recent_seconds)) * 1000)
     target_lower = (target_email or "").strip().lower()
-    keywords = ["x.ai", "xai", "grok", "verification", "code", "confirm", "验证码", "确认"]
+    keywords = [
+        "x.ai",
+        "xai",
+        "grok",
+        "openai",
+        "verification",
+        "code",
+        "confirm",
+        "temporary",
+        "验证码",
+        "确认",
+    ]
 
     host = host or "outlook.office365.com"
     if log_callback:
@@ -2742,7 +2765,18 @@ def _gmail_imap_get_code_on_conn(imap, target_email, log_callback=None):
     )
     filter_after_ts = int((time.time() - max(60, recent_seconds)) * 1000)
     target_lower = (target_email or "").strip().lower()
-    keywords = ["x.ai", "xai", "grok", "verification", "code", "confirm", "验证码", "确认"]
+    keywords = [
+        "x.ai",
+        "xai",
+        "grok",
+        "openai",
+        "verification",
+        "code",
+        "confirm",
+        "temporary",
+        "验证码",
+        "确认",
+    ]
 
     # Refresh mailbox view without reconnecting.
     try:
@@ -3024,15 +3058,33 @@ def extract_verification_code(text, subject=""):
     match = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", text, re.IGNORECASE)
     if match:
         return match.group(1)
+
+    # Strip HTML chrome so CSS hex-ish numbers don't win before real OTP.
+    blob = str(text or "")
+    if "<" in blob and ">" in blob:
+        blob = re.sub(r"(?is)<(style|script)[^>]*>.*?</\1>", " ", blob)
+        blob = re.sub(r"(?is)<!--.*?-->", " ", blob)
+        blob = re.sub(r"<[^>]+>", " ", blob)
+    blob = re.sub(r"\s+", " ", blob)
+
     patterns = [
-        r"verification\s+code[:\s]+(\d{4,8})",
-        r"your\s+code[:\s]+(\d{4,8})",
+        # OpenAI: "Enter this temporary verification code to continue: 042902"
+        r"temporary\s+verification\s+code[^\d]{0,80}(\d{6})",
+        r"verification\s+code\s+to\s+continue[:\s]+(\d{6})",
+        r"verification\s+code[^\d]{0,40}(\d{4,8})",
+        r"your\s+(?:temporary\s+)?code[:\s]+(\d{4,8})",
         r"confirm(?:ation)?\s+code[:\s]+(\d{4,8})",
+        r"otp[^\d]{0,20}(\d{4,8})",
     ]
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        match = re.search(pattern, blob, re.IGNORECASE)
         if match:
             return match.group(1)
+    # Subject-only OpenAI/Microsoft style 6-digit fallback when body already filtered.
+    if subject and re.search(r"openai|verification code", subject, re.I):
+        m = re.search(r"\b(\d{6})\b", blob)
+        if m:
+            return m.group(1)
     return None
 
 

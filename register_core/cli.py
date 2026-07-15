@@ -6,6 +6,7 @@ Production authority for full signup remains:
 
 This CLI orchestrates adapters with honest success attribution. Black-box
 providers (grok/mimo) use adapter-internal mail only (email_source=provider).
+In-process providers (chatgpt) accept EmailSource (tinyhost/auto/…).
 """
 
 from __future__ import annotations
@@ -32,8 +33,9 @@ def cmd_list(_: argparse.Namespace) -> int:
     print("email_sources:", ", ".join(list_email_sources()))
     print("layers: contracts → email → providers → verify → sink → pipeline → cli")
     print(
-        "note: grok/mimo are black-box adapters; use email_source=provider "
-        "(default). Production runners: ./register.sh grok|mimo"
+        "note: grok/mimo are black-box (email_source=provider). "
+        "chatgpt is in-process (use --email-source tinyhost|auto). "
+        "Hub: ./register.sh grok|mimo|chatgpt"
     )
     return 0
 
@@ -91,14 +93,15 @@ def build_parser() -> argparse.ArgumentParser:
     pl.set_defaults(func=cmd_list)
 
     pr = sub.add_parser("run", help="Run registration pipeline")
-    pr.add_argument("--provider", "-p", required=True, help="grok | mimo")
+    pr.add_argument("--provider", "-p", required=True, help="grok | mimo | chatgpt")
     pr.add_argument("--count", "-n", type=int, default=1)
     pr.add_argument(
         "--email-source",
         default="provider",
         help=(
             "provider=adapter-internal mail (required for grok/mimo). "
-            "tinyhost|duckmail|gmail_imap|legacy_grok|auto only for in-process providers."
+            "chatgpt defaults via adapter to tinyhost when provider; "
+            "prefer tinyhost|duckmail|gmail_imap|auto for chatgpt."
         ),
     )
     pr.add_argument("--sink", default="", help="JSONL path for private results (0600)")

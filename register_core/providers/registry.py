@@ -26,6 +26,9 @@ def get_provider(name: str, **kwargs: Any) -> RegisterProvider:
         "xai": "grok",
         "xiaomi": "mimo",
         "mimo-tts": "mimo",
+        "openai": "chatgpt",
+        "openai-platform": "chatgpt",
+        "chatgpt-oauth": "chatgpt",
     }
     key = aliases.get(key, key)
     if key not in _FACTORY:
@@ -37,12 +40,14 @@ def _ensure_builtins() -> None:
     global _BUILTINS_READY, _FACTORY
     if _BUILTINS_READY:
         return
+    from register_core.providers.chatgpt_adapter import ChatGPTProvider
     from register_core.providers.grok_adapter import GrokProvider
     from register_core.providers.mimo_adapter import MimoProvider
 
     built: dict[str, Callable[..., RegisterProvider]] = {
         "grok": lambda **kw: GrokProvider(**kw),
         "mimo": lambda **kw: MimoProvider(**kw),
+        "chatgpt": lambda **kw: ChatGPTProvider(**kw),
     }
     _FACTORY = {**built, **_FACTORY}
     _BUILTINS_READY = True

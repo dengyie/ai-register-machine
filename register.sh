@@ -4,6 +4,7 @@
 # Usage:
 #   ./register.sh grok [count] [threads]
 #   ./register.sh mimo [count]
+#   ./register.sh chatgpt [count]
 #   ./register.sh core list|run ...
 #   ./register.sh smoke mimo
 #   ./register.sh help
@@ -12,6 +13,7 @@
 #   - Layered core: register_core (email / providers / verify / sink / pipeline)
 #   - Grok stays Python (register_cli + grok_register_ttk + cpa_xai)
 #   - MiMo is providers/mimo (Node/Playwright register-one.js)
+#   - ChatGPT is providers/chatgpt (in-process curl_cffi + EmailSource)
 #   - Shared ops: clash/mihomo 7897, Xvfb, fail-fast, no alias-email farm
 set -euo pipefail
 
@@ -24,8 +26,10 @@ register.sh — multi-provider hub (ai-register-machine)
 
   ./register.sh grok [count] [threads]   Register xAI/Grok (Python production path)
   ./register.sh mimo [count]             Register Xiaomi MiMo API key (Node)
+  ./register.sh chatgpt [count]          Register OpenAI platform account (protocol)
   ./register.sh core list                Layered framework: list providers/email
   ./register.sh core run -p mimo -n 1    Layered framework: pipeline run
+  ./register.sh core run -p chatgpt -n 1 --email-source tinyhost
   ./register.sh smoke mimo               MiMo tinyhost + xiaomi page smoke
   ./register.sh help
 
@@ -37,6 +41,8 @@ Env (shared):
   GROK_NODE / GROK_CONFIG   clash node/config (grok path)
   MIMO_PROXY                default http://127.0.0.1:7897
   MIMO_RUNTIME              node_modules home (pxed: /personal/mimo-register)
+  CHATGPT_PROXY             default http://127.0.0.1:7897
+  CHATGPT_EMAIL_SOURCE      default tinyhost
   HEADLESS / HEADLESS_FLAG  browser mode
   OTP_RETRIES               MiMo temp-mail polls
 
@@ -111,6 +117,11 @@ case "$cmd" in
     COUNT="${1:-1}"
     export COUNT
     exec bash "$ROOT/providers/mimo/run-register.sh" "$COUNT"
+    ;;
+  chatgpt|openai|openai-platform)
+    COUNT="${1:-1}"
+    export COUNT
+    exec bash "$ROOT/providers/chatgpt/run-register.sh" "$COUNT"
     ;;
   core|framework)
     # Layered register_core CLI (email / provider / verify / sink)

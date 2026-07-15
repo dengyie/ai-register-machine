@@ -18,4 +18,8 @@ def get_verifier(name: str, **kwargs: Any) -> Verifier:
         from register_core.verify.grok_chat import GrokChatVerifier
 
         return GrokChatVerifier(**kwargs)
+    if key in ("chatgpt", "openai", "chatgpt_token", "openai_token"):
+        from register_core.verify.chatgpt_token import ChatGPTTokenVerifier
+
+        return ChatGPTTokenVerifier(**kwargs)
     raise KeyError(f"unknown verifier: {name!r}")

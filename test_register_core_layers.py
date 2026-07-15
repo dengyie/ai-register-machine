@@ -88,6 +88,7 @@ class TestRegistry(unittest.TestCase):
         ps = list_providers()
         self.assertIn("grok", ps)
         self.assertIn("mimo", ps)
+        self.assertIn("chatgpt", ps)
         es = list_email_sources()
         self.assertIn("tinyhost", es)
         self.assertIn("legacy_grok", es)

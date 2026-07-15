@@ -13,14 +13,14 @@ Production-oriented multi-provider register monorepo. Inspired by:
 | **Usable** | One hub (`./register.sh`), one layered CLI (`python -m register_core`), desktop GUI |
 | **Honest** | Success = this-run delta / RESULT_JSON; never historical tail alone |
 | **Layered** | email / providers / verify / sink / pipeline contracts |
-| **Product-local stacks** | Grok stays Python+Drission; MiMo stays Node+Playwright — no fake merge |
+| **Product-local stacks** | Grok Python+Drission; MiMo Node+Playwright; ChatGPT in-process curl_cffi+EmailSource |
 | **Safe defaults** | gitignore secrets, sink 0600, public redact, no mass alias farm |
 
 ## Directory map
 
 ```text
 ai-register-machine/
-├── register.sh                 # hub: grok | mimo | core | smoke | help
+├── register.sh                 # hub: grok | mimo | chatgpt | core | smoke | help
 ├── ARCHITECTURE.md             # this file (canonical layout)
 ├── Makefile                    # test / syntax / doctor / help
 ├── pyproject.toml              # uv + pytest
@@ -44,6 +44,7 @@ ai-register-machine/
 │   ├── README.md
 │   ├── _template/              # copy-me skeleton for a new product
 │   ├── mimo/                   # Xiaomi MiMo (Node/Playwright) — production
+│   ├── chatgpt/                # OpenAI platform protocol (curl_cffi + EmailSource)
 │   └── grok/                   # Grok layout notes (runtime still root paths)
 ├── docs/
 │   ├── ADDING_PROVIDER.md
@@ -78,6 +79,8 @@ hub / GUI / apps
 ```
 
 Black-box providers (`grok`, `mimo`) **own mail internally**. Passing `--email-source=tinyhost` is rejected so we never pretend the pipeline controls their mailbox.
+
+In-process providers (`chatgpt`) **must** use `EmailSource` (default tinyhost). Protocol path: authorize PKCE → register → email OTP → create_account → oauth/token. Artifacts under `providers/chatgpt/output/` (gitignored). No silent production CPA inject.
 
 ## Production authority (do not invert)
 

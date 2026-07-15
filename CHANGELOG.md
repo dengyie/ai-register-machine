@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-07-15
+
+### Added
+
+- **ChatGPT / OpenAI platform provider** (`providers/chatgpt/`): in-process protocol register via `curl_cffi` + Sentinel PoW + `EmailSource` (default `gmail_imap`); hub `./register.sh chatgpt`
+- `register_core/providers/chatgpt_adapter.py` + `verify/chatgpt_token.py` (offline token shape gate)
+- Unit tests: `test_chatgpt_provider.py` (attribution, redact, verifier, registry)
+- Gmail OTP extractor: HTML strip + OpenAI “temporary verification code” patterns (was poisoned by CSS hex numbers)
+
+### Notes
+
+- ChatGPT path does **not** auto-inject tebi/CPA; secrets land in `providers/chatgpt/output/` (0600, gitignored)
+- Live path verified through authorize → OTP validate; final `create_account` may still return `registration_disallowed` (IP/domain risk) — Manual-required
+
 ## [1.3.0] - 2026-07-15
 
 ### Added

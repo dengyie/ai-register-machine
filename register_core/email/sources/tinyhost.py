@@ -14,16 +14,23 @@ from urllib.request import ProxyHandler, Request, build_opener
 from register_core.contracts import Mailbox, OtpCode
 from register_core.errors import FailFastError, MailMissError
 
-BAD_DOMAIN_RE = re.compile(r"(infinityfree|000\.pe|\.\.$|\.\s*$)", re.I)
+# Hard-block disposable hosters that rarely deliver OpenAI/OTP mail.
+BAD_DOMAIN_RE = re.compile(
+    r"(infinityfree|000\.pe|work\.gd|\.io\.vn$|\.\.$|\.\s*$)",
+    re.I,
+)
 OTP_RE = re.compile(r"\b(\d{4,8})\b")
 DEFAULT_BASE = "https://tinyhost.shop"
-LOCAL_FALLBACK = (
-    "graphiclens.site",
+# Prefer domains that historically deliver product OTPs (MiMo harden list + OpenAI path).
+PREFERRED_DOMAINS = (
+    "publicvm.com",
     "sewink.my.id",
-    "nexorabio.pro.vn",
+    "graphiclens.site",
     "kimora.space",
     "sasukiez.shop",
+    "nexorabio.pro.vn",
 )
+LOCAL_FALLBACK = PREFERRED_DOMAINS
 
 
 def _parse_mail_ts(value: Any) -> float:
@@ -82,13 +89,25 @@ class TinyhostSource:
             if BAD_DOMAIN_RE.search(d):
                 raise FailFastError(f"tinyhost forced domain rejected: {d}")
             return d
+        # 1) Prefer known-good domains first (higher OpenAI/OTP deliverability).
+        preferred = list(PREFERRED_DOMAINS)
+        secrets.SystemRandom().shuffle(preferred)
         try:
-            data = self._get_json(f"{self.base_url}/api/random-domains/?limit=8", timeout=15)
-            domains = data.get("domains") if isinstance(data, dict) else None
-            if isinstance(domains, list):
-                for raw in domains:
+            data = self._get_json(f"{self.base_url}/api/random-domains/?limit=16", timeout=15)
+            remote = data.get("domains") if isinstance(data, dict) else None
+            remote_set = {
+                str(raw or "").strip().strip(".").lower()
+                for raw in (remote or [])
+                if str(raw or "").strip()
+            }
+            for d in preferred:
+                if d.lower() in remote_set and not BAD_DOMAIN_RE.search(d):
+                    return d
+            if isinstance(remote, list):
+                for raw in remote:
                     d = str(raw or "").strip().strip(".")
                     if d and not BAD_DOMAIN_RE.search(d) and "." in d:
+                        # Soft-prefer preferred list order already tried; accept clean remote.
                         return d
         except MailMissError:
             pass
