@@ -69,17 +69,32 @@ python -m register_core nodes core start|select
 | `REGISTER_NODES_FILE` / `NODES_FILE` | `./nodes.json` | HTTP/SOCKS catalog |
 | `REGISTER_NODES` | `1` | Set `0` to ignore catalog |
 | `REGISTER_NODES_PREFLIGHT` | `1` | Probe catalog before register (list/auto) |
-| `REGISTER_NODES_MAX_FAIL` | `3` | Proxy fails before quarantine |
+| `REGISTER_NODES_MAX_FAIL` | `3` | Hard quarantine after consecutive proxy fails |
 | `REGISTER_NODES_SKIP_FAILED` | `1` | Skip quarantined nodes in rotation |
+| `REGISTER_NODES_COOLDOWN_RISK` | `600` | Soft cooldown (s) after `registration_disallowed` — **not** quarantine |
+| `REGISTER_NODES_COOLDOWN_NETWORK` | `120` | Soft cooldown (s) after network/proxy fail (still counts fail_count) |
+| `REGISTER_NODES_COOLDOWN_PER_USE` | `0` | Optional post-success cool; default **off** (small pools) |
 | `CLASH_PROXY` | `http://127.0.0.1:7897` | External Clash mixed port (`egress=clash`) |
-| `CHATGPT_PROXY` | empty | Fixed URL override |
+| `CHATGPT_PROXY` | empty | Fixed **register** egress URL override |
 | `CHATGPT_PROXY_LIST` / `PROXY_LIST` | empty | Self-controlled HTTP pool (skips catalog preflight) |
 | `CHATGPT_PROXY_ROTATE_MODE` / `PROXY_ROTATE_MODE` | auto | `off` \| `list` \| `nodes` \| `clash` |
 | `CHATGPT_PROXY_ROTATE_EVERY` | `1` | Rotate every N attempts |
+| `CHATGPT_MAIL_PROXY` / `EMAIL_PROXY` / `MAIL_PROXY` | empty | **Mail HTTP only** (tinyhost API). Default direct; never inherits register proxy |
+| `CHATGPT_EMAIL_SOURCE` | `gmail_imap` | Pluggable source: `gmail_imap` \| `tinyhost` \| `duckmail` \| `auto` |
 | `CHATGPT_EMAIL_DOMAIN` | `publicvm.com` | Force tinyhost domain (higher OTP deliverability) |
-| `CHATGPT_OTP_TIMEOUT` | `180` | OTP poll seconds |
+| `CHATGPT_OTP_TIMEOUT` | `180` | OTP poll seconds (split across first + resend polls) |
 | `CHATGPT_SINK` | `providers/chatgpt/output/pipeline.jsonl` | private JSONL |
 | `CHATGPT_TIMEOUT` | `900` | pipeline timeout hint |
+
+### Mail vs register egress
+
+| Path | Proxy |
+|------|--------|
+| OpenAI register (`curl_cffi`) | `CHATGPT_PROXY` / `PROXY_LIST` / `nodes.json` / egress backend |
+| Email allocate/poll (HTTP temp-mail) | **direct** unless `CHATGPT_MAIL_PROXY` / `EMAIL_PROXY` / `MAIL_PROXY` |
+| Gmail IMAP | local TLS to `imap.gmail.com` — not register pool |
+
+Artifacts include redacted `register_proxy`, `mail_proxy`, and on `mail_miss` optional `otp_wait` (`OtpWaitDiagnostics`: poll_count, failure_class, …).
 
 ## Artifacts (gitignored)
 
@@ -99,22 +114,37 @@ read historical `accounts.jsonl` tail as this-run success.
 - `secret_kind` = `refresh_token`
 - access/id tokens stored in artifacts / auth file, redacted in public dict
 
-## Fail-fast
+## Fail-fast / error taxonomy
 
 - Missing email source / empty allocate → `FailFastError`
-- OTP timeout → `MailMissError` (pipeline may stop under fail_fast)
+- OTP timeout → `MailMissError` / `error_kind=mail_miss` (pipeline may stop under fail_fast). **Does not** cool or quarantine register nodes.
+- `create_account` risk → `error_kind=registration_disallowed` → soft cooldown (`REGISTER_NODES_COOLDOWN_RISK`) only
+- Network/proxy fail → fail_count + optional `REGISTER_NODES_COOLDOWN_NETWORK`; hard quarantine after `MAX_FAIL`
 - Sentinel soft-fail continues once; hard HTTP 4xx/5xx on register/OTP → fail attempt
+
+`failure_class` (under `artifacts.otp_wait`, not a separate error_kind): `no_mail` | `parse_fail` | `stale_code` | `imap_error` | `aborted`.
 
 ## Manual-required
 
 - **OTP inbox**: prefer `CHATGPT_EMAIL_SOURCE=gmail_imap` with catch-all (`@mangoqwq.com` → Gmail). Pure tinyhost domains often never deliver OpenAI OTP. Gmail OTP parser must strip HTML (OpenAI body is HTML-only; CSS numbers used to poison extractors).
-- **`create_account` → `registration_disallowed`**: protocol + OTP validated live; OpenAI risk engine still rejects final account create for some IP/domain/device combos. Needs cleaner residential egress and/or better-reputation mailbox domain — not fixed by payload shape alone.
+- **`create_account` → `registration_disallowed`**: protocol + OTP validated live; OpenAI risk engine still rejects final account create for some IP/domain/device combos. Needs cleaner residential egress and/or better-reputation mailbox domain — not fixed by payload shape alone. Code soft-cools the node; does not empty-retry spin.
 - Live OpenAI API usage probe (cost / policy) — verifier default is offline shape only
 - Phone challenge accounts (not handled; fail closed)
 - Local Mac: Gmail IMAP TLS to `imap.gmail.com:993` may EOF (network path); use **pxed** (HTTP CONNECT via Clash) for live smoke
+- Live `ok=1` out号 is asset-dependent (OTP delivery + residential reputation). Code gate can ship with honest smoke diagnosis when assets block.
+
+## Offline verify (code gate)
+
+```bash
+.venv/bin/python -m unittest \
+  test_otp_diagnostics test_chatgpt_error_kinds test_mail_proxy_separation \
+  test_register_core_nodes test_register_core_proxy -v
+```
 
 ## Do not
 
 - Hotmail plus-alias farm
 - Silent tebi/CPA production inject
+- Soft-inject / remint spin on entitlement or risk
 - Browser Selenium farms as primary path
+- Treat mail_miss as proxy death (no quarantine)
