@@ -183,7 +183,13 @@ def test_config_example_chat_keys() -> None:
     raw = (ROOT / "config.example.json").read_text(encoding="utf-8")
     assert '"cpa_probe_chat": true' in raw
     assert "cpa_probe_chat_required" in raw
-    print("PASS config.example chat keys")
+    assert "clash_pin_node" in raw
+    assert '"cpa_allow_device_flow_fallback": true' in raw
+    assert "best-effort" in raw or "Manual-required" in raw
+    env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "CPA_ALLOW_DEVICE_FLOW_FALLBACK=true" in env
+    assert "GROK_NODE" in env or "CLASH_PIN_NODE" in env
+    print("PASS config.example chat keys + pin/fallback docs")
 
 
 def test_cli_chat_stats() -> None:
@@ -827,6 +833,36 @@ def test_export_resolves_env_api_key() -> None:
     print("PASS export mid-tier resolve")
 
 
+def test_pkce_non_retryable_residual_classifier() -> None:
+    """Empty SPA / action-id extract failures are non-retryable residuals (source + unit)."""
+    import ast
+
+    src = (ROOT / "cpa_xai" / "mint.py").read_text(encoding="utf-8")
+    assert "def _is_pkce_non_retryable" in src
+    assert "mint best-effort residual → device flow" in src
+    assert "allow_device_flow_fallback: bool = True" in src
+    assert "empty consent SPA shell" in src or "best-effort" in src
+    tree = ast.parse(src)
+    fn = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_is_pkce_non_retryable"
+    )
+    ns: dict = {}
+    mod = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(mod)
+    exec(compile(mod, "<mint_pkce_nr>", "exec"), ns)
+    is_nr = ns["_is_pkce_non_retryable"]
+    assert is_nr("consent HTML missing submitOAuth2Consent") is True
+    assert is_nr("server action not found in HTML") is True
+    assert is_nr("action id extract failed") is True
+    assert is_nr("empty SPA residual") is True
+    assert is_nr("connection reset by peer") is False
+    assert is_nr("") is False
+    assert is_nr(None) is False
+    print("PASS pkce non-retryable residual classifier")
+
+
 def test_inject_ignores_probe_via_cpa_ok_without_chat_ok() -> None:
     """Observational CPA smoke alone must never unlock remote inject."""
     exp = _load("cpa_export_midtier_inject", ROOT / "cpa_export.py")
@@ -874,6 +910,7 @@ def main() -> int:
     test_config_example_documents_mid_tier_probe_keys()
     test_mint_passes_transport_kwargs_signature()
     test_export_resolves_env_api_key()
+    test_pkce_non_retryable_residual_classifier()
     test_inject_ignores_probe_via_cpa_ok_without_chat_ok()
     print("\nALL PASS (cpa chat entitlement gate)")
     return 0

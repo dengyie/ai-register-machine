@@ -27,6 +27,27 @@ def _noop(_: str) -> None:
     return None
 
 
+def _is_pkce_non_retryable(err: str | None) -> bool:
+    """True when PKCE failed on consent HTML/action-id extract (empty SPA shell).
+
+    These are best-effort protocol residuals — remint/spin will not heal them;
+    fall through to device/browser per flags. Distinct from transient network.
+    """
+    s = (err or "").lower()
+    if not s:
+        return False
+    needles = (
+        "server action not found",
+        "consent html missing",
+        "submitoauth2consent",
+        "action id",
+        "action_id",
+        "stale hardcoded fallback",
+        "empty spa",
+    )
+    return any(n in s for n in needles)
+
+
 def mint_and_export(
     *,
     email: str,
@@ -65,8 +86,9 @@ def mint_and_export(
     and an sso cookie is available. ``protocol_flow`` selects the HTTP grant:
     ``pkce`` (default, authorization-code — produces chat-usable tokens) or
     ``device`` (legacy device-code — known to yield /models-ok-but-chat-403).
-    ``allow_device_flow_fallback`` lets a failed PKCE fall back to device flow
-    (off by default, since device-flow tokens are usually chat-denied).
+    ``allow_device_flow_fallback`` (product default True) lets failed PKCE fall
+    through to device flow for local disk residual; device tokens are often
+    chat-denied — inject still requires chat_ok / entitlement hard gate.
     On protocol failure, falls back to browser mint unless protocol_only=True.
 
     priority: CPA auth-file routing weight (CLIProxyAPI). Default 1000.
@@ -116,7 +138,10 @@ def mint_and_export(
                 "mint_method": "protocol",
             }
         if flow == "pkce":
-            log("mint try protocol (SSO HTTP PKCE authorization-code flow)")
+            log(
+                "mint try protocol (SSO HTTP PKCE authorization-code; best-effort — "
+                "empty consent SPA shell → residual device/browser)"
+            )
             try:
                 tokens = mint_with_sso_pkce(
                     sso_cookie=sso_val,
@@ -128,9 +153,20 @@ def mint_and_export(
                 log("mint protocol PKCE SUCCESS")
             except PKCEMintError as e:
                 protocol_err = str(e)
-                log(f"mint protocol PKCE failed: {e}")
+                non_retry = _is_pkce_non_retryable(protocol_err)
+                log(
+                    f"mint protocol PKCE failed"
+                    f"{' (non-retryable consent/action extract)' if non_retry else ''}"
+                    f": {e}"
+                )
                 if allow_device_flow_fallback:
-                    log("mint fallback → device flow")
+                    if non_retry:
+                        log(
+                            "mint best-effort residual → device flow "
+                            "(PKCE consent shell empty/action id missing; accept device residual)"
+                        )
+                    else:
+                        log("mint fallback → device flow")
                 else:
                     if protocol_only:
                         return {
