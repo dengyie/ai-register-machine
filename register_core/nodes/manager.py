@@ -407,10 +407,21 @@ def get_manager(path: Path | str | None = None) -> NodeManager:
         return _manager
 
 
-def reset_manager_for_tests() -> None:
+def invalidate_manager() -> None:
+    """Drop process-global NodeManager so next get_manager() reloads from disk.
+
+    Use after CLI rewrites the catalog path out-of-band, or when tests need a
+    clean singleton. Prefer ``mgr.reload()`` when you already hold the manager
+    for the same path.
+    """
     global _manager
     with _manager_lock:
         _manager = None
+
+
+def reset_manager_for_tests() -> None:
+    """Test helper alias for :func:`invalidate_manager`."""
+    invalidate_manager()
 
 
 def _env_truthy(val: Any, default: bool = False) -> bool:

@@ -527,7 +527,12 @@ def preflight_nodes_for_register(
         if _nodes_required_for_backend(backend, base):
             raise FailFastError(f"nodes catalog unavailable: {exc}") from exc
         base["_nodes_preflight_done"] = True
-        base["_nodes_preflight"] = {"skipped": True, "reason": str(exc), "healthy": 0}
+        base["_nodes_preflight"] = {
+            "skipped": True,
+            "reason": f"catalog_unavailable:{exc}",
+            "healthy": 0,
+        }
+        _log(f"[nodes] preflight skipped: catalog unavailable: {exc}")
         return base
 
     timeout_raw = base.get("nodes_probe_timeout") or _env_first(

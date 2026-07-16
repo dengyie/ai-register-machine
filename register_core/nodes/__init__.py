@@ -10,7 +10,12 @@ Two layers:
 from __future__ import annotations
 
 from register_core.nodes.catalog import default_nodes_path, load_nodes, save_nodes
-from register_core.nodes.manager import NodeManager, get_manager, reset_manager_for_tests
+from register_core.nodes.manager import (
+    NodeManager,
+    get_manager,
+    invalidate_manager,
+    reset_manager_for_tests,
+)
 from register_core.nodes.models import Node
 
 __all__ = [
@@ -18,6 +23,7 @@ __all__ = [
     "NodeManager",
     "default_nodes_path",
     "get_manager",
+    "invalidate_manager",
     "load_nodes",
     "reset_manager_for_tests",
     "save_nodes",

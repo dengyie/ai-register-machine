@@ -520,14 +520,164 @@ class TestManager(unittest.TestCase):
             dumped = "\n".join(
                 str(c.args[0]) for c in mock_print.call_args_list if c.args
             )
-            self.assertIn("healthy-only", dumped.lower() + " " + dumped)
-            # either explicit healthy-only phrase or re-probe language
-            self.assertTrue(
-                "healthy-only" in dumped
-                or "re-probe" in dumped
-                or "live-probed" in dumped
-                or "Batch register" in dumped
+            self.assertIn("healthy-only", dumped)
+            self.assertIn("schema only", dumped)
+            self.assertIn("egress=list|auto", dumped)
+
+    def test_import_check_probes_dialable_even_with_needs_core(self) -> None:
+        """--check must probe dialable HTTP/SOCKS even when protocol needs_core is set."""
+        from register_core.nodes.convert import cli_import
+        from register_core.nodes.convert.pipeline import ImportResult, MergePlan
+        from register_core.nodes.models import Node
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            nodes_json = td_path / "nodes.json"
+            save_nodes([Node(url="http://alive:1", id="a")], nodes_json)
+
+            packed = ImportResult(
+                ok=True,
+                dialable=[Node(url="http://alive:1", id="a")],
+                protocol=[{"name": "vless-1", "type": "vless"}],
+                needs_core=True,
+                nodes_path=str(nodes_json),
+                merge=MergePlan(
+                    mode="replace",
+                    existing=0,
+                    incoming=1,
+                    added=1,
+                    final=1,
+                ),
             )
+
+            def fake_check(*, nodes_json, timeout=12.0):  # noqa: ARG001
+                return {
+                    "ok": 1,
+                    "total": 1,
+                    "path": str(nodes_json),
+                    "results": [{"id": "a", "ok": True}],
+                }
+
+            with patch.object(cli_import, "pack_result", return_value=packed), patch.object(
+                cli_import, "convert_paths"
+            ) as convert_mock, patch.object(
+                cli_import, "_post_import_check", side_effect=fake_check
+            ) as check_mock, patch("builtins.print") as mock_print:
+                convert_mock.return_value = packed
+                code = cli_import.run_import(
+                    [str(td_path / "dummy.yaml")],
+                    format_hint="clash_yaml",
+                    nodes_home=td_path / ".nodes",
+                    nodes_json=nodes_json,
+                    dry_run=False,
+                    replace_nodes=True,
+                    check=True,
+                )
+            self.assertEqual(code, 0)
+            self.assertTrue(check_mock.called)
+            dumped = "\n".join(
+                str(c.args[0]) for c in mock_print.call_args_list if c.args
+            )
+            self.assertIn("import+check: 1/1 live", dumped)
+            self.assertIn("nodes core start", dumped)
+            self.assertIn('"check"', dumped)
+
+    def test_post_import_check_reloads_manager_without_test_helper(self) -> None:
+        """_post_import_check uses get_manager+reload, not reset_manager_for_tests."""
+        from register_core.nodes.convert.cli_import import _post_import_check
+        from register_core.nodes import manager as mgr_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes([Node(url="http://alive:1", id="a")], path)
+
+            def fake_probe(node, **kwargs):
+                node.last_ok = True
+                node.fail_count = 0
+                return {"id": node.id, "label": node.label, "ok": True}
+
+            # Warm singleton with empty path first, then probe rewritten file.
+            reset_manager_for_tests()
+            with patch.object(mgr_mod, "probe_node", side_effect=fake_probe), patch(
+                "builtins.print"
+            ):
+                # Pre-load a manager so reload path is exercised.
+                warm = mgr_mod.get_manager(path)
+                warm.nodes = []  # stale in-memory
+                summary = _post_import_check(nodes_json=path, timeout=1.0)
+            self.assertEqual(summary["ok"], 1)
+            self.assertEqual(summary["total"], 1)
+            self.assertNotIn("error", summary)
+            # Product path must not depend on missing catalog after reload.
+            self.assertTrue(path.is_file())
+
+    def test_force_nodes_preflight_probes_despite_proxy_list(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes(
+                [
+                    Node(url="http://alive:1", id="a"),
+                    Node(url="http://dead:1", id="d"),
+                ],
+                path,
+            )
+
+            def fake_probe(node, **kwargs):
+                ok = node.url.endswith("alive:1")
+                node.last_ok = ok
+                node.fail_count = 0 if ok else 1
+                return {"id": node.id, "label": node.label, "ok": ok}
+
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES": "1",
+                    "REGISTER_EGRESS": "list",
+                    "REGISTER_CORE": "0",
+                    "PROXY_LIST": "http://op:1",
+                    "CHATGPT_PROXY_LIST": "",
+                    "REGISTER_NODES_PREFLIGHT": "1",
+                },
+                clear=False,
+            ), patch("register_core.nodes.manager.probe_node", side_effect=fake_probe):
+                reset_manager_for_tests()
+                core_proxy.reset_rotation_for_tests()
+                extra = core_proxy.preflight_nodes_for_register(
+                    {"egress": "list", "force_nodes_preflight": 1}
+                )
+                self.assertFalse(extra["_nodes_preflight"].get("skipped"))
+                self.assertEqual(extra["_nodes_preflight"]["healthy"], 1)
+                self.assertEqual(extra.get("proxy_list"), "http://alive:1")
+
+    def test_preflight_catalog_unavailable_is_logged(self) -> None:
+        logs: list[str] = []
+        with patch.dict(
+            os.environ,
+            {
+                "REGISTER_NODES": "1",
+                "REGISTER_EGRESS": "auto",
+                "REGISTER_CORE": "1",
+                "PROXY_LIST": "",
+                "CHATGPT_PROXY_LIST": "",
+                "REGISTER_NODES_PREFLIGHT": "1",
+            },
+            clear=False,
+        ), patch(
+            "register_core.nodes.get_manager",
+            side_effect=RuntimeError("boom-catalog"),
+        ):
+            core_proxy.reset_rotation_for_tests()
+            # auto + not required → soft skip with log
+            with patch.object(
+                core_proxy, "_nodes_required_for_backend", return_value=False
+            ):
+                extra = core_proxy.preflight_nodes_for_register(
+                    {"egress": "auto"}, log_fn=logs.append
+                )
+        self.assertTrue(extra["_nodes_preflight"].get("skipped"))
+        self.assertIn("catalog_unavailable", str(extra["_nodes_preflight"].get("reason")))
+        self.assertTrue(any("catalog unavailable" in m for m in logs))
 
 
 if __name__ == "__main__":

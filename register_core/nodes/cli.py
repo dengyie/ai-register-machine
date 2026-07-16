@@ -220,11 +220,14 @@ def cmd_clear(args: argparse.Namespace) -> int:
         return 2
     save_nodes([], mgr.path)
     try:
-        from register_core.nodes.manager import reset_manager_for_tests
-
-        reset_manager_for_tests()
+        mgr.reload()
     except Exception:
-        pass
+        try:
+            from register_core.nodes.manager import invalidate_manager
+
+            invalidate_manager()
+        except Exception:
+            pass
     print(json.dumps({"ok": True, "dropped": n, "path": str(mgr.path)}, ensure_ascii=False))
     return 0
 

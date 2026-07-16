@@ -129,60 +129,94 @@ def run_import(
     # Optional post-import live probe of the HTTP/SOCKS catalog.
     # Import always writes the full catalog; batch register still re-probes and
     # seeds healthy-only rotation (this flag is convenience, not the authority gate).
+    # Hybrid profiles (dialable + protocol) still probe the dialable half.
     check_summary: dict | None = None
-    if check and packed.ok and not packed.needs_core:
+    dialable_final = int(getattr(packed.merge, "final", 0) or 0) if packed.merge else 0
+    should_check = bool(
+        check and packed.ok and packed.nodes_path and dialable_final > 0
+    )
+    if should_check:
         check_summary = _post_import_check(
-            nodes_json=nodes_json,
+            nodes_json=Path(packed.nodes_path) if packed.nodes_path else nodes_json,
             timeout=float(check_timeout or 12.0),
         )
-        if check_summary is not None:
-            public["check"] = check_summary
+        public["check"] = check_summary
 
-    if packed.needs_core:
-        public["hint"] = (
-            "protocol nodes need: python -m register_core nodes core start && "
-            "python -m register_core nodes egress set core"
-        )
-    elif check and check_summary is not None:
+    public["hint"] = _import_hint(
+        needs_core=bool(packed.needs_core),
+        check_summary=check_summary,
+        merge_mode=packed.merge.mode if packed.merge else "n/a",
+        dialable_final=dialable_final,
+    )
+    print(json.dumps(public, ensure_ascii=False, indent=2))
+    return 0 if packed.ok else 1
+
+
+def _import_hint(
+    *,
+    needs_core: bool,
+    check_summary: dict | None,
+    merge_mode: str,
+    dialable_final: int,
+) -> str:
+    """Operator-facing post-import contract text (batch preflight remains authority)."""
+    parts: list[str] = []
+    if check_summary is not None:
         healthy = int(check_summary.get("ok") or 0)
         total = int(check_summary.get("total") or 0)
-        public["hint"] = (
-            f"import+check: {healthy}/{total} live. "
-            "Batch register (egress=list|auto) will re-probe and rotate only healthy URLs; "
-            "dead nodes stay in catalog but never enter the registration pool."
-        )
-    else:
-        public["hint"] = (
+        err = str(check_summary.get("error") or "").strip()
+        if err:
+            parts.append(
+                f"import+check failed: {err}. "
+                "Batch register (egress=list|auto) will still re-probe and seed healthy-only rotation."
+            )
+        else:
+            parts.append(
+                f"import+check: {healthy}/{total} live. "
+                "Batch register (egress=list|auto) will re-probe and rotate only healthy URLs; "
+                "dead nodes stay in catalog but never enter the registration pool."
+            )
+    elif dialable_final > 0:
+        parts.append(
             "HTTP/SOCKS catalog written (schema only — not live-probed). "
             "Before each batch register with egress=list|auto, the pipeline probes "
             "nodes.json and seeds healthy-only rotation. Optional now: "
             "`python -m register_core nodes check` or re-import with --check. "
-            f"nodes.json mode={packed.merge.mode if packed.merge else 'n/a'}"
+            f"nodes.json mode={merge_mode}"
         )
-    print(json.dumps(public, ensure_ascii=False, indent=2))
-    return 0 if packed.ok else 1
+    if needs_core:
+        parts.append(
+            "protocol nodes need: python -m register_core nodes core start && "
+            "python -m register_core nodes egress set core"
+        )
+    if not parts:
+        parts.append(
+            "import finished with no dialable HTTP/SOCKS rows and no protocol runtime. "
+            f"nodes.json mode={merge_mode}"
+        )
+    return " | ".join(parts)
 
 
 def _post_import_check(
     *,
     nodes_json: Path | None,
     timeout: float = 12.0,
-) -> dict | None:
-    """Probe catalog after import; returns summary dict or None if catalog empty."""
+) -> dict:
+    """Probe dialable catalog after import; always returns a summary dict."""
     from register_core.nodes.convert.pipeline import _ROOT
-    from register_core.nodes.manager import NodeManager, reset_manager_for_tests
+    from register_core.nodes.manager import get_manager
 
     if nodes_json is None:
         path = _ROOT / "nodes.json"
     else:
         path = Path(nodes_json).expanduser().resolve()
     if not path.is_file():
-        return {"ok": 0, "total": 0, "error": f"catalog missing: {path}"}
-    # Fresh manager so we don't reuse a stale singleton after pack rewrote the file.
-    reset_manager_for_tests()
-    mgr = NodeManager(path)
-    if not mgr.ensure_loaded():
-        return {"ok": 0, "total": 0, "error": "catalog empty"}
+        return {"ok": 0, "total": 0, "path": str(path), "error": f"catalog missing: {path}"}
+    # Same-path singleton may still hold pre-pack memory; reload from disk.
+    mgr = get_manager(path)
+    mgr.reload()
+    if not mgr.nodes:
+        return {"ok": 0, "total": 0, "path": str(path), "error": "catalog empty"}
     results = mgr.check_all(
         timeout=timeout,
         log=lambda m: print(m, flush=True),
