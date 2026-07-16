@@ -411,7 +411,7 @@ def test_finalize_probe_and_gate_behavior() -> None:
     assert out2["non_retryable"] is False
     assert out2.get("chat_retryable") is True
 
-    # soft-pass when required=false and not entitlement
+    # cpa_probe_chat_required=false no longer soft-passes free Build product ok
     r3 = {
         "ok": False,
         "path": "/tmp/x.json",
@@ -424,8 +424,10 @@ def test_finalize_probe_and_gate_behavior() -> None:
     out3 = exp.finalize_probe_and_gate(
         r3, {"cpa_probe_chat": True, "cpa_probe_chat_required": False}, email="t@e.com"
     )
-    assert out3["ok"] is True
-    assert "probe_chat_warning" in out3
+    assert out3["ok"] is False
+    assert out3.get("skip_remote_inject") is True
+    assert out3.get("chat_ok") is False
+    assert "probe_chat_warning" not in out3
 
     # apply_multi_remote_inject no-ops when ok false
     r4 = {
@@ -651,6 +653,18 @@ def test_remote_inject_chat_ok_hard_gate() -> None:
         allowed_gate = exp.evaluate_remote_inject_gate({"path": str(p2)}, cfg, auth_path=p2)
         assert allowed_gate.get("allow") is True
         assert allowed_gate.get("import_gate") == "chat_ok"
+
+        # require_chat_ok=false must refuse (chat_gate_disabled_refused), not soft-allow
+        cfg_off = dict(cfg)
+        cfg_off["cpa_remote_inject_require_chat_ok"] = False
+        refused_gate = exp.evaluate_remote_inject_gate(
+            {"path": str(p2), "chat_ok": True, "usable": True},
+            cfg_off,
+            auth_path=p2,
+        )
+        assert refused_gate.get("allow") is False
+        assert refused_gate.get("reason") == "chat_gate_disabled_refused"
+        assert refused_gate.get("import_gate") == "chat_gate_disabled_refused"
 
     print("PASS remote inject chat_ok hard gate")
 

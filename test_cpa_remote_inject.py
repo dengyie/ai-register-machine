@@ -66,12 +66,54 @@ def test_cli_remote_stats() -> None:
     print("PASS cli remote stats")
 
 
+
+def test_ssh_hardening_markers() -> None:
+    src = (ROOT / "cpa_export.py").read_text(encoding="utf-8")
+    for needle in (
+        "cpa_remote_ssh_identity",
+        "CPA_REMOTE_SSH_IDENTITY",
+        "BatchMode=yes",
+        "PasswordAuthentication=no",
+        "StrictHostKeyChecking=",
+        "cpa_remote_ssh_strict_hostkey",
+        'or "yes"',
+        "IdentitiesOnly=yes",
+    ):
+        assert needle in src, f"missing ssh hardening marker: {needle}"
+    # password path only when password and no key
+    assert "use_password = bool(password) and not use_key" in src
+    print("PASS ssh hardening markers")
+
+
+def test_inject_gate_refuses_require_chat_false() -> None:
+    mod = _load_cpa_export()
+    gate = mod.evaluate_remote_inject_gate(
+        {"path": "/tmp/x.json", "chat_ok": True, "usable": True},
+        {"cpa_remote_inject_require_chat_ok": False, "cpa_probe_chat": True},
+    )
+    assert gate.get("allow") is False
+    assert gate.get("reason") == "chat_gate_disabled_refused"
+    print("PASS inject gate refuses require_chat=false")
+
+
+def test_config_example_ssh_and_soft_flags() -> None:
+    src = (ROOT / "config.example.json").read_text(encoding="utf-8")
+    assert '"cpa_remote_ssh_identity"' in src
+    assert '"cpa_remote_ssh_strict_hostkey"' in src
+    assert "chat_gate_disabled_refused" in src
+    assert "不再软通过" in src or "不再软放行" in src
+    print("PASS config.example ssh + soft-flag docs")
+
+
 def main() -> int:
     test_helpers_present()
     test_disabled_skip()
     test_export_wires_remote_flag()
     test_hotmail_adaptive_poll_markers()
     test_cli_remote_stats()
+    test_ssh_hardening_markers()
+    test_inject_gate_refuses_require_chat_false()
+    test_config_example_ssh_and_soft_flags()
     print("\nALL PASS")
     return 0
 

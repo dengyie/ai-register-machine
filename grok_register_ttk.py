@@ -63,10 +63,12 @@ DEFAULT_CONFIG = {
     "cloudmail_password": "",
     "cpa_gui_close_mint_browser": True,
     "hotmail_accounts_file": "mail_credentials.txt",
-    "hotmail_alias_mode": "random",
+    "hotmail_alias_mode": "off",
     "hotmail_alias_random_length": 8,
     "hotmail_alias_random_max_attempts": 200,
-    "hotmail_max_aliases_per_account": 5,
+    "hotmail_max_aliases_per_account": 1,
+    # plus-alias farm is disabled by default; set true only for explicit ALLOW ops
+    "hotmail_allow_plus_alias": False,
     "hotmail_poll_interval": 2,
     "hotmail_recent_seconds": 900,
     "hotmail_mail_fetch_modes": "rest,imap",
@@ -394,6 +396,7 @@ def apply_env_config_overrides(cfg: dict | None = None) -> dict:
         ("CPA_REMOTE_INJECT_REQUIRED", "cpa_remote_inject_required", "bool"),
         ("CPA_PROTOCOL_ONLY", "cpa_protocol_only", "bool"),
         ("CPA_ALLOW_DEVICE_FLOW_FALLBACK", "cpa_allow_device_flow_fallback", "bool"),
+        ("HOTMAIL_ALLOW_PLUS_ALIAS", "hotmail_allow_plus_alias", "bool"),
         ("CPA_EXPORT_ENABLED", "cpa_export_enabled", "bool"),
         ("CPA_PROBE_CHAT", "cpa_probe_chat", "bool"),
         ("CPA_PROBE_CHAT_REQUIRED", "cpa_probe_chat_required", "bool"),
@@ -1820,14 +1823,31 @@ def _hotmail_make_alias(main_email, alias_index, *, randomize=False):
 
 
 def hotmail_get_email_and_token():
+    """Pick one Hotmail address for registration.
+
+    Product policy: new production is one mailbox per account (main address only).
+    Plus-alias farm requires explicit ``hotmail_allow_plus_alias=true`` (or env
+    HOTMAIL_ALLOW_PLUS_ALIAS) AND ``hotmail_alias_mode`` in {random,sequential}.
+    Default mode is ``off`` / max_aliases=1 → main only.
+    """
     accounts = _hotmail_load_accounts()
+    allow_alias = bool(config.get("hotmail_allow_plus_alias", False))
+    # also accept truthy string from overlay
+    if not isinstance(allow_alias, bool):
+        allow_alias = str(allow_alias).strip().lower() in {"1", "true", "yes", "on", "y"}
     try:
-        max_aliases = int(config.get("hotmail_max_aliases_per_account", 5) or 5)
+        max_aliases = int(config.get("hotmail_max_aliases_per_account", 1) or 1)
     except Exception:
-        max_aliases = 5
+        max_aliases = 1
     max_aliases = max(1, max_aliases)
-    alias_mode = str(config.get("hotmail_alias_mode", "random") or "random").strip().lower()
+    alias_mode = str(config.get("hotmail_alias_mode", "off") or "off").strip().lower()
+    alias_mode_on = alias_mode in ("random", "rand", "随机", "sequential", "seq", "顺序")
     random_mode = alias_mode in ("random", "rand", "随机")
+    # Kill-switch: without explicit ALLOW, never emit plus-aliases.
+    if not allow_alias or not alias_mode_on:
+        max_aliases = 1
+        alias_mode_on = False
+        random_mode = False
     try:
         random_max_attempts = int(config.get("hotmail_alias_random_max_attempts", 200) or 200)
     except Exception:
@@ -1843,23 +1863,24 @@ def hotmail_get_email_and_token():
                 continue
 
             candidate = None
-            # 原邮箱仍优先尝试一次；之后 random 模式使用随机 plus alias。
+            # 原邮箱仍优先尝试一次；之后仅在显式 ALLOW + mode 时使用 plus alias。
             if _hotmail_alias_available(main_email):
                 candidate = main_email
-            elif random_mode:
-                for _ in range(random_max_attempts):
-                    if _hotmail_count_consumed_for_main(main_email) >= max_aliases:
-                        break
-                    alias_email = _hotmail_make_alias(main_email, 1, randomize=True)
-                    if _hotmail_alias_available(alias_email):
-                        candidate = alias_email
-                        break
-            else:
-                for alias_index in range(1, max_aliases):
-                    alias_email = _hotmail_make_alias(main_email, alias_index)
-                    if _hotmail_alias_available(alias_email):
-                        candidate = alias_email
-                        break
+            elif alias_mode_on and allow_alias and max_aliases > 1:
+                if random_mode:
+                    for _ in range(random_max_attempts):
+                        if _hotmail_count_consumed_for_main(main_email) >= max_aliases:
+                            break
+                        alias_email = _hotmail_make_alias(main_email, 1, randomize=True)
+                        if _hotmail_alias_available(alias_email):
+                            candidate = alias_email
+                            break
+                else:
+                    for alias_index in range(1, max_aliases):
+                        alias_email = _hotmail_make_alias(main_email, alias_index)
+                        if _hotmail_alias_available(alias_email):
+                            candidate = alias_email
+                            break
 
             if not candidate:
                 continue
@@ -1873,6 +1894,12 @@ def hotmail_get_email_and_token():
                 "created_at": time.time(),
             }
             return candidate, token_key
+    if not allow_alias or not alias_mode_on:
+        raise Exception(
+            "Hotmail plus-alias 已禁用（hotmail_allow_plus_alias=false / mode=off）："
+            "主邮箱均已消耗。请补充 mail_credentials.txt 新号，或仅在明确允许时设置 "
+            "hotmail_allow_plus_alias=true 并配置 hotmail_alias_mode=random|sequential"
+        )
     raise Exception(
         "Hotmail/Outlook 可用别名已耗尽：请增加 hotmail_max_aliases_per_account、"
         "补充 mail_credentials.txt，或清理 emails_used.txt / emails_error.txt"

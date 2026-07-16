@@ -160,7 +160,8 @@ def evaluate_remote_inject_gate(
 
     Rules (defaults = production one-click):
       - always refuse entitlement_denied
-      - when ``cpa_remote_inject_require_chat_ok`` (default True): require chat_ok is True
+      - always require chat_ok is True for free Build inject
+      - ``cpa_remote_inject_require_chat_ok=false`` is refused (not a soft bypass)
       - refuse usable is False when chat gate is on
       - may load stamps from local auth JSON when result lacks chat fields
     """
@@ -195,25 +196,17 @@ def evaluate_remote_inject_gate(
 
     require_chat = _config_bool(cfg.get("cpa_remote_inject_require_chat_ok"), default=True)
     probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=True)
-    # Soft-pass local write must never become a live inject bypass.
+    # Free Build product rule: live/inventory inject always requires chat_ok.
+    # cpa_remote_inject_require_chat_ok=false is a dangerous misconfig — refuse
+    # inject instead of soft-allowing chat_gate_disabled (no live bypass).
     if not require_chat:
-        # Operator explicitly disabled chat inject gate — still refuse hard entitlement.
-        if r.get("entitlement_denied") is True:
-            return {
-                "allow": False,
-                "reason": "entitlement_denied",
-                "import_gate": "entitlement_denied",
-                "chat_ok": False,
-                "entitlement_denied": True,
-                "usable": False,
-            }
         return {
-            "allow": True,
-            "reason": "chat_gate_disabled",
-            "import_gate": str(r.get("import_gate") or "chat_gate_disabled"),
+            "allow": False,
+            "reason": "chat_gate_disabled_refused",
+            "import_gate": "chat_gate_disabled_refused",
             "chat_ok": r.get("chat_ok"),
             "entitlement_denied": bool(r.get("entitlement_denied")),
-            "usable": r.get("usable"),
+            "usable": False,
         }
 
     if r.get("entitlement_denied") is True:
@@ -536,37 +529,83 @@ def inject_cpa_auth_remote(
     timeout = float(cfg.get("cpa_remote_inject_timeout_sec", 60) or 60)
 
     password = _resolve_remote_ssh_password(cfg)
+    identity = str(
+        cfg.get("cpa_remote_ssh_identity")
+        or cfg.get("cpa_remote_ssh_key")
+        or os.environ.get("CPA_REMOTE_SSH_IDENTITY")
+        or ""
+    ).strip()
+    identity_path = ""
+    if identity:
+        identity_path = str(Path(identity).expanduser())
+        if not Path(identity_path).is_file():
+            msg = f"cpa_remote_ssh_identity not found: {identity_path}"
+            log(f"[cpa] remote inject failed: {msg}")
+            return {"ok": False, "error": msg}
+
+    use_key = bool(identity_path)
+    use_password = bool(password) and not use_key
     sshpass = _shutil.which("sshpass")
-    if password and not sshpass:
+    if use_password and not sshpass:
         msg = "sshpass not found (brew install sshpass / apt install sshpass)"
         log(f"[cpa] remote inject failed: {msg}")
         return {"ok": False, "error": msg}
+    if not use_key and not use_password:
+        # Allow bare ssh config (Host tebi-tunnel IdentityFile) with BatchMode.
+        use_key = True  # BatchMode key/agent path; password path needs explicit secret.
 
     env = os.environ.copy()
     for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
         env.pop(k, None)
-    if password:
+    if use_password:
         env["SSHPASS"] = password
+
+    # Host key policy: default yes (known_hosts must pre-exist for tunnel host).
+    # Operators may set cpa_remote_ssh_strict_hostkey=accept-new only for first bootstrap.
+    strict_hk = str(
+        cfg.get("cpa_remote_ssh_strict_hostkey")
+        or os.environ.get("CPA_REMOTE_SSH_STRICT_HOSTKEY")
+        or "yes"
+    ).strip()
+    if strict_hk not in {"yes", "accept-new", "no"}:
+        strict_hk = "yes"
 
     # Short ControlPath (macOS AF_UNIX path limit ~104 bytes)
     control_path = "/tmp/grcm-%C"
     ssh_common = [
-        "-o", "BatchMode=no",
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"StrictHostKeyChecking={strict_hk}",
         "-o", "ConnectTimeout=15",
         "-o", "ConnectionAttempts=1",
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=2",
-        "-o", "PreferredAuthentications=password",
-        "-o", "PubkeyAuthentication=no",
-        "-o", "NumberOfPasswordPrompts=1",
         "-o", "ControlMaster=auto",
         "-o", f"ControlPath={control_path}",
         "-o", "ControlPersist=180",
     ]
+    if use_password:
+        ssh_common.extend(
+            [
+                "-o", "BatchMode=no",
+                "-o", "PreferredAuthentications=password",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "NumberOfPasswordPrompts=1",
+            ]
+        )
+    else:
+        # Key / agent / ssh-config IdentityFile: non-interactive only.
+        ssh_common.extend(
+            [
+                "-o", "BatchMode=yes",
+                "-o", "PasswordAuthentication=no",
+                "-o", "KbdInteractiveAuthentication=no",
+                "-o", "NumberOfPasswordPrompts=0",
+            ]
+        )
+        if identity_path:
+            ssh_common.extend(["-i", identity_path, "-o", "IdentitiesOnly=yes"])
 
     def _wrap(cmd: list[str]) -> list[str]:
-        if password and sshpass:
+        if use_password and password and sshpass:
             return [sshpass, "-e", *cmd]
         return cmd
 
@@ -709,7 +748,7 @@ def finalize_probe_and_gate(
     Table (probe_chat default on, probe_chat_required default on):
       entitlement_denied     → ok=False, non_retryable, skip inject (caller)
       chat transient/other   → ok=False when required; keep chat_retryable
-      chat fail + !required  → soft-pass ok=True + warning (never for entitlement)
+      chat fail + !required  → still hard-fail product ok (no soft-pass free Build)
       models miss + !chat    → legacy soft-pass when cpa_probe_required=false
     """
     log = log_callback or (lambda _m: None)
@@ -774,31 +813,28 @@ def finalize_probe_and_gate(
         return result
 
     if not result.get("ok") and is_chat_fail and probe_chat:
-        if probe_chat_required:
-            # Transient stays failed but retryable — do not remint-spin as entitlement.
-            result["non_retryable"] = not bool(result.get("chat_retryable"))
-            if result.get("chat_retryable"):
-                log(
-                    f"[cpa] chat probe transient-fail for {email or result.get('email')}: "
-                    f"{result.get('error') or result.get('fail_reason')} "
-                    "(local auth stamped chat_retryable; remint may re-probe)"
-                )
-            else:
-                log(
-                    f"[cpa] chat probe hard-fail for {email or result.get('email')}: "
-                    f"{result.get('error') or result.get('fail_reason')}"
-                )
-            result["skip_remote_inject"] = True
+        # Free Build product path never soft-passes non-chat_ok.
+        # cpa_probe_chat_required=false is treated as a misconfig warning only —
+        # product ok stays False, inject skipped; no probe_chat_warning success.
+        result["non_retryable"] = not bool(result.get("chat_retryable"))
+        result["skip_remote_inject"] = True
+        result["chat_ok"] = False
+        if result.get("chat_retryable"):
+            log(
+                f"[cpa] chat probe transient-fail for {email or result.get('email')}: "
+                f"{result.get('error') or result.get('fail_reason')} "
+                "(local auth stamped chat_retryable; remint may re-probe)"
+            )
         else:
-            # Soft-pass non-entitlement chat fail when operator disables required.
-            if result.get("path"):
-                result["ok"] = True
-                result["probe_chat_warning"] = result.pop("error", "chat probe failed")
-                result["chat_ok"] = False
-                log(
-                    f"[cpa] chat probe warning ignored (cpa_probe_chat_required=false): "
-                    f"{result.get('probe_chat_warning')}"
-                )
+            log(
+                f"[cpa] chat probe hard-fail for {email or result.get('email')}: "
+                f"{result.get('error') or result.get('fail_reason')}"
+            )
+        if not probe_chat_required:
+            log(
+                f"[cpa] cpa_probe_chat_required=false ignored for free Build: "
+                f"still hard-fail product ok (chat_ok required)"
+            )
     return result
 
 

@@ -17,24 +17,31 @@ def _load_fail_fast_helpers():
     wanted = {
         "is_fatal_register_error",
         "classify_email_stage_failure",
+        "product_batch_success",
     }
     nodes = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
             nodes.append(node)
-    if len(nodes) != 2:
-        raise RuntimeError(f"expected 2 helpers, got {[n.name for n in nodes]}")
-    # is_fatal must come before classify (classify calls it)
-    nodes.sort(key=lambda n: 0 if n.name == "is_fatal_register_error" else 1)
+    names = {n.name for n in nodes}
+    if "is_fatal_register_error" not in names or "classify_email_stage_failure" not in names:
+        raise RuntimeError(f"missing core helpers, got {sorted(names)}")
+    # is_fatal must come before classify (classify calls it); product free
+    order = {"is_fatal_register_error": 0, "product_batch_success": 1, "classify_email_stage_failure": 2}
+    nodes.sort(key=lambda n: order.get(n.name, 9))
     module = ast.Module(body=nodes, type_ignores=[])
     code = compile(module, "register_cli.py", "exec")
     ns: dict = {}
     exec(code, ns)
-    return ns["is_fatal_register_error"], ns["classify_email_stage_failure"]
+    return (
+        ns["is_fatal_register_error"],
+        ns["classify_email_stage_failure"],
+        ns.get("product_batch_success"),
+    )
 
 
 def test_classify() -> None:
-    is_fatal, classify = _load_fail_fast_helpers()
+    is_fatal, classify, _product = _load_fail_fast_helpers()
     cases = [
         ("验证码已填写，但未进入资料页: code=ABC", "progress_fail"),
         ("验证码已填写，但未进入资料页 IMAP", "progress_fail"),
@@ -44,7 +51,7 @@ def test_classify() -> None:
         ("验证码 IMAP 连接失败", "mail_miss"),
         ("IMAP SSL EOF", "other"),
         ("未找到邮箱输入框或注册按钮", "other"),
-        ("浏览器启动失败", "other"),
+        ("浏览器启动失败", "browser_boot"),
         ("打开注册页失败: page is None", "other"),
         (
             "Hotmail/Outlook 可用别名已耗尽：请增加 hotmail_max_aliases_per_account、"
@@ -58,6 +65,10 @@ def test_classify() -> None:
         ("Gmail 模式需要 gmail_imap_user / GMAIL_IMAP_USER", "fatal"),
         ("Gmail catch-all 需要在 defaultDomains 中配置已路由到该 Gmail 的域名", "fatal"),
         ("Gmail IMAP 认证失败: [AUTHENTICATIONFAILED] Invalid credentials", "fatal"),
+        (
+            "Hotmail plus-alias 已禁用（hotmail_allow_plus_alias=false / mode=off）：主邮箱均已消耗",
+            "fatal",
+        ),
     ]
     failed = 0
     for msg, expect in cases:
@@ -136,12 +147,59 @@ def test_hotpath_no_mojibake() -> None:
     print("PASS  hot-path Chinese strings fixed")
 
 
+
+def test_product_batch_success() -> None:
+    is_fatal, _classify, product = _load_fail_fast_helpers()
+    assert product is not None
+    assert product({"reg_success": 0}, {"cpa_export_enabled": True}) is False
+    assert product({"reg_success": 1, "chat_ok": 0}, {"cpa_export_enabled": True}) is False
+    assert product({"reg_success": 1, "chat_ok": 1}, {"cpa_export_enabled": True}) is True
+    assert product(
+        {"reg_success": 1, "chat_ok": 1, "remote_live_ok": 0},
+        {"cpa_export_enabled": True, "cpa_remote_inject": True},
+    ) is False
+    assert product(
+        {"reg_success": 1, "chat_ok": 1, "remote_live_ok": 1},
+        {"cpa_export_enabled": True, "cpa_remote_inject": True},
+    ) is True
+    # pure register mode
+    assert product({"reg_success": 2, "chat_ok": 0}, {"cpa_export_enabled": False}) is True
+    # fatal markers for alias kill-switch
+    assert is_fatal("Hotmail plus-alias 已禁用（mode=off）") is True
+    assert is_fatal("plus-alias 已禁用") is True
+    print("PASS product_batch_success + alias fatal markers")
+
+
+def test_alias_kill_switch_source() -> None:
+    src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    assert '"hotmail_alias_mode": "off"' in src
+    assert '"hotmail_allow_plus_alias": False' in src or '"hotmail_allow_plus_alias": false' in src
+    assert "HOTMAIL_ALLOW_PLUS_ALIAS" in src
+    assert "Hotmail plus-alias 已禁用" in src
+    assert "hotmail_allow_plus_alias" in src
+    cfg = (ROOT / "config.example.json").read_text(encoding="utf-8")
+    assert '"hotmail_allow_plus_alias": false' in cfg
+    assert '"hotmail_alias_mode": "off"' in cfg
+    print("PASS alias kill-switch source + config.example")
+
+
+def test_cli_product_exit_wiring() -> None:
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    assert "def product_batch_success" in src
+    assert "product_batch_success(s, cfg_exit)" in src
+    assert "未达到产品可用 free Build 标准" in src
+    print("PASS cli product exit wiring")
+
+
 def main() -> int:
     test_classify()
     test_open_signup_hardens_release()
     test_soft_hard_helpers()
     test_fatal_stop_wiring()
     test_hotpath_no_mojibake()
+    test_product_batch_success()
+    test_alias_kill_switch_source()
+    test_cli_product_exit_wiring()
     print("\nALL PASS")
     return 0
 

@@ -247,11 +247,48 @@ def headed_display_ready() -> bool:
         return bool((os.environ.get("DISPLAY") or "").strip())
 
 
+
+def product_batch_success(stats: dict, cfg: dict | None = None) -> bool:
+    """True when this batch delivered product-usable free Build (not mere register).
+
+    - Always require reg_success > 0.
+    - When cpa_export_enabled (default True): require at least one chat_ok.
+    - When cpa_remote_inject also on: require at least one remote_live_ok
+      (one-click live pool success). Inventory-only inject without live does not count.
+    - Pure register mode (cpa_export_enabled=false): reg_success alone is enough.
+    """
+    cfg = cfg or {}
+    if int(stats.get("reg_success", 0) or 0) <= 0:
+        return False
+    cpa_on = True
+    raw = cfg.get("cpa_export_enabled", True)
+    if isinstance(raw, bool):
+        cpa_on = raw
+    else:
+        s = str(raw).strip().lower()
+        if s in {"0", "false", "no", "off", "n", ""}:
+            cpa_on = False
+    if not cpa_on:
+        return True
+    if int(stats.get("chat_ok", 0) or 0) <= 0:
+        return False
+    inj_raw = cfg.get("cpa_remote_inject", False)
+    if isinstance(inj_raw, bool):
+        inj_on = inj_raw
+    else:
+        inj_on = str(inj_raw).strip().lower() in {"1", "true", "yes", "on", "y"}
+    if inj_on and int(stats.get("remote_live_ok", 0) or 0) <= 0:
+        return False
+    return True
+
+
 def is_fatal_register_error(msg: str) -> bool:
     """Hard blockers that must stop the job (no retry / no empty loop)."""
     text = str(msg or "")
     markers = (
         "可用别名已耗尽",
+        "plus-alias 已禁用",
+        "Hotmail plus-alias 已禁用",
         "账号文件不存在",
         "账号文件无有效记录",
         "Cloudflare API Base 未配置",
@@ -1390,7 +1427,22 @@ def main() -> int:
         reason = fatal_stop_reason()
         print(f"[!] 致命错误已停止任务（不空转）: {reason}", flush=True)
         return 2
-    return 0 if s.get("reg_success", 0) > 0 else 1
+    # Product exit: free Build 成功语义（chat_ok / live），不是仅注册进程成功。
+    cfg_exit = {}
+    try:
+        cfg_exit = dict(getattr(reg, "config", {}) or {})
+    except Exception:
+        cfg_exit = {}
+    if product_batch_success(s, cfg_exit):
+        return 0
+    print(
+        "[!] 本批未达到产品可用 free Build 标准"
+        f"（reg={s.get('reg_success', 0)} chat_ok={s.get('chat_ok', 0)} "
+        f"live={s.get('remote_live_ok', 0)}；"
+        "cpa_export 开启时需 chat_ok，remote_inject 开启时还需 live 成功）",
+        flush=True,
+    )
+    return 1
 
 
 if __name__ == "__main__":
