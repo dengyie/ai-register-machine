@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -146,22 +147,40 @@ def _is_turnstile_challenge(text: str) -> bool:
     )
     return any(n in t or n in tl for n in needles)
 
-def create_standalone_page(
+def _is_chromium_boot_error(exc: BaseException | str) -> bool:
+    """True for DrissionPage connect/start failures that warrant retry + orphan clean."""
+    text = str(exc or "").lower()
+    needles = (
+        "the browser connection fails",
+        "browser connection fails",
+        "connection fails",
+        "can not connect",
+        "cannot connect",
+        "failed to connect",
+        "page disconnected",
+        "chrome not found",
+        "browser not found",
+        "devtoolsactiveport",
+        "user data directory is already in use",
+        "failed to launch",
+        "unable to open browser",
+        "chromium",
+    )
+    # Keep "chromium" last-resort only when paired with fail verbs — handled above for common msgs.
+    if "the browser connection fails" in text or "browser connection fails" in text:
+        return True
+    return any(n in text for n in needles[:-1])
+
+
+def _build_standalone_options(
     *,
-    proxy: str | None = None,
-    headless: bool = False,
-    log: LogFn | None = None,
-) -> tuple[Any, Any]:
-    log = log or _noop_log
-    try:
-        from DrissionPage import Chromium, ChromiumOptions
-    except ImportError as e:
-        raise BrowserConfirmError(
-            "DrissionPage not installed; run inside grok_reg uv env or pip install DrissionPage"
-        ) from e
+    headless: bool,
+    log: LogFn,
+) -> Any:
+    """Build ChromiumOptions for mint standalone (no config proxy; set later)."""
+    from DrissionPage import ChromiumOptions
 
     opts = None
-    # Project root = parent of this package (./cpa_xai → ../)
     _pkg_root = Path(__file__).resolve().parents[1]
     try:
         reg_file = _pkg_root / "grok_register_ttk.py"
@@ -216,7 +235,12 @@ def create_standalone_page(
             opts.headless(False)
         except Exception:
             pass
-        log(f"headed browser DISPLAY={os.environ.get('DISPLAY', '')!r}")
+        # Headed mint on servers needs Xvfb; surface missing DISPLAY early in logs.
+        display = os.environ.get("DISPLAY", "")
+        if not display:
+            log("WARNING headed mint DISPLAY is empty — expect Chromium boot failure")
+        else:
+            log(f"headed browser DISPLAY={display!r}")
 
     for cand in (
         "/usr/bin/chromium",
@@ -230,14 +254,19 @@ def create_standalone_page(
             except Exception:
                 pass
             break
+    return opts
 
+
+def _resolve_standalone_chrome_proxy(
+    proxy: str | None,
+    log: LogFn,
+) -> tuple[str, Any]:
+    """Return (chrome_proxy_arg_or_empty, optional auth bridge)."""
     from .proxyutil import proxy_for_chromium, proxy_log_label, resolve_proxy
 
-    # explicit / runtime config first; env only as fallback
     proxy = resolve_proxy(proxy)
     chrome_proxy = ""
     bridge = None
-    # Prefer LocalAuthProxyBridge when upstream has user:pass (Chromium cannot embed auth).
     try:
         from proxy_bridge import proxy_has_auth, resolve_browser_proxy  # type: ignore
 
@@ -255,18 +284,119 @@ def create_standalone_page(
             log(f"browser proxy={proxy_log_label(proxy)} (chromium {chrome_proxy})")
         else:
             log("browser proxy=(none)")
-    if chrome_proxy:
-        opts.set_argument(f"--proxy-server={chrome_proxy}")
+    return chrome_proxy, bridge
 
-    browser = Chromium(opts)
-    page = browser.latest_tab
-    # stash bridge on browser for close_standalone cleanup
+
+def _cleanup_orphans_best_effort(log: LogFn) -> None:
+    """Kill PPID=1 Drission leftovers between mint Chromium start retries."""
     try:
-        setattr(browser, "_auth_proxy_bridge", bridge)
-    except Exception:
+        root = Path(__file__).resolve().parents[1]
+        root_s = str(root)
+        if root_s not in sys.path:
+            sys.path.insert(0, root_s)
+        from tab_pool import cleanup_orphan_drission_chromes  # type: ignore
+
+        res = cleanup_orphan_drission_chromes(log_callback=log, only_ppid_init=True)
+        if res.get("killed"):
+            log(f"orphan cleanup killed={res.get('killed')} pids={res.get('pids')}")
+    except Exception as e:  # noqa: BLE001
+        log(f"orphan cleanup skipped: {e}")
+
+
+def _hard_kill_browser_pid(browser: Any, log: LogFn | None = None) -> None:
+    log = log or _noop_log
+    if browser is None:
+        return
+    pid = getattr(browser, "process_id", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+        log(f"hard-killed chromium pid={pid}")
+    except ProcessLookupError:
         pass
-    log("standalone chromium started")
-    return browser, page
+    except Exception as e:  # noqa: BLE001
+        log(f"hard-kill pid={pid} failed: {e}")
+
+
+def create_standalone_page(
+    *,
+    proxy: str | None = None,
+    headless: bool = False,
+    log: LogFn | None = None,
+    max_attempts: int = 3,
+) -> tuple[Any, Any]:
+    """Start a mint Chromium with process-wide start lock + retries.
+
+    Aligns reliability with register ``start_browser`` (4 retries): concurrent
+    auto_port races and leftover PPID=1 Drission processes cause
+    ``The browser connection fails``; we serialize boot and clean orphans
+    between attempts.
+    """
+    log = log or _noop_log
+    try:
+        from DrissionPage import Chromium
+    except ImportError as e:
+        raise BrowserConfirmError(
+            "DrissionPage not installed; run inside grok_reg uv env or pip install DrissionPage"
+        ) from e
+
+    try:
+        from tab_pool import chromium_start_lock  # type: ignore
+    except Exception:
+        # Offline / package import edge: still work without shared lock.
+        _fallback_start_lock = threading.Lock()
+
+        def chromium_start_lock():  # type: ignore
+            return _fallback_start_lock
+
+    attempts = max(1, min(6, int(max_attempts or 3)))
+    last_exc: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        bridge = None
+        browser = None
+        try:
+            opts = _build_standalone_options(headless=headless, log=log)
+            chrome_proxy, bridge = _resolve_standalone_chrome_proxy(proxy, log)
+            if chrome_proxy:
+                opts.set_argument(f"--proxy-server={chrome_proxy}")
+
+            # Fresh options each attempt so auto_port re-allocates after a failed boot.
+            with chromium_start_lock():
+                browser = Chromium(opts)
+            page = browser.latest_tab
+            try:
+                setattr(browser, "_auth_proxy_bridge", bridge)
+            except Exception:
+                pass
+            if attempt > 1:
+                log(f"standalone chromium started on attempt {attempt}/{attempts}")
+            else:
+                log("standalone chromium started")
+            return browser, page
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            log(f"standalone chromium start failed ({attempt}/{attempts}): {e}")
+            if bridge is not None:
+                try:
+                    bridge.stop()
+                except Exception:
+                    pass
+            if browser is not None:
+                try:
+                    close_standalone(browser)
+                except Exception:
+                    _hard_kill_browser_pid(browser, log=log)
+            # Always try orphan cleanup after a failed boot (connection fail or not).
+            _cleanup_orphans_best_effort(log)
+            if attempt < attempts:
+                _sleep(min(1.0 * attempt, 3.0))
+                continue
+            break
+
+    raise BrowserConfirmError(
+        f"standalone chromium start failed after {attempts} attempts: {last_exc}"
+    ) from last_exc
 
 
 def close_standalone(browser: Any) -> None:
@@ -283,10 +413,18 @@ def close_standalone(browser: Any) -> None:
                 pass
     except Exception:
         pass
+    quit_ok = True
     try:
         browser.quit()
+    except TypeError:
+        try:
+            browser.quit()  # type: ignore[misc]
+        except Exception:
+            quit_ok = False
     except Exception:
-        pass
+        quit_ok = False
+    if not quit_ok:
+        _hard_kill_browser_pid(browser)
 
 
 # ── mint browser reuse (per-thread) ──

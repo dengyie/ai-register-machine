@@ -380,9 +380,11 @@ def classify_email_stage_failure(msg: str) -> str:
       fatal         — resource/config exhausted; stop whole batch (no retry)
       progress_fail — code filled but profile not reached (do not swap mailbox as mail-miss)
       mail_miss     — verification code not received / IMAP path
+      browser_boot  — Chromium start / chrome-error interstitial / connection fails
       other         — navigation/form/browser hard failure
     """
     text = str(msg or "")
+    low = text.lower()
     if is_fatal_register_error(text):
         return "fatal"
     if ("未进入资料页" in text) or ("验证码已填写" in text):
@@ -403,6 +405,19 @@ def classify_email_stage_failure(msg: str) -> str:
         )
     ):
         return "mail_miss"
+    # Chromium boot / interstitial: recycle browser, not mailbox.
+    if (
+        "browser_boot" in low
+        or "chrome error page" in low
+        or "chrome-error://" in low
+        or "the browser connection fails" in low
+        or "browser connection fails" in low
+        or "standalone chromium start failed" in low
+        or "浏览器启动失败" in text
+        or "devtoolsactiveport" in low
+        or "user data directory is already in use" in low
+    ):
+        return "browser_boot"
     return "other"
 
 
@@ -426,11 +441,35 @@ def _soft_recycle_browser(worker_id: int) -> None:
 
 
 def _hard_recycle_browser(worker_id: int) -> None:
-    """Full Chromium quit+create for stuck pages / unknown failures."""
+    """Full Chromium quit+create for stuck pages / unknown failures.
+
+    Also kills PPID=1 Drission leftovers so the next start does not race
+    auto_port against orphan processes from a previous crash.
+    """
     try:
         reg.restart_browser(log_callback=lambda m: log(worker_id, m))
     except Exception:
         pass
+    try:
+        from tab_pool import TabPool
+
+        protect = set()
+        try:
+            protect |= TabPool.tracked_pids()
+        except Exception:
+            pass
+        cres = TabPool.cleanup_orphans(
+            log_callback=lambda m: log(worker_id, m),
+            protect_pids=protect,
+            only_ppid_init=True,
+        )
+        if cres.get("killed"):
+            log(
+                worker_id,
+                f"[*] hard recycle orphan cleanup: killed={cres['killed']} pids={cres.get('pids')}",
+            )
+    except Exception as exc:  # noqa: BLE001
+        log(worker_id, f"[Debug] hard recycle orphan cleanup skipped: {exc}")
 
 
 def _resolved_recycle_mode() -> str:
@@ -560,6 +599,12 @@ def register_one(
                     # 页面可能卡在中间态，强制完整回收
                     _hard_recycle_browser(worker_id)
                     return {"ok": False, "error": msg, "idx": idx, "kind": "progress_fail"}
+                if kind == "browser_boot":
+                    # Chromium connection / chrome-error interstitial: recycle + slot retry
+                    # (do not burn mailbox quota as if signup UI logic failed).
+                    log(worker_id, f"! 浏览器启动/错误页({kind}): {msg}")
+                    _mark_email_stage_error(email, msg)
+                    raise AccountRetryNeeded(f"browser_boot: {msg}") from exc
                 log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
                 _mark_email_stage_error(email, msg)
                 traceback.print_exc()

@@ -28,6 +28,16 @@ from typing import Any, Callable
 
 LogFn = Callable[[str], None]
 
+# Serialize Chromium process boots across register TabPool + mint standalone.
+# Concurrent auto_port / user-data-dir allocation races produce
+# "The browser connection fails" and PPID=1 orphans under load.
+_chromium_start_lock = threading.Lock()
+
+
+def chromium_start_lock() -> threading.Lock:
+    """Process-wide lock held only while constructing Chromium(...)."""
+    return _chromium_start_lock
+
 
 def is_drission_chrome_cmdline(cmd: str) -> bool:
     """True for Drission/register Chrome mains (not Helpers / unrelated Chrome)."""
@@ -204,7 +214,10 @@ class TabPool:
         if factory is None:
             return None
         options = factory()
-        browser = Chromium(options)
+        # Hold global start lock so mint standalone and other workers cannot
+        # race auto_port / debugging-port allocation during Chromium() boot.
+        with _chromium_start_lock:
+            browser = Chromium(options)
         with cls._all_browsers_lock:
             cls._all_browsers.append(browser)
         return browser

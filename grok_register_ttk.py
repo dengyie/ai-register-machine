@@ -3430,6 +3430,11 @@ def start_browser(log_callback=None, use_proxy: bool = True):
                 TabPool.release_tab()
             except Exception:
                 pass
+            # Failed boots often leave PPID=1 Drission Chromes holding auto_port dirs.
+            try:
+                TabPool.cleanup_orphans(log_callback=log_callback, only_ppid_init=True)
+            except Exception:
+                pass
             human_sleep(min(1.5 * attempt, 4))
     raise Exception(f"浏览器启动失败，已重试4次: {last_exc}")
 
@@ -3555,6 +3560,137 @@ return !!input;
         return False
 
 
+def is_chrome_error_page(page) -> bool:
+    """True when the tab is a Chromium interstitial / net error, not the signup app.
+
+    Misclassifying these as "button not found" burns slot retries without recycling
+    for a real browser/network boot failure. Used by click_email_signup_button and
+    open_signup_page to raise AccountRetryNeeded with a browser_boot-ish message.
+    """
+    if page is None:
+        return False
+    url = ""
+    try:
+        url = str(getattr(page, "url", "") or "")
+    except Exception:
+        url = ""
+    ul = url.lower()
+    if ul.startswith("chrome-error://") or ul.startswith("chrome://crash"):
+        return True
+    if "chromewebdata" in ul or ul.startswith("data:text/html,chromeerror"):
+        return True
+    # about:blank mid-nav is not itself an error page.
+    title = ""
+    try:
+        title = str(getattr(page, "title", "") or "")
+        if callable(getattr(page, "title", None)):
+            try:
+                title = str(page.title() or "")
+            except Exception:
+                pass
+    except Exception:
+        title = ""
+    tl = title.lower()
+    if any(
+        k in tl
+        for k in (
+            "this site can’t be reached",
+            "this site can't be reached",
+            "无法访问此网站",
+            "网页无法打开",
+            "err_proxy",
+            "err_connection",
+            "err_name_not_resolved",
+            "err_tunnel",
+            "err_timed_out",
+            "err_ssl",
+            "err_http2",
+            "err_network_changed",
+            "aw, snap",
+            "sad tab",
+        )
+    ):
+        return True
+    # Visible body / short html probe — keep cheap, no full page dump.
+    try:
+        probe = page.run_js(
+            r"""
+            try {
+              const t = ((document.title || '') + ' ' +
+                         (document.body ? (document.body.innerText || '') : '')
+                        ).slice(0, 800).toLowerCase();
+              const needles = [
+                'this site can’t be reached',
+                "this site can't be reached",
+                'err_proxy_connection_failed',
+                'err_connection_refused',
+                'err_connection_timed_out',
+                'err_connection_reset',
+                'err_name_not_resolved',
+                'err_tunnel_connection_failed',
+                'err_timed_out',
+                'err_ssl_protocol_error',
+                'err_network_changed',
+                'err_empty_response',
+                'err_http_response_code_failure',
+                'unable to connect to the proxy server',
+                'proxy server is refusing connections',
+                'dns_probe_finished_nxdomain',
+                'took too long to respond',
+                '无法访问此网站',
+                '网页无法打开',
+                '代理服务器',
+                '检查网络连接',
+                'aw, snap',
+              ];
+              for (const n of needles) { if (t.includes(n)) return 'error'; }
+              // Chromium error pages often have #main-frame-error / .error-code
+              if (document.getElementById('main-frame-error')) return 'error';
+              const ec = document.querySelector('.error-code, #error-code');
+              if (ec && /ERR_/i.test(ec.textContent || '')) return 'error';
+              return 'ok';
+            } catch (e) { return 'ok'; }
+            """
+        )
+        if str(probe).strip().lower() == "error":
+            return True
+    except Exception:
+        # Dead/disconnected page — treat as boot-level failure for recycle path.
+        try:
+            # If even run_js fails and url looks empty/disconnected, bubble as error.
+            if not ul or ul in ("", "about:blank"):
+                return False
+        except Exception:
+            pass
+    return False
+
+
+def chrome_error_summary(page) -> str:
+    """Short diagnostic string for logs / AccountRetryNeeded message."""
+    url = ""
+    try:
+        url = str(getattr(page, "url", "") or "")
+    except Exception:
+        url = "?"
+    title = ""
+    try:
+        t = getattr(page, "title", "")
+        title = str(t() if callable(t) else t or "")
+    except Exception:
+        title = ""
+    body = ""
+    try:
+        body = str(
+            page.run_js(
+                "return ((document.body&&document.body.innerText)||'').replace(/\\s+/g,' ').slice(0,160)"
+            )
+            or ""
+        )
+    except Exception as e:
+        body = f"<js-fail:{e}>"
+    return f"url={url!r} title={title!r} body={body!r}"
+
+
 def click_email_signup_button(timeout=10, log_callback=None, cancel_callback=None):
     page = _get_page()
     # Prefer config timeout when caller uses the default.
@@ -3566,6 +3702,14 @@ def click_email_signup_button(timeout=10, log_callback=None, cancel_callback=Non
     deadline = time.time() + max(3.0, float(timeout or 10))
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
+        # Chrome interstitial / proxy death is not "missing email button".
+        if is_chrome_error_page(page):
+            detail = chrome_error_summary(page)
+            if log_callback:
+                log_callback(f"[!] Chrome 错误页/网络中断，触发浏览器回收重试: {detail}")
+            raise AccountRetryNeeded(
+                f"browser_boot: chrome error page while waiting for email signup button ({detail})"
+            )
         # Already on email form — nothing to click.
         if _email_input_ready(page):
             if log_callback:
@@ -3647,6 +3791,12 @@ return 'clicked:' + ((target.innerText || target.textContent || '').replace(/\s+
             page_html = f"<html-read-failed: {html_exc}>"
         log_callback(f"[Debug] 页面内容片段: {page_html}")
 
+    # Final check: if we spent the whole timeout on an error page, recycle browser.
+    if is_chrome_error_page(page):
+        detail = chrome_error_summary(page)
+        raise AccountRetryNeeded(
+            f"browser_boot: chrome error page (no email signup button) ({detail})"
+        )
     raise Exception("未找到「使用邮箱注册」按钮或邮箱表单未出现")
 
 
@@ -3675,6 +3825,10 @@ def open_signup_page(log_callback=None, cancel_callback=None):
         try:
             # release_tab 后 _get_page() 会返回 None，必须 start_browser 重建
             TabPool.release_tab()
+            try:
+                TabPool.cleanup_orphans(log_callback=log_callback, only_ppid_init=True)
+            except Exception:
+                pass
             browser, page = start_browser(log_callback=log_callback)
             page = _goto_signup(page)
         except Exception as e2:
@@ -3696,6 +3850,13 @@ def open_signup_page(log_callback=None, cancel_callback=None):
     human_sleep(1.0, cancel_callback, min_seconds=0.5)
     if log_callback:
         log_callback(f"[*] 当前URL: {page.url}")
+    if is_chrome_error_page(page):
+        detail = chrome_error_summary(page)
+        if log_callback:
+            log_callback(f"[!] 注册页加载为 Chrome 错误页，触发浏览器回收: {detail}")
+        raise AccountRetryNeeded(
+            f"browser_boot: chrome error page after open_signup_page ({detail})"
+        )
     click_email_signup_button(
         log_callback=log_callback, cancel_callback=cancel_callback
     )
