@@ -191,6 +191,19 @@ def test_cli_product_exit_wiring() -> None:
     print("PASS cli product exit wiring")
 
 
+def test_run_register_preserves_product_exit() -> None:
+    """run-register.sh must not mask register_cli exit with `| tee` alone."""
+    path = ROOT / "run-register.sh"
+    assert path.is_file(), "run-register.sh missing at repo root (pxed production entry)"
+    src = path.read_text(encoding="utf-8")
+    assert "PIPESTATUS[0]" in src
+    # ban: exec ... | tee which always yields tee's 0
+    assert "exec python" not in src
+    assert "exec xvfb-run" not in src
+    assert "exit \"$code\"" in src or "exit $code" in src
+    print("PASS run-register preserves product exit (PIPESTATUS)")
+
+
 def main() -> int:
     test_classify()
     test_open_signup_hardens_release()
@@ -200,6 +213,7 @@ def main() -> int:
     test_product_batch_success()
     test_alias_kill_switch_source()
     test_cli_product_exit_wiring()
+    test_run_register_preserves_product_exit()
     print("\nALL PASS")
     return 0
 
