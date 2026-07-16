@@ -14,6 +14,7 @@ Browser lifecycle:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import queue
 import sys
@@ -177,6 +178,11 @@ _stats = {
     "remote_inject_skip": 0,
     "remote_live_ok": 0,
     "remote_live_fail": 0,
+    # mint path counters (observability; not product gates)
+    "mint_method_pkce": 0,
+    "mint_method_protocol": 0,
+    "mint_method_browser": 0,
+    "mint_method_other": 0,
 }
 
 
@@ -920,6 +926,16 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
         if result.get("ok"):
             log(worker_id, f"+ CPA auth: {result.get('path')}")
             _inc("mint_success")
+            # Observability: which mint path produced tokens (pkce/protocol/browser).
+            mm = str(result.get("mint_method") or "").strip().lower()
+            if mm in ("pkce",):
+                _inc("mint_method_pkce")
+            elif mm in ("protocol", "device"):
+                _inc("mint_method_protocol")
+            elif mm in ("browser", "browser_device", "device_browser"):
+                _inc("mint_method_browser")
+            elif mm:
+                _inc("mint_method_other")
             multi = result.get("remote_injects")
             remote = result.get("remote_inject") or {}
             live_ok = result.get("remote_live_ok")
@@ -1423,26 +1439,67 @@ def main() -> int:
         f"live成功 {s.get('remote_live_ok', 0)}, live失败 {s.get('remote_live_fail', 0)} ===",
         flush=True,
     )
-    if _fatal_stop.is_set():
-        reason = fatal_stop_reason()
-        print(f"[!] 致命错误已停止任务（不空转）: {reason}", flush=True)
-        return 2
     # Product exit: free Build 成功语义（chat_ok / live），不是仅注册进程成功。
     cfg_exit = {}
     try:
         cfg_exit = dict(getattr(reg, "config", {}) or {})
     except Exception:
         cfg_exit = {}
-    if product_batch_success(s, cfg_exit):
-        return 0
-    print(
-        "[!] 本批未达到产品可用 free Build 标准"
-        f"（reg={s.get('reg_success', 0)} chat_ok={s.get('chat_ok', 0)} "
-        f"live={s.get('remote_live_ok', 0)}；"
-        "cpa_export 开启时需 chat_ok，remote_inject 开启时还需 live 成功）",
-        flush=True,
-    )
-    return 1
+    if _fatal_stop.is_set():
+        exit_code = 2
+        reason = fatal_stop_reason()
+        print(f"[!] 致命错误已停止任务（不空转）: {reason}", flush=True)
+    elif product_batch_success(s, cfg_exit):
+        exit_code = 0
+    else:
+        exit_code = 1
+        print(
+            "[!] 本批未达到产品可用 free Build 标准"
+            f"（reg={s.get('reg_success', 0)} chat_ok={s.get('chat_ok', 0)} "
+            f"live={s.get('remote_live_ok', 0)}；"
+            "cpa_export 开启时需 chat_ok，remote_inject 开启时还需 live 成功）",
+            flush=True,
+        )
+    # Machine-readable fixed summary (ops/log parsers). Keep keys stable.
+    try:
+        summary = {
+            "event": "register_cli_summary",
+            "exit": exit_code,
+            "reg_success": int(s.get("reg_success", 0) or 0),
+            "reg_fail": int(s.get("reg_fail", 0) or 0),
+            "mint_success": int(s.get("mint_success", 0) or 0),
+            "mint_fail": int(s.get("mint_fail", 0) or 0),
+            "mint_skip": int(s.get("mint_skip", 0) or 0),
+            "chat_ok": int(s.get("chat_ok", 0) or 0),
+            "chat_denied": int(s.get("chat_denied", 0) or 0),
+            "chat_fail": int(s.get("chat_fail", 0) or 0),
+            "remote_inject_ok": int(s.get("remote_inject_ok", 0) or 0),
+            "remote_inject_fail": int(s.get("remote_inject_fail", 0) or 0),
+            "remote_inject_skip": int(s.get("remote_inject_skip", 0) or 0),
+            "remote_live_ok": int(s.get("remote_live_ok", 0) or 0),
+            "remote_live_fail": int(s.get("remote_live_fail", 0) or 0),
+            "mint_method_pkce": int(s.get("mint_method_pkce", 0) or 0),
+            "mint_method_protocol": int(s.get("mint_method_protocol", 0) or 0),
+            "mint_method_browser": int(s.get("mint_method_browser", 0) or 0),
+            "mint_method_other": int(s.get("mint_method_other", 0) or 0),
+            "proxy_rotate_mode": str(cfg_exit.get("proxy_rotate_mode") or "off"),
+            "clash_pin_node": str(
+                cfg_exit.get("clash_pin_node") or os.environ.get("GROK_NODE") or ""
+            ),
+            "cpa_probe_via": str(cfg_exit.get("cpa_probe_via") or "hybrid"),
+            "cpa_protocol_flow": str(cfg_exit.get("cpa_protocol_flow") or "pkce"),
+            "fatal": bool(_fatal_stop.is_set()),
+            "fatal_reason": fatal_stop_reason() if _fatal_stop.is_set() else "",
+            "product_ok": bool(exit_code == 0),
+        }
+        print(
+            "SUMMARY_JSON "
+            + json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[!] SUMMARY_JSON emit failed: {exc}", flush=True)
+    return exit_code
 
 
 if __name__ == "__main__":

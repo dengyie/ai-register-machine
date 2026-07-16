@@ -248,6 +248,15 @@ def build_chat_stamp_from_result(result: dict[str, Any] | None) -> dict[str, Any
         stamp["fail_reason"] = fail_reason
     if chat_error_code:
         stamp["chat_error_code"] = chat_error_code
+
+    # Mint path observability (not product gates): which grant produced tokens.
+    mint_method = str(r.get("mint_method") or "").strip()
+    if mint_method:
+        stamp["mint_method"] = mint_method
+    protocol_error = str(r.get("protocol_error") or "").strip()
+    if protocol_error:
+        # Cap size so auth JSON stays ops-friendly when PKCE dumps long HTML errors.
+        stamp["protocol_error"] = protocol_error[:500]
     return stamp
 
 

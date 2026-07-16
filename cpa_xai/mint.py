@@ -248,6 +248,11 @@ def mint_and_export(
         pri = int(priority)
     except Exception:
         pri = 1000
+    mint_method = str(tokens.get("mint_method") or "browser").strip() or "browser"
+    extra_auth: dict[str, Any] = {"mint_method": mint_method}
+    if protocol_err and mint_method not in ("protocol", "pkce"):
+        # protocol path failed then fell back (device/browser) — keep short reason on disk
+        extra_auth["protocol_error"] = str(protocol_err)[:500]
     payload = build_cpa_xai_auth(
         email=email,
         access_token=tokens["access_token"],
@@ -256,9 +261,10 @@ def mint_and_export(
         expires_in=tokens.get("expires_in"),
         base_url=base_url,
         priority=pri,
+        extra=extra_auth,
     )
     path = write_cpa_xai_auth(auth_dir, payload)
-    log(f"wrote {path} priority={pri}")
+    log(f"wrote {path} priority={pri} mint_method={mint_method}")
 
     result: dict[str, Any] = {
         "ok": True,
@@ -267,11 +273,11 @@ def mint_and_export(
         "user_code": tokens.get("user_code"),
         "base_url": base_url,
         "proxy": proxy_log_label(resolved),
-        "mint_method": tokens.get("mint_method") or "browser",
+        "mint_method": mint_method,
         "priority": pri,
     }
-    if protocol_err and result["mint_method"] != "protocol":
-        result["protocol_error"] = protocol_err
+    if protocol_err and result["mint_method"] not in ("protocol", "pkce"):
+        result["protocol_error"] = str(protocol_err)[:500]
 
     # Resolve product gate vs optional CPA observational smoke.
     # Auth write always uses upstream base_url (cli-chat-proxy), never CPA public host.
@@ -387,6 +393,8 @@ def mint_and_export(
             log(f"cpa smoke failed: {e}")
 
     # Stamp local auth so remint/ops can skip denied and re-probe transient.
+    # Also re-stamps mint_method/protocol_error (from result) so mid-run probe
+    # updates never drop the mint path observability written at auth create.
     if result.get("path"):
         try:
             updates = {
@@ -395,6 +403,10 @@ def mint_and_export(
             }
             if result.get("probe_via_cpa_ok") is True or result.get("probe_via_cpa_ok") is False:
                 updates["probe_via_cpa_ok"] = bool(result.get("probe_via_cpa_ok"))
+            if result.get("mint_method"):
+                updates["mint_method"] = str(result.get("mint_method"))
+            if result.get("protocol_error"):
+                updates["protocol_error"] = str(result.get("protocol_error"))[:500]
             stamped = stamp_auth_chat_fields(result["path"], result, updates=updates)
             if stamped.get("import_gate"):
                 result["import_gate"] = stamped["import_gate"]

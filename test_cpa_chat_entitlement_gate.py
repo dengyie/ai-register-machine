@@ -532,7 +532,65 @@ def test_writer_stamp_and_inventory() -> None:
         disk2 = json.loads(p_partial.read_text(encoding="utf-8"))
         assert "chat_ok" not in disk2
         assert disk2.get("import_gate") == "not_ready"
+
+        # mint_method / protocol_error are ops observability stamps (not product gates)
+        stamp_mm = writer.build_chat_stamp_from_result(
+            {
+                "chat_ok": True,
+                "usable": True,
+                "mint_method": "browser",
+                "protocol_error": "pkce: consent action id missing " + ("x" * 600),
+            }
+        )
+        assert stamp_mm.get("mint_method") == "browser"
+        assert stamp_mm.get("protocol_error")
+        assert len(stamp_mm["protocol_error"]) <= 500
+        p_mm = root / "xai-mm@example.com.json"
+        p_mm.write_text(
+            json.dumps({"type": "xai", "email": "mm@example.com", "access_token": "t"})
+            + "\n",
+            encoding="utf-8",
+        )
+        writer.stamp_auth_chat_fields(
+            p_mm,
+            {
+                "chat_ok": False,
+                "usable": False,
+                "entitlement_denied": True,
+                "fail_reason": "entitlement_denied",
+                "mint_method": "browser",
+                "protocol_error": "pkce failed: 404",
+            },
+        )
+        disk_mm = json.loads(p_mm.read_text(encoding="utf-8"))
+        assert disk_mm.get("mint_method") == "browser"
+        assert "pkce failed" in str(disk_mm.get("protocol_error") or "")
+        assert disk_mm.get("entitlement_denied") is True  # product gate still works
     print("PASS writer stamp + inventory")
+
+
+def test_register_cli_summary_json_surface() -> None:
+    """Batch end emits stable SUMMARY_JSON line; mint_method counters exist."""
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    assert "SUMMARY_JSON" in src
+    assert '"event": "register_cli_summary"' in src or '"event":"register_cli_summary"' in src
+    assert "mint_method_pkce" in src
+    assert "mint_method_browser" in src
+    assert "product_ok" in src
+    # mint path counters bumped on success
+    assert '_inc("mint_method_pkce")' in src or "_inc('mint_method_pkce')" in src
+    print("PASS register_cli SUMMARY_JSON surface")
+
+
+def test_mint_writes_mint_method_extra() -> None:
+    """mint_and_export passes mint_method into build_cpa_xai_auth extra + stamp updates."""
+    src = (ROOT / "cpa_xai" / "mint.py").read_text(encoding="utf-8")
+    assert 'extra_auth: dict[str, Any] = {"mint_method": mint_method}' in src or (
+        '"mint_method": mint_method' in src and "extra=extra_auth" in src
+    )
+    assert "extra=extra_auth" in src
+    assert 'updates["mint_method"]' in src
+    print("PASS mint mint_method disk path")
 
 
 def test_backfill_chat_stamps_script_exists() -> None:
@@ -804,6 +862,8 @@ def main() -> int:
     test_remint_collect_todo_behavior()
     test_writer_ledger_roundtrip()
     test_writer_stamp_and_inventory()
+    test_register_cli_summary_json_surface()
+    test_mint_writes_mint_method_extra()
     test_backfill_chat_stamps_script_exists()
     test_finalize_probe_and_gate_behavior()
     test_remote_inject_chat_ok_hard_gate()
