@@ -6,11 +6,19 @@ import time
 from typing import Any
 from urllib.parse import quote
 
-from .constants import DEFAULT_TIMEOUT
+from .constants import DEFAULT_IMPERSONATE, DEFAULT_TIMEOUT
 
 
-def create_session(proxy: str = "", *, impersonate: str = "chrome") -> Any:
-    """Prefer curl_cffi (TLS fingerprint); fall back to requests."""
+def create_session(
+    proxy: str = "",
+    *,
+    impersonate: str = DEFAULT_IMPERSONATE,
+) -> Any:
+    """Prefer curl_cffi (TLS fingerprint); fall back to requests.
+
+    Default impersonate is aligned with constants.USER_AGENT / sec-ch-ua
+    (Mac Chrome 145). Passing a mismatched platform is a risk-engine signal.
+    """
     proxy = (proxy or "").strip()
     try:
         from curl_cffi import requests as curl_requests

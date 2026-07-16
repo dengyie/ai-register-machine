@@ -39,8 +39,12 @@ class ChatGPTTokenVerifier:
                 capability="oauth_token",
                 detail=f"token too short len={len(secret)}",
             )
-        # OpenAI refresh tokens are typically opaque long strings; access JWT has dots
-        if secret.count(".") == 2 and len(secret.split(".")[0]) < 10:
+        # OpenAI platform refresh tokens are opaque. Modern shape is rt.1.<payload>
+        # (exactly two dots, short first segment) — must NOT be treated as a JWT.
+        # Access tokens are JWTs whose base64url header typically starts with eyJ.
+        if secret.startswith(("rt.", "rt_")):
+            pass
+        elif secret.count(".") == 2 and len(secret.split(".", 1)[0]) < 10:
             return VerifyResult(
                 ok=False,
                 provider="chatgpt",

@@ -11,8 +11,13 @@ PLATFORM_OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
 PLATFORM_OAUTH_REDIRECT_URI = f"{PLATFORM_BASE}/auth/callback"
 PLATFORM_OAUTH_AUDIENCE = "https://api.openai.com/v1"
 
+# curl_cffi 0.15 chrome* fingerprints from chrome119+ are Macintosh TLS profiles.
+# Headers MUST match the impersonate platform (Mac Chrome 145). Windows headers
+# with Mac JA3 previously produced a fingerprint mismatch risk signal.
+DEFAULT_IMPERSONATE = "chrome145"
+
 USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/145.0.0.0 Safari/537.36"
 )
@@ -21,6 +26,9 @@ SEC_CH_UA_FULL = (
     '"Chromium";v="145.0.0.0", "Not:A-Brand";v="99.0.0.0", '
     '"Google Chrome";v="145.0.0.0"'
 )
+SEC_CH_UA_PLATFORM = '"macOS"'
+SEC_CH_UA_PLATFORM_VERSION = '"15.0.0"'
+SEC_CH_UA_ARCH = '"arm64"'
 
 DEFAULT_TIMEOUT = 30
 SENTINEL_SDK = "https://sentinel.openai.com/sentinel/20260124ceb8/sdk.js"
@@ -33,13 +41,13 @@ COMMON_HEADERS: dict[str, str] = {
     "priority": "u=1, i",
     "user-agent": USER_AGENT,
     "sec-ch-ua": SEC_CH_UA,
-    "sec-ch-ua-arch": '"x86_64"',
+    "sec-ch-ua-arch": SEC_CH_UA_ARCH,
     "sec-ch-ua-bitness": '"64"',
     "sec-ch-ua-full-version-list": SEC_CH_UA_FULL,
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-model": '""',
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-ch-ua-platform-version": '"10.0.0"',
+    "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
+    "sec-ch-ua-platform-version": SEC_CH_UA_PLATFORM_VERSION,
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
@@ -50,13 +58,13 @@ NAVIGATE_HEADERS: dict[str, str] = {
     "accept-language": "en-US,en;q=0.9",
     "user-agent": USER_AGENT,
     "sec-ch-ua": SEC_CH_UA,
-    "sec-ch-ua-arch": '"x86_64"',
+    "sec-ch-ua-arch": SEC_CH_UA_ARCH,
     "sec-ch-ua-bitness": '"64"',
     "sec-ch-ua-full-version-list": SEC_CH_UA_FULL,
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-model": '""',
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-ch-ua-platform-version": '"10.0.0"',
+    "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
+    "sec-ch-ua-platform-version": SEC_CH_UA_PLATFORM_VERSION,
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": "same-origin",

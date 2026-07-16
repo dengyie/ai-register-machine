@@ -9,7 +9,13 @@ import time
 import uuid
 from typing import Any
 
-from .constants import SENTINEL_BASE, SENTINEL_SDK, USER_AGENT
+from .constants import (
+    SEC_CH_UA,
+    SEC_CH_UA_PLATFORM,
+    SENTINEL_BASE,
+    SENTINEL_SDK,
+    USER_AGENT,
+)
 
 
 class SentinelTokenGenerator:
@@ -112,9 +118,9 @@ def build_sentinel_token(session: Any, device_id: str, flow: str) -> str:
             "Referer": f"{SENTINEL_BASE}/backend-api/sentinel/frame.html",
             "Origin": SENTINEL_BASE,
             "User-Agent": USER_AGENT,
-            "sec-ch-ua": '"Google Chrome";v="145", "Not?A_Brand";v="8", "Chromium";v="145"',
+            "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
         },
         timeout=20,
     )

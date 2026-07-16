@@ -411,6 +411,12 @@ class PlatformRegistrar:
         )
         status = int(getattr(resp, "status_code", 0) or 0) if resp is not None else 0
         body = response_json(resp)
+        raw_text = ""
+        if resp is not None and not body:
+            try:
+                raw_text = str(getattr(resp, "text", "") or "")[:400]
+            except Exception:
+                raw_text = ""
         location = ""
         if resp is not None:
             try:
@@ -426,13 +432,20 @@ class PlatformRegistrar:
             except Exception:
                 code = ""
             kind = "provider"
+            detail_blob = body or error or raw_text or ""
             if code == "registration_disallowed" or "registration_disallowed" in str(
-                body or error or ""
+                detail_blob
             ):
                 # Risk engine block (IP / domain / device reputation) — not a protocol bug.
                 kind = "registration_disallowed"
+            # Include truncated body for risk-engine diagnosis (no secrets here).
+            detail = code or error or body or raw_text or "unknown"
+            if isinstance(detail, dict):
+                detail = json.dumps(detail, ensure_ascii=False)[:300]
+            else:
+                detail = str(detail)[:300]
             raise ChatGPTRegisterError(
-                f"create_account_http_{status}:{code or error or body}",
+                f"create_account_http_{status}:{detail}",
                 kind=kind,
             )
         continue_url = str(

@@ -67,6 +67,26 @@ class TestChatGPTVerifier(unittest.TestCase):
             )
         )
         self.assertTrue(good.ok)
+        # Live OpenAI opaque refresh: rt.1.<payload> (two dots, short first segment)
+        modern_rt = v.verify(
+            RegisterResult(
+                ok=True,
+                provider="chatgpt",
+                secret="rt.1." + ("A" * 160),
+                secret_kind="refresh_token",
+            )
+        )
+        self.assertTrue(modern_rt.ok, modern_rt.detail)
+        # Still reject clearly broken JWT-shaped secrets (not rt.*)
+        malformed_jwt = v.verify(
+            RegisterResult(
+                ok=True,
+                provider="chatgpt",
+                secret="ab.cd." + ("e" * 40),
+                secret_kind="access_token",
+            )
+        )
+        self.assertFalse(malformed_jwt.ok)
         wrong_kind = v.verify(
             RegisterResult(
                 ok=True,
