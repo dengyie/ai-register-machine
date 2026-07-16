@@ -70,7 +70,7 @@ class ChatGPTProvider:
         self.email_source_name = (
             email_source_name
             or os.environ.get("CHATGPT_EMAIL_SOURCE")
-            or "gmail_imap"
+            or "cloudflare"
         )
         self.otp_timeout_s = float(
             os.environ.get("CHATGPT_OTP_TIMEOUT") or otp_timeout_s

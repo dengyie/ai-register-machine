@@ -92,6 +92,8 @@ class TestRegistry(unittest.TestCase):
         es = list_email_sources()
         self.assertIn("tinyhost", es)
         self.assertIn("legacy_grok", es)
+        self.assertIn("cloudflare", es)
+        self.assertIn("gmail_imap", es)
 
 
 class TestContracts(unittest.TestCase):

@@ -25,7 +25,9 @@ fi
 
 export REGISTER_EGRESS="${REGISTER_EGRESS:-${EGRESS_BACKEND:-${CHATGPT_EGRESS:-}}}"
 export CHATGPT_PROXY="${CHATGPT_PROXY:-${MIMO_PROXY:-}}"
-export CHATGPT_EMAIL_SOURCE="${CHATGPT_EMAIL_SOURCE:-gmail_imap}"
+# Default: project Cloudflare Worker temp-mail (config.json cloudflare_api_base).
+# Override with gmail_imap / tinyhost / duckmail when needed.
+export CHATGPT_EMAIL_SOURCE="${CHATGPT_EMAIL_SOURCE:-cloudflare}"
 export CHATGPT_PROXY_LIST="${CHATGPT_PROXY_LIST:-${PROXY_LIST:-}}"
 export CHATGPT_PROXY_ROTATE_MODE="${CHATGPT_PROXY_ROTATE_MODE:-${PROXY_ROTATE_MODE:-}}"
 export CHATGPT_PROXY_ROTATE_EVERY="${CHATGPT_PROXY_ROTATE_EVERY:-${PROXY_ROTATE_EVERY:-1}}"

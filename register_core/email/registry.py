@@ -24,7 +24,8 @@ def get_email_source(name: str, **kwargs: Any) -> EmailSource:
     _ensure_builtins()
     key = (name or "auto").strip().lower()
     if key == "auto":
-        for candidate in ("tinyhost", "duckmail", "gmail_imap"):
+        # Prefer project Worker when registered, then public temp-mail, then Gmail.
+        for candidate in ("cloudflare", "tinyhost", "duckmail", "gmail_imap"):
             if candidate in _FACTORY:
                 return _FACTORY[candidate](**kwargs)
         raise KeyError("no email source registered for auto")
@@ -37,12 +38,16 @@ def _ensure_builtins() -> None:
     global _BUILTINS_READY, _FACTORY
     if _BUILTINS_READY:
         return
+    from register_core.email.sources.cloudflare import CloudflareSource
     from register_core.email.sources.duckmail import DuckmailSource
     from register_core.email.sources.gmail_imap import GmailImapSource
     from register_core.email.sources.legacy_grok import LegacyGrokEmailSource
     from register_core.email.sources.tinyhost import TinyhostSource
 
     built: dict[str, Callable[..., EmailSource]] = {
+        "cloudflare": lambda **kw: CloudflareSource(**kw),
+        "cloudflare_worker": lambda **kw: CloudflareSource(**kw),
+        "cf": lambda **kw: CloudflareSource(**kw),
         "tinyhost": lambda **kw: TinyhostSource(**kw),
         "duckmail": lambda **kw: DuckmailSource(**kw),
         "gmail": lambda **kw: GmailImapSource(**kw),

@@ -44,7 +44,7 @@ Env (shared):
   REGISTER_NODES_FILE       project nodes catalog (default ./nodes.json)
   CHATGPT_PROXY             optional fixed URL (empty = use nodes/list)
   CHATGPT_PROXY_LIST        explicit self-controlled pool
-  CHATGPT_EMAIL_SOURCE      default gmail_imap (via runner)
+  CHATGPT_EMAIL_SOURCE      default cloudflare Worker (via runner)
   HEADLESS / HEADLESS_FLAG  browser mode
   OTP_RETRIES               MiMo temp-mail polls
 

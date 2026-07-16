@@ -42,7 +42,7 @@ def cmd_list(_: argparse.Namespace) -> int:
     )
     print(
         "note: grok/mimo are black-box (email_source=provider). "
-        "chatgpt is in-process (use --email-source tinyhost|auto). "
+        "chatgpt is in-process (use --email-source cloudflare|gmail_imap|tinyhost|auto). "
         "Hub: ./register.sh grok|mimo|chatgpt"
     )
     return 0
@@ -146,8 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="provider",
         help=(
             "provider=adapter-internal mail (required for grok/mimo). "
-            "chatgpt defaults via adapter to tinyhost when provider; "
-            "prefer tinyhost|duckmail|gmail_imap|auto for chatgpt."
+            "chatgpt defaults via adapter to cloudflare when provider; "
+            "prefer cloudflare|gmail_imap|tinyhost|duckmail|auto for chatgpt."
         ),
     )
     pr.add_argument("--sink", default="", help="JSONL path for private results (0600)")
