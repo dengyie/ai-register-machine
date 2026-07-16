@@ -10,6 +10,8 @@ keywords = ["ai-register", "register-machine", "automation", "grok", "xai", "mim
 dependencies = [
     "DrissionPage>=4.1",
     "curl_cffi>=0.7",
+    # Clash YAML convert (register_core.nodes.convert); CI uv sync must install it
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
