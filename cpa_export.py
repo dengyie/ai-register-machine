@@ -229,14 +229,23 @@ def evaluate_remote_inject_gate(
             "usable": False,
         }
     if r.get("chat_ok") is not True:
-        reason = str(r.get("fail_reason") or r.get("import_gate") or "chat_not_ok")
-        if reason in ("", "None"):
-            reason = "chat_not_ok"
+        # Prefer explicit missing-stamp reason when chat_ok never written (path-only inject).
+        if r.get("chat_ok") is None and not r.get("fail_reason") and not r.get("import_gate"):
+            reason = "chat_ok_missing"
+        else:
+            reason = str(r.get("fail_reason") or r.get("import_gate") or "chat_not_ok")
+            if reason in ("", "None"):
+                reason = "chat_not_ok"
+            # Auth JSON inventory convention: unstamped → chat_ok_missing
+            if reason in ("chat_ok_missing",) or (
+                r.get("chat_ok") is None and reason in ("chat_not_ok", "chat_ok")
+            ):
+                reason = "chat_ok_missing"
         return {
             "allow": False,
             "reason": reason,
             "import_gate": reason if reason != "chat_ok" else "chat_not_ok",
-            "chat_ok": False,
+            "chat_ok": False if r.get("chat_ok") is not True else True,
             "entitlement_denied": False,
             "usable": False,
         }
@@ -512,7 +521,14 @@ def inject_cpa_auth_remote(
     gate = evaluate_remote_inject_gate({"path": str(src)}, cfg, auth_path=src)
     if not gate.get("allow"):
         reason = str(gate.get("reason") or "chat_not_ok")
-        log(f"[cpa] remote inject refused (gate={reason}): {src.name}")
+        # Explicit stamp-missing reason for ops (fail-close already enforced).
+        if reason in ("chat_ok_missing", "chat_not_ok") and gate.get("chat_ok") is not True:
+            log(
+                f"[cpa] remote inject refused (gate={reason}; "
+                f"chat_ok stamp required, never soft-inject): {src.name}"
+            )
+        else:
+            log(f"[cpa] remote inject refused (gate={reason}): {src.name}")
         return {
             "ok": False,
             "skipped": True,
@@ -890,7 +906,8 @@ def export_cpa_xai_for_account(
     probe = _config_bool(cfg.get("cpa_probe_after_write"), default=True)
     # Product default ON: models-only is not free-Build success (chat 403 common).
     probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=True)
-    # When chat probe runs, deny soft-pass unless explicitly disabled.
+    # Free Build always requires chat_ok for inject/product exit.
+    # cpa_probe_chat_required=false is log-only (not a soft-pass unlock) — see finalize_probe_and_gate.
     probe_chat_required = _config_bool(cfg.get("cpa_probe_chat_required"), default=True)
     # Mid-tier probe via tebi CPA (hybrid default until pin proven).
     # resolve_gate_probe_policy runs inside mint_and_export after these kwargs.

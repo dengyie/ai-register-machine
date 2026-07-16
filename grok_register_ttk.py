@@ -5361,6 +5361,13 @@ class GrokRegisterGUI:
         self.batch_count = 0
         self.success_count = 0
         self.fail_count = 0
+        # Free Build product counters (register success ≠ product-usable).
+        self.cpa_token_ok_count = 0
+        self.cpa_product_ok_count = 0
+        self.cpa_chat_ok_count = 0
+        self.cpa_chat_denied_count = 0
+        self.cpa_remote_live_ok_count = 0
+        self.cpa_remote_inject_skip_count = 0
         self.results = []
         self.stop_requested = False
         self.ui_queue = queue.Queue()
@@ -6336,6 +6343,13 @@ class GrokRegisterGUI:
         self.stop_requested = False
         self.success_count = 0
         self.fail_count = 0
+        # Free Build product counters reset each batch (register ≠ product-usable).
+        self.cpa_token_ok_count = 0
+        self.cpa_product_ok_count = 0
+        self.cpa_chat_ok_count = 0
+        self.cpa_chat_denied_count = 0
+        self.cpa_remote_live_ok_count = 0
+        self.cpa_remote_inject_skip_count = 0
         self.results = []
         self._batch_target = count
         if hasattr(self, "progress_var"):
@@ -6501,6 +6515,23 @@ class GrokRegisterGUI:
             log_callback=logf,
         )
         result_record["cpa"] = cpa_result
+        # Product counters: token write ≠ free Build product ok (chat_ok / live).
+        if isinstance(cpa_result, dict):
+            with self.stats_lock:
+                if cpa_result.get("token_ok") is True:
+                    self.cpa_token_ok_count += 1
+                if cpa_result.get("ok") is True:
+                    self.cpa_product_ok_count += 1
+                if cpa_result.get("chat_ok") is True:
+                    self.cpa_chat_ok_count += 1
+                if cpa_result.get("entitlement_denied"):
+                    self.cpa_chat_denied_count += 1
+                if cpa_result.get("remote_live_ok") is True:
+                    self.cpa_remote_live_ok_count += 1
+                if cpa_result.get("remote_inject_skipped") or cpa_result.get(
+                    "skip_remote_inject"
+                ):
+                    self.cpa_remote_inject_skip_count += 1
 
     def _worker_loop(self, worker_id, total, task_queue):
         prefix = f"[T{worker_id}]"
@@ -6563,12 +6594,52 @@ class GrokRegisterGUI:
         with self.stats_lock:
             ok = int(self.success_count)
             fail = int(self.fail_count)
+            token_ok_n = int(self.cpa_token_ok_count)
+            product_ok_n = int(self.cpa_product_ok_count)
+            chat_ok_n = int(self.cpa_chat_ok_count)
+            chat_denied_n = int(self.cpa_chat_denied_count)
+            live_ok_n = int(self.cpa_remote_live_ok_count)
+            inject_skip_n = int(self.cpa_remote_inject_skip_count)
         stopped = bool(self.stop_requested)
         self._set_running_ui(False)
         if stopped:
-            self.log(f"[*] 任务已停止。成功 {ok} · 失败 {fail} · 目标 {count}")
+            self.log(f"[*] 任务已停止。注册成功 {ok} · 注册失败 {fail} · 目标 {count}")
         else:
-            self.log(f"[*] 任务结束。成功 {ok} · 失败 {fail} · 目标 {count}")
+            self.log(f"[*] 任务结束。注册成功 {ok} · 注册失败 {fail} · 目标 {count}")
+        # Free Build product summary (register success ≠ product-usable).
+        product_stats = {
+            "reg_success": ok,
+            "chat_ok": chat_ok_n,
+            "remote_live_ok": live_ok_n,
+        }
+        try:
+            # Local import avoids CLI↔GUI circular import at module load.
+            from register_cli import product_batch_success as _product_batch_success
+
+            product_ok = bool(_product_batch_success(product_stats, dict(config or {})))
+        except Exception:
+            # Fallback: same rules as register_cli.product_batch_success.
+            cpa_on = _config_bool(config.get("cpa_export_enabled", True), default=True)
+            if not cpa_on:
+                product_ok = ok > 0
+            elif ok <= 0 or chat_ok_n <= 0:
+                product_ok = False
+            elif _config_bool(config.get("cpa_remote_inject", False), default=False):
+                product_ok = live_ok_n > 0
+            else:
+                product_ok = True
+        self.log(
+            f"[*] free Build 产品: token写入 {token_ok_n} · 产品OK {product_ok_n} · "
+            f"chat可用 {chat_ok_n} · chat无权限 {chat_denied_n} · "
+            f"live成功 {live_ok_n} · 注入跳过 {inject_skip_n} · "
+            f"product_ok={'true' if product_ok else 'false'}"
+        )
+        if not product_ok and ok > 0:
+            self.log(
+                "[!] 本批未达到产品可用 free Build 标准"
+                f"（reg={ok} chat_ok={chat_ok_n} live={live_ok_n}；"
+                "cpa_export 开启时需 chat_ok，remote_inject 开启时还需 live 成功）"
+            )
         if self.accounts_output_file and ok:
             self.log(f"[*] 结果文件: {self.accounts_output_file}")
 

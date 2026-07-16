@@ -167,6 +167,10 @@ _stats_lock = threading.Lock()
 _stats = {
     "reg_success": 0,
     "reg_fail": 0,
+    # mint_token_ok: OIDC tokens written (token_ok=True). Product-usable free Build
+    # is chat_ok / remote_live_ok — not this counter.
+    "mint_token_ok": 0,
+    # mint_success: product ok from export (probes resolved). Not the same as chat_ok.
     "mint_success": 0,
     "mint_fail": 0,
     "mint_skip": 0,
@@ -924,11 +928,10 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
         ):
             _inc("chat_fail")
 
-        if result.get("ok"):
-            log(worker_id, f"+ CPA auth: {result.get('path')}")
-            _inc("mint_success")
-            # Observability: which mint path produced tokens.
-            # pkce | protocol (primary device) | protocol_device (PKCE residual) | browser
+        # Honesty: token write vs product ok are separate.
+        # token_ok=True after OIDC write even when chat/models fail product ok.
+        if result.get("token_ok") is True:
+            _inc("mint_token_ok")
             mm = str(result.get("mint_method") or "").strip().lower()
             if mm in ("pkce",):
                 _inc("mint_method_pkce")
@@ -940,6 +943,10 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
                 _inc("mint_method_browser")
             elif mm:
                 _inc("mint_method_other")
+
+        if result.get("ok"):
+            log(worker_id, f"+ CPA auth (product ok): {result.get('path')}")
+            _inc("mint_success")
             multi = result.get("remote_injects")
             remote = result.get("remote_inject") or {}
             live_ok = result.get("remote_live_ok")
@@ -1005,12 +1012,22 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
             _inc("mint_skip")
             log(worker_id, f"[cpa] skipped: {result.get('reason')}")
         else:
-            _inc("mint_fail")
+            # Product not ok. Only count mint_fail when tokens were NOT written.
+            # token_ok + chat fail is a product gate miss, not a mint write failure.
+            if result.get("token_ok") is not True:
+                _inc("mint_fail")
             if result.get("entitlement_denied"):
                 log(
                     worker_id,
-                    f"! CPA chat entitlement_denied（不可重试/勿 remint）: "
-                    f"{result.get('error') or result}",
+                    f"! CPA chat entitlement_denied（token已写={bool(result.get('token_ok'))}，"
+                    f"不可重试/勿 remint）: {result.get('error') or result}",
+                )
+            elif result.get("token_ok") is True:
+                log(
+                    worker_id,
+                    f"! CPA product not ok（token已写 path={result.get('path')} "
+                    f"chat_ok={result.get('chat_ok')}）："
+                    f"{result.get('error') or result.get('fail_reason') or result}",
                 )
             else:
                 log(worker_id, f"! CPA auth 未成功: {result.get('error') or result}")
@@ -1434,8 +1451,8 @@ def main() -> int:
         print(f"[backup] final snapshot failed: {exc}", flush=True)
     print(
         f"=== 完成: 注册成功 {s.get('reg_success', 0)}, 注册失败 {s.get('reg_fail', 0)}, "
-        f"CPA成功 {s.get('mint_success', 0)}, CPA失败 {s.get('mint_fail', 0)}, "
-        f"CPA跳过 {s.get('mint_skip', 0)}, "
+        f"CPA token写入 {s.get('mint_token_ok', 0)}, CPA产品OK {s.get('mint_success', 0)}, "
+        f"CPA写失败 {s.get('mint_fail', 0)}, CPA跳过 {s.get('mint_skip', 0)}, "
         f"chat可用 {s.get('chat_ok', 0)}, chat无权限 {s.get('chat_denied', 0)}, "
         f"chat其它失败 {s.get('chat_fail', 0)}, "
         f"tebi注入成功 {s.get('remote_inject_ok', 0)}, tebi注入失败 {s.get('remote_inject_fail', 0)}, "
@@ -1471,6 +1488,8 @@ def main() -> int:
             "exit": exit_code,
             "reg_success": int(s.get("reg_success", 0) or 0),
             "reg_fail": int(s.get("reg_fail", 0) or 0),
+            # Additive: token write honesty (stable keys keep mint_success).
+            "mint_token_ok": int(s.get("mint_token_ok", 0) or 0),
             "mint_success": int(s.get("mint_success", 0) or 0),
             "mint_fail": int(s.get("mint_fail", 0) or 0),
             "mint_skip": int(s.get("mint_skip", 0) or 0),

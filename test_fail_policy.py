@@ -119,12 +119,15 @@ def test_fatal_stop_wiring() -> None:
         "_fatal_stop",
         "raise FatalRegisterError",
         "except FatalRegisterError",
-        "return 2",
+        "exit_code = 2",
+        "return exit_code",
         "致命错误，停止整批（不空转）",
+        "致命错误已停止任务（不空转）",
     ):
         assert needle in src, f"missing: {needle}"
     # worker must check stop flag and must NOT retry FatalRegisterError
     assert "if _fatal_stop.is_set()" in src
+    # bare `return 2` is NOT required — main uses exit_code then return exit_code
     print("PASS  fatal stop wiring present")
 
 
@@ -191,6 +194,47 @@ def test_cli_product_exit_wiring() -> None:
     print("PASS cli product exit wiring")
 
 
+def test_cli_mint_token_ok_honesty() -> None:
+    """mint_token_ok (OIDC write) must be distinct from mint_success (product ok)."""
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    assert '"mint_token_ok": 0' in src or "'mint_token_ok': 0" in src
+    assert '_inc("mint_token_ok")' in src
+    assert "CPA token写入" in src
+    assert "CPA产品OK" in src
+    assert "CPA写失败" in src
+    # SUMMARY_JSON must expose mint_token_ok additively while keeping mint_success
+    assert '"mint_token_ok": int(s.get("mint_token_ok"' in src
+    assert '"mint_success": int(s.get("mint_success"' in src
+    # token write counted even when product ok is false
+    assert 'if result.get("token_ok") is True:' in src
+    assert 'if result.get("ok"):' in src
+    print("PASS cli mint_token_ok honesty metrics")
+
+
+def test_gui_product_batch_summary() -> None:
+    """GUI must track free Build product counters and end-of-batch product_ok."""
+    src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    for needle in (
+        "self.cpa_token_ok_count = 0",
+        "self.cpa_product_ok_count = 0",
+        "self.cpa_chat_ok_count = 0",
+        "self.cpa_chat_denied_count = 0",
+        "self.cpa_remote_live_ok_count = 0",
+        "self.cpa_remote_inject_skip_count = 0",
+        "self.cpa_token_ok_count += 1",
+        "self.cpa_product_ok_count += 1",
+        "self.cpa_chat_ok_count += 1",
+        "free Build 产品",
+        "product_ok=",
+        "from register_cli import product_batch_success",
+        "注册成功",  # end summary must not conflate register with product
+    ):
+        assert needle in src, f"missing GUI product marker: {needle}"
+    # batch start must reset product counters (not only __init__)
+    assert src.count("self.cpa_token_ok_count = 0") >= 2
+    print("PASS gui free Build product batch summary")
+
+
 def test_run_register_preserves_product_exit() -> None:
     """run-register.sh must not mask register_cli exit with `| tee` alone."""
     path = ROOT / "run-register.sh"
@@ -213,6 +257,8 @@ def main() -> int:
     test_product_batch_success()
     test_alias_kill_switch_source()
     test_cli_product_exit_wiring()
+    test_cli_mint_token_ok_honesty()
+    test_gui_product_batch_summary()
     test_run_register_preserves_product_exit()
     print("\nALL PASS")
     return 0

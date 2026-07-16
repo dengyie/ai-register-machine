@@ -134,6 +134,43 @@ def test_inject_gate_requires_chat_ok_even_when_probe_chat_off() -> None:
     print("PASS inject gate requires chat_ok even when probe_chat off")
 
 
+def test_inject_gate_chat_ok_missing_unstamped() -> None:
+    """Path-only / unstamped auth must refuse with chat_ok_missing (never soft-inject)."""
+    mod = _load_cpa_export()
+    gate = mod.evaluate_remote_inject_gate(
+        {
+            "path": "/tmp/unstamped-xai.json",
+            "ok": True,
+            "token_ok": True,
+            # chat_ok deliberately absent (None) — no probe stamp written
+        },
+        {
+            "cpa_remote_inject_require_chat_ok": True,
+            "cpa_probe_chat": True,
+        },
+    )
+    assert gate.get("allow") is False
+    assert gate.get("reason") == "chat_ok_missing"
+    assert gate.get("chat_ok") is not True
+
+    # Explicit None + empty import_gate also maps to chat_ok_missing
+    gate2 = mod.evaluate_remote_inject_gate(
+        {
+            "path": "/tmp/unstamped-xai.json",
+            "chat_ok": None,
+            "usable": None,
+        },
+        {"cpa_remote_inject_require_chat_ok": True},
+    )
+    assert gate2.get("allow") is False
+    assert gate2.get("reason") == "chat_ok_missing"
+
+    src = (ROOT / "cpa_export.py").read_text(encoding="utf-8")
+    assert "chat_ok_missing" in src
+    assert "never soft-inject" in src
+    print("PASS inject gate chat_ok_missing for unstamped auth")
+
+
 def test_config_example_ssh_and_soft_flags() -> None:
     src = (ROOT / "config.example.json").read_text(encoding="utf-8")
     assert '"cpa_remote_ssh_identity"' in src
@@ -152,6 +189,7 @@ def main() -> int:
     test_ssh_hardening_markers()
     test_inject_gate_refuses_require_chat_false()
     test_inject_gate_requires_chat_ok_even_when_probe_chat_off()
+    test_inject_gate_chat_ok_missing_unstamped()
     test_config_example_ssh_and_soft_flags()
     print("\nALL PASS")
     return 0
