@@ -4838,6 +4838,10 @@ def fill_profile_and_submit(timeout=None, log_callback=None, cancel_callback=Non
     not_ready_count = 0
     last_filled = None
     cf_retry_count = 0
+    # Throttle wait-cloudflare token-length logs: only log when the length
+    # actually changes (or on first poll). Avoids a flood of "token长度=0"
+    # lines every poll while Turnstile has not solved yet.
+    last_logged_cf_token_len = None
     try:
         cf_stuck_timeout = float(
             (config.get("turnstile_stuck_timeout") if isinstance(config, dict) else None) or 60
@@ -4985,9 +4989,13 @@ return 'filled-no-submit';
 
             if isinstance(filled, str) and filled.startswith("wait-cloudflare"):
                 form_filled_once = True
+                token_len = filled.split(":", 1)[1] if ":" in filled else "0"
                 if log_callback:
-                    token_len = filled.split(":", 1)[1] if ":" in filled else "0"
-                    log_callback(f"[*] 资料已填写，等待 Cloudflare 人机验证通过... 当前token长度={token_len}")
+                    # Only log when length changes (or first poll) to cut
+                    # token长度=0 noise during the pre-solve wait.
+                    if token_len != last_logged_cf_token_len:
+                        last_logged_cf_token_len = token_len
+                        log_callback(f"[*] 资料已填写，等待 Cloudflare 人机验证通过... 当前token长度={token_len}")
                 now = time.time()
                 if wait_cf_since is None:
                     wait_cf_since = now
@@ -5090,9 +5098,13 @@ return 'wait-cloudflare:' + token.length;
             continue
 
         if isinstance(cf_state, str) and cf_state.startswith("wait-cloudflare"):
+            token_len = cf_state.split(":", 1)[1] if ":" in cf_state else "0"
             if log_callback:
-                token_len = cf_state.split(":", 1)[1] if ":" in cf_state else "0"
-                log_callback(f"[*] 等待 Cloudflare 人机验证通过后再提交... 当前token长度={token_len}")
+                # Only log when length changes (or first poll) to cut
+                # token长度=0 noise during the pre-solve wait.
+                if token_len != last_logged_cf_token_len:
+                    last_logged_cf_token_len = token_len
+                    log_callback(f"[*] 等待 Cloudflare 人机验证通过后再提交... 当前token长度={token_len}")
             now = time.time()
             if wait_cf_since is None:
                 wait_cf_since = now
