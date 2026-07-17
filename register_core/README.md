@@ -3,14 +3,17 @@
 以 **ai-register-machine monorepo** 为主仓，把 Grok / MiMo（及后续产品）挂到同一套层边界上。
 
 ```text
-CLI / register.sh
+CLI / register.sh / --profile profiles/*.yaml
        │
        ▼
-  pipeline（编排：count、fail-fast、verify、sink）
+  config/*     register.v1 profile → job + composite mail
+  pipeline（编排：count、fail-fast、verify、sink、strategy extra）
        │
-       ├─ providers/*   产品注册（grok / mimo）— 黑盒适配已验证 runner
-       ├─ email/*       邮箱来源（allocate + poll_otp）— 供 in-process 使用
-       ├─ verify/*      注册后能力探测（诚实 deferred / shape）
+       ├─ providers/*   产品注册（chatgpt in-process；grok/mimo black-box→M3/M4）
+       ├─ mailbox/*     只开箱（allocate/release）
+       ├─ decode/*      只拉信解 OTP（wait_otp）
+       ├─ email/*       兼容层 + CompositeEmailSource
+       ├─ verify/*      注册后能力探测
        ├─ sink/*        结果落盘（JSONL 0600）
        └─ contracts + errors
 ```
@@ -46,12 +49,18 @@ CLI / register.sh
 
 ```bash
 python -m register_core list
+# Preferred: one profile drives mailbox + decode + strategy + provider
+python -m register_core run --profile profiles/chatgpt-cf.example.yaml -n 1
+python -m register_core run --profile profiles/chatgpt-tinyhost.example.yaml
+# Legacy flags still work
 python -m register_core run -p mimo -n 1 --sink output/core-mimo.jsonl
 python -m register_core run -p grok -n 1 --no-verify
 python -m register_core run -p chatgpt -n 1 --email-source gmail_imap
 # 错误示例（会 exit 2）：
 python -m register_core run -p mimo --email-source tinyhost
 ```
+
+Profile schema: `docs/superpowers/specs/2026-07-17-register-profile-config-design.md`
 
 ## Egress nodes（项目自有，不依赖 Clash）
 

@@ -1,0 +1,41 @@
+# Example: ChatGPT + Gmail IMAP (paired)
+# Requires GMAIL_IMAP_* env (prod mode — no plaintext passwords in file).
+#   python -m register_core run --profile profiles/chatgpt-gmail.example.yaml -n 1
+
+apiVersion: register.v1
+kind: RegisterProfile
+metadata:
+  name: chatgpt-gmail
+
+spec:
+  provider:
+    name: chatgpt
+    options:
+      otp_timeout_s: 180
+
+  count: 1
+
+  mailbox:
+    type: gmail_imap
+    domain: mangoqwq.com
+
+  decode:
+    type: gmail_imap
+    options:
+      timeout_s: 180
+
+  strategy:
+    fail_fast: true
+    egress:
+      mode: clash
+      proxy: "http://127.0.0.1:7897"
+    mail_proxy: direct
+
+  verify:
+    enabled: true
+
+  sink:
+    path: providers/chatgpt/output/pipeline.jsonl
+
+  secrets:
+    mode: prod

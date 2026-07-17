@@ -1,0 +1,59 @@
+# Example: ChatGPT + Cloudflare Worker mailbox/decode + Clash egress
+# Usage (prod secrets via env):
+#   export CLOUDFLARE_API_BASE=https://temp-mail.example.com
+#   python -m register_core run --profile profiles/chatgpt-cf.example.yaml -n 1
+#
+# Copy to profiles/chatgpt-cf.local.yaml (gitignored) for local overrides.
+
+apiVersion: register.v1
+kind: RegisterProfile
+metadata:
+  name: chatgpt-cf
+  description: ChatGPT via CF Worker (paired mailbox+decode)
+
+spec:
+  provider:
+    name: chatgpt
+    options:
+      otp_timeout_s: 180
+
+  count: 1
+
+  mailbox:
+    type: cloudflare
+    # domain pin optional for CF Worker; usually Worker-configured
+
+  decode:
+    type: cloudflare
+    options:
+      timeout_s: 180
+      poll_interval_s: 2.5
+
+  strategy:
+    fail_fast: true
+    fail_fast_kinds:
+      - registration_disallowed
+      - unsupported_email
+      - fatal
+      - verify
+    egress:
+      mode: clash
+      proxy: "http://127.0.0.1:7897"
+      rotate_every: 1
+      rotate_required: false
+    mail_proxy: direct
+    burn:
+      enabled: true
+      track: [ip, domain]
+      on_kinds: [registration_disallowed, unsupported_email]
+      state_path: ""   # M2: .register/burn_state.json
+
+  verify:
+    enabled: true
+    name: auto
+
+  sink:
+    path: providers/chatgpt/output/pipeline.jsonl
+
+  secrets:
+    mode: prod

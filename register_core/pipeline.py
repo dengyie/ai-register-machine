@@ -55,8 +55,58 @@ class Pipeline:
             fail_fast=job.fail_fast,
         )
 
+    @classmethod
+    def from_profile(
+        cls,
+        profile: Any,
+        *,
+        sink: ResultSink | None = None,
+        overrides: dict[str, Any] | None = None,
+    ) -> Pipeline:
+        """Build pipeline from a register.v1 RegisterProfile.
+
+        Injects CompositeEmailSource (mailbox + decode) for in-process providers.
+        """
+        from register_core.config.loader import build_composite_email, profile_to_job
+
+        job = profile_to_job(profile, overrides=overrides)
+        provider = get_provider(job.provider, **(job.extra or {}))
+        composite = None
+        try:
+            composite = build_composite_email(profile)
+        except Exception as exc:
+            # provider-internal mail returns None; other errors propagate
+            from register_core.config.loader import ProfileLoadError
+
+            if isinstance(exc, ProfileLoadError):
+                raise ValueError(str(exc)) from exc
+            raise
+        if composite is None:
+            email = cls._resolve_email_source(job)
+        else:
+            email = composite  # type: ignore[assignment]
+            # Black-box honesty: do not silently ignore composite for grok/mimo yet.
+            prov = (job.provider or "").strip().lower()
+            if prov in _BLACKBOX_PROVIDERS:
+                raise ValueError(
+                    f"provider {job.provider!r} cannot consume profile mailbox/decode yet "
+                    f"(black-box; M3/M4). Use mailbox/decode type provider or ChatGPT."
+                )
+        verifier = cls._resolve_verifier(job)
+        return cls(
+            provider,
+            email_source=email,
+            verifier=verifier,
+            sink=sink,
+            fail_fast=job.fail_fast,
+        )
+
     @staticmethod
     def _resolve_email_source(job: RegisterJob) -> EmailSource | None:
+        # Profile loader may stash a pre-built composite on extra.
+        pre = (job.extra or {}).get("_email_source_obj")
+        if pre is not None:
+            return pre  # type: ignore[return-value]
         name = (job.email_source or "provider").strip().lower()
         if name in ("", "provider", "none", "internal"):
             return None

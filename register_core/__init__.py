@@ -2,10 +2,13 @@
 
 Layers (dependency direction top → bottom):
 
-  hub / CLI
+  hub / CLI / --profile (register.v1)
+    → config/*       (profile loader → job + composite mail)
     → pipeline (orchestrator)
-      → providers/*   (product signup: grok, mimo, …)
-      → email/*       (mailbox allocate + OTP poll)
+      → providers/*   (product signup: chatgpt, grok, mimo, …)
+      → mailbox/*     (allocate / release only)
+      → decode/*      (wait_otp only)
+      → email/*       (compat + CompositeEmailSource)
       → verify/*      (post-signup capability probe)
       → sink/*        (persist accounts/keys)
       → contracts + errors (shared types)

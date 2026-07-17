@@ -31,7 +31,17 @@ from register_core.sink.jsonl_sink import JsonlSink  # noqa: E402
 def cmd_list(_: argparse.Namespace) -> int:
     print("providers:", ", ".join(list_providers()))
     print("email_sources:", ", ".join(list_email_sources()))
-    print("layers: contracts → email → providers → verify → sink → pipeline → cli")
+    try:
+        from register_core.mailbox.registry import list_mailbox_providers
+        from register_core.decode.registry import list_otp_decoders
+
+        print("mailbox:", ", ".join(list_mailbox_providers()))
+        print("decode:", ", ".join(list_otp_decoders()))
+    except Exception as exc:
+        print("mailbox/decode: (unavailable)", exc)
+    print(
+        "layers: contracts → mailbox/decode → providers → verify → sink → pipeline → cli"
+    )
     print(
         "nodes: python -m register_core nodes "
         "import|validate|list|check|add|clear|core|egress"
@@ -41,9 +51,13 @@ def cmd_list(_: argparse.Namespace) -> int:
         "(advanced: auto|clash) via REGISTER_EGRESS / --egress / nodes egress set"
     )
     print(
-        "note: grok/mimo are black-box (email_source=provider). "
-        "chatgpt is in-process (use --email-source cloudflare|gmail_imap|tinyhost|auto). "
-        "Hub: ./register.sh grok|mimo|chatgpt"
+        "profile: python -m register_core run --profile profiles/<name>.yaml "
+        "(register.v1; mailbox+decode+strategy). "
+        "Legacy flags still work. Hub: ./register.sh grok|mimo|chatgpt"
+    )
+    print(
+        "note: grok/mimo are black-box until M3/M4 (profile mailbox/decode must be provider). "
+        "chatgpt is in-process (cloudflare|gmail_imap|tinyhost|auto)."
     )
     return 0
 
@@ -66,44 +80,138 @@ def cmd_run(args: argparse.Namespace) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    sink = JsonlSink(args.sink) if args.sink else None
     headless = None if args.headless is None else bool(args.headless)
-    extra: dict = {
-        "timeout_s": args.timeout,
-        "threads": args.threads,
-    }
-    if headless is not None:
-        extra["headless"] = headless
-    # Egress backend switch: core (project mihomo) | clash | list | direct | auto
-    if getattr(args, "egress", None):
-        extra["egress"] = args.egress
-    if getattr(args, "proxy", None):
-        extra["proxy"] = args.proxy
-    if getattr(args, "proxy_list", None):
-        extra["proxy_list"] = args.proxy_list
-    if getattr(args, "proxy_rotate", None):
-        extra["proxy_rotate_mode"] = args.proxy_rotate
-    if getattr(args, "proxy_rotate_every", None) is not None and args.proxy_rotate_every >= 1:
-        extra["proxy_rotate_every"] = int(args.proxy_rotate_every)
-    if getattr(args, "proxy_rotate_required", False):
-        extra["proxy_rotate_required"] = True
+    profile_path = str(getattr(args, "profile", "") or "").strip()
 
-    job = RegisterJob(
-        provider=args.provider,
-        count=args.count,
-        email_source=args.email_source,
-        verify=not args.no_verify,
-        fail_fast=not args.no_fail_fast,
-        extra=extra,
-    )
+    if profile_path:
+        from register_core.config.loader import (
+            ProfileLoadError,
+            apply_cli_overrides,
+            load_profile,
+        )
 
-    try:
-        pipe = Pipeline.from_job(job, sink=sink)
-    except ValueError as exc:
-        print(json.dumps({"ok": 0, "fail": 1, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
-        return 2
+        try:
+            profile = load_profile(profile_path)
+        except ProfileLoadError as exc:
+            print(
+                json.dumps({"ok": 0, "fail": 1, "error": str(exc)}, ensure_ascii=False),
+                file=sys.stderr,
+            )
+            return 2
+        # Optional: CLI -p must match profile provider when both set
+        if getattr(args, "provider", None):
+            if str(args.provider).strip().lower() != profile.provider.name.strip().lower():
+                print(
+                    json.dumps(
+                        {
+                            "ok": 0,
+                            "fail": 1,
+                            "error": (
+                                f"--provider {args.provider!r} != profile provider "
+                                f"{profile.provider.name!r}"
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                )
+                return 2
+        job, sink_path = apply_cli_overrides(
+            profile,
+            count=args.count if args.count and args.count != 1 else profile.count,
+            # if user passed -n explicitly we still use args.count (argparse default 1)
+            no_verify=bool(args.no_verify),
+            no_fail_fast=bool(args.no_fail_fast),
+            egress=str(getattr(args, "egress", "") or ""),
+            proxy=str(getattr(args, "proxy", "") or ""),
+            proxy_list=str(getattr(args, "proxy_list", "") or ""),
+            sink=str(args.sink or ""),
+            timeout=args.timeout,
+            threads=args.threads,
+            headless=headless,
+        )
+        # Prefer explicit CLI count always when provided via -n (default 1 may override profile).
+        # If profile has count>1 and user did not intend override, use profile: detect via
+        # only overriding when args.count was set differently — keep simple: CLI -n wins.
+        job.count = int(args.count or profile.count)
+        sink = JsonlSink(sink_path) if sink_path else None
+        try:
+            pipe = Pipeline.from_profile(profile, sink=sink, overrides={
+                "count": job.count,
+                "verify": job.verify,
+                "fail_fast": job.fail_fast,
+                "egress": (job.extra or {}).get("egress"),
+                "proxy": (job.extra or {}).get("proxy"),
+                "proxy_list": (job.extra or {}).get("proxy_list"),
+                "timeout_s": (job.extra or {}).get("timeout_s"),
+                "threads": (job.extra or {}).get("threads"),
+                "headless": (job.extra or {}).get("headless"),
+            })
+        except ValueError as exc:
+            print(
+                json.dumps({"ok": 0, "fail": 1, "error": str(exc)}, ensure_ascii=False),
+                file=sys.stderr,
+            )
+            return 2
+        stats = pipe.run(job.count, extra=job.extra)
+    else:
+        if not getattr(args, "provider", None):
+            print(
+                json.dumps(
+                    {
+                        "ok": 0,
+                        "fail": 1,
+                        "error": "require --profile or --provider / -p",
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        sink = JsonlSink(args.sink) if args.sink else None
+        extra: dict = {
+            "timeout_s": args.timeout,
+            "threads": args.threads,
+        }
+        if headless is not None:
+            extra["headless"] = headless
+        # Egress backend switch: core (project mihomo) | clash | list | direct | auto
+        if getattr(args, "egress", None):
+            extra["egress"] = args.egress
+        if getattr(args, "proxy", None):
+            extra["proxy"] = args.proxy
+        if getattr(args, "proxy_list", None):
+            extra["proxy_list"] = args.proxy_list
+        if getattr(args, "proxy_rotate", None):
+            extra["proxy_rotate_mode"] = args.proxy_rotate
+        if (
+            getattr(args, "proxy_rotate_every", None) is not None
+            and args.proxy_rotate_every >= 1
+        ):
+            extra["proxy_rotate_every"] = int(args.proxy_rotate_every)
+        if getattr(args, "proxy_rotate_required", False):
+            extra["proxy_rotate_required"] = True
 
-    stats = pipe.run(job.count, extra=job.extra)
+        job = RegisterJob(
+            provider=args.provider,
+            count=args.count,
+            email_source=args.email_source,
+            verify=not args.no_verify,
+            fail_fast=not args.no_fail_fast,
+            extra=extra,
+        )
+
+        try:
+            pipe = Pipeline.from_job(job, sink=sink)
+        except ValueError as exc:
+            print(
+                json.dumps({"ok": 0, "fail": 1, "error": str(exc)}, ensure_ascii=False),
+                file=sys.stderr,
+            )
+            return 2
+
+        stats = pipe.run(job.count, extra=job.extra)
+
     summary = {
         "ok": stats.ok,
         "fail": stats.fail,
@@ -139,15 +247,25 @@ def build_parser() -> argparse.ArgumentParser:
     pn.set_defaults(func=cmd_nodes)
 
     pr = sub.add_parser("run", help="Run registration pipeline")
-    pr.add_argument("--provider", "-p", required=True, help="grok | mimo | chatgpt")
+    pr.add_argument(
+        "--profile",
+        default="",
+        help="register.v1 YAML/JSON profile (mailbox+decode+strategy+provider)",
+    )
+    pr.add_argument(
+        "--provider",
+        "-p",
+        default="",
+        help="grok | mimo | chatgpt (required unless --profile)",
+    )
     pr.add_argument("--count", "-n", type=int, default=1)
     pr.add_argument(
         "--email-source",
         default="provider",
         help=(
-            "provider=adapter-internal mail (required for grok/mimo). "
-            "chatgpt defaults via adapter to cloudflare when provider; "
-            "prefer cloudflare|gmail_imap|tinyhost|duckmail|auto for chatgpt."
+            "legacy: provider=adapter-internal mail (required for grok/mimo). "
+            "chatgpt: cloudflare|gmail_imap|tinyhost|duckmail|auto. "
+            "Prefer --profile for mailbox+decode split."
         ),
     )
     pr.add_argument("--sink", default="", help="JSONL path for private results (0600)")
