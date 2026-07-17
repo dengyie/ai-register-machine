@@ -3673,15 +3673,128 @@ function isVisible(node) {
   const rect = node.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
 }
-const input = Array.from(document.querySelectorAll(
-  'input[data-testid="email"], input[name="email"], input[type="email"], input[autocomplete="email"]'
-)).find((node) => isVisible(node) && !node.disabled && !node.readOnly) || null;
+const sels = [
+  'input[data-testid="email"]',
+  'input[name="email"]',
+  'input[type="email"]',
+  'input[autocomplete="email"]',
+  'input[autocomplete="username"]',
+  'input[name="username"]',
+  'input[id*="email" i]',
+  'input[placeholder*="邮箱"]',
+  'input[placeholder*="email" i]',
+  'input[aria-label*="email" i]',
+  'input[aria-label*="邮箱"]',
+];
+const input = Array.from(document.querySelectorAll(sels.join(',')))
+  .find((node) => isVisible(node) && !node.disabled && !node.readOnly) || null;
 return !!input;
                 """
             )
         )
     except Exception:
         return False
+
+
+def _signup_login_in_progress(page) -> bool:
+    """True when SPA shows a mid-auth spinner / 「您正在登录」 without email form."""
+    if page is None:
+        return False
+    try:
+        return bool(
+            page.run_js(
+                r"""
+try {
+  const t = ((document.body && (document.body.innerText || document.body.textContent)) || '')
+    .replace(/\s+/g, ' ').slice(0, 1200);
+  if (!t) return false;
+  if (t.includes('您正在登录') || t.includes('正在登录') || /signing\s*in/i.test(t)
+      || /logging\s*you\s*in/i.test(t) || /please\s*wait/i.test(t)) {
+    // Only treat as login-progress when email form is still absent.
+    const hasEmail = Array.from(document.querySelectorAll(
+      'input[type="email"], input[name="email"], input[autocomplete="email"]'
+    )).some((n) => {
+      if (!n) return false;
+      const s = window.getComputedStyle(n);
+      if (s.display === 'none' || s.visibility === 'hidden') return false;
+      const r = n.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && !n.disabled;
+    });
+    return !hasEmail;
+  }
+  return false;
+} catch (e) { return false; }
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def _click_email_signup_element(page, log_callback=None) -> str:
+    """DrissionPage element click fallback when synthetic JS events don't mount the form.
+
+    Returns status string: clicked:<text> | not-found | error:<msg>
+    """
+    if page is None:
+        return "not-found"
+    # Prefer text/partial matches for CN + EN labels used on accounts.x.ai.
+    selectors = (
+        "text:使用邮箱注册",
+        "text:邮箱注册",
+        "text:Sign up with email",
+        "text:Continue with email",
+        "text:Sign up with Email",
+        "text:Continue with Email",
+        "xpath://button[contains(normalize-space(.),'使用邮箱')]",
+        "xpath://a[contains(normalize-space(.),'使用邮箱')]",
+        "xpath://*[@role='button' and contains(normalize-space(.),'使用邮箱')]",
+        "xpath://button[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'with email')]",
+        "xpath://a[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'with email')]",
+        "css:a[href*='email']",
+        "css:button[data-testid*='email' i]",
+    )
+    for sel in selectors:
+        try:
+            el = page.ele(sel, timeout=0.6)
+        except Exception:
+            el = None
+        if el is None:
+            continue
+        try:
+            text = ""
+            try:
+                text = str(el.text or el.attr("aria-label") or sel)[:40]
+            except Exception:
+                text = sel[:40]
+            try:
+                el.scroll.to_see()
+            except Exception:
+                try:
+                    el.run_js("this.scrollIntoView({block:'center'});")
+                except Exception:
+                    pass
+            human_sleep(0.15, None, min_seconds=0.05)
+            try:
+                el.click(by_js=False)
+            except Exception:
+                try:
+                    el.click()
+                except Exception:
+                    try:
+                        el.run_js("this.click();")
+                    except Exception as exc:
+                        if log_callback:
+                            log_callback(f"[Debug] element click fail sel={sel!r}: {exc}")
+                        continue
+            if log_callback:
+                log_callback(f"[*] 元素级点击邮箱注册: {text!r} via {sel}")
+            return f"clicked:{text}"
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"[Debug] element click path error sel={sel!r}: {exc}")
+            continue
+    return "not-found"
 
 
 def is_chrome_error_page(page) -> bool:
@@ -3884,29 +3997,61 @@ return 'clicked:' + ((target.innerText || target.textContent || '').replace(/\s+
             """
         )
 
-        if clicked and str(clicked).startswith("clicked"):
+        click_status = str(clicked or "")
+        if click_status.startswith("clicked"):
             if log_callback:
-                log_callback(f"[*] 已点击「使用邮箱注册」按钮 ({clicked})")
-            # Wait for the email form to actually appear after the click.
-            form_deadline = time.time() + 8.0
-            while time.time() < form_deadline:
-                raise_if_cancelled(cancel_callback)
-                if _email_input_ready(page):
-                    if log_callback:
-                        log_callback("[*] 邮箱输入框已出现")
-                    return True
-                human_sleep(0.4, cancel_callback, min_seconds=0.2)
-            if log_callback:
-                snap = _page_form_snapshot(page) if "_page_form_snapshot" in globals() else {}
-                log_callback(f"[Debug] 点击后未出现邮箱输入框，将重试: {snap}")
-            # Fall through and click again before deadline.
-            continue
+                log_callback(f"[*] 已点击「使用邮箱注册」按钮 ({click_status})")
+        else:
+            # Synthetic DOM events failed — try real DrissionPage element click.
+            elem_status = _click_email_signup_element(page, log_callback=log_callback)
+            click_status = str(elem_status or "")
+            if click_status.startswith("clicked"):
+                if log_callback:
+                    log_callback(f"[*] 元素级点击「使用邮箱注册」成功 ({click_status})")
+            else:
+                if log_callback:
+                    current_url = page.url if page else "none"
+                    log_callback(
+                        f"[Debug] 当前URL: {current_url} synthetic={clicked!r} element={elem_status!r}"
+                    )
+                human_sleep(1, cancel_callback)
+                continue
+
+        # Wait for the email form to actually appear after a successful click.
+        form_deadline = time.time() + 10.0
+        login_progress_hits = 0
+        while time.time() < form_deadline:
+            raise_if_cancelled(cancel_callback)
+            if _email_input_ready(page):
+                if log_callback:
+                    log_callback("[*] 邮箱输入框已出现")
+                return True
+            if _signup_login_in_progress(page):
+                login_progress_hits += 1
+                if login_progress_hits == 1 and log_callback:
+                    snap = _page_form_snapshot(page) if "_page_form_snapshot" in globals() else {}
+                    log_callback(
+                        f"[Debug] 点击后出现「您正在登录/Signing in」中间态，等待表单或恢复: {snap}"
+                    )
+                # Brief wait then re-check; if stuck, break early for retry/fail.
+                if login_progress_hits >= 8:
+                    break
+            human_sleep(0.4, cancel_callback, min_seconds=0.2)
 
         if log_callback:
-            current_url = page.url if page else "none"
-            log_callback(f"[Debug] 当前URL: {current_url} click={clicked!r}")
-
-        human_sleep(1, cancel_callback)
+            snap = _page_form_snapshot(page) if "_page_form_snapshot" in globals() else {}
+            log_callback(
+                f"[Debug] 点击后未出现邮箱输入框 click={click_status!r} "
+                f"login_progress={login_progress_hits} snap={snap}"
+            )
+        # Stuck on login-progress with no email form: hard fail with clear reason
+        # (do not spin until outer deadline with identical dead clicks).
+        if login_progress_hits >= 8 and not _email_input_ready(page):
+            raise Exception(
+                "邮箱注册按钮点击后停留在「您正在登录」中间态，邮箱表单未挂载"
+            )
+        # Fall through and click again before deadline.
+        continue
 
     if log_callback:
         try:
@@ -3914,12 +4059,21 @@ return 'clicked:' + ((target.innerText || target.textContent || '').replace(/\s+
         except Exception as html_exc:
             page_html = f"<html-read-failed: {html_exc}>"
         log_callback(f"[Debug] 页面内容片段: {page_html}")
+        try:
+            snap = _page_form_snapshot(page) if "_page_form_snapshot" in globals() else {}
+            log_callback(f"[Debug] 最终表单快照: {snap}")
+        except Exception:
+            pass
 
     # Final check: if we spent the whole timeout on an error page, recycle browser.
     if is_chrome_error_page(page):
         detail = chrome_error_summary(page)
         raise AccountRetryNeeded(
             f"browser_boot: chrome error page (no email signup button) ({detail})"
+        )
+    if _signup_login_in_progress(page):
+        raise Exception(
+            "未找到邮箱表单：页面停在「您正在登录」中间态（点击邮箱注册后未挂载输入框）"
         )
     raise Exception("未找到「使用邮箱注册」按钮或邮箱表单未出现")
 
