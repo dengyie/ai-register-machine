@@ -1016,7 +1016,42 @@ class TestManager(unittest.TestCase):
             # clean L1 (c) → unprobed (b) → l2_miss (a)
             self.assertEqual(order, ["c", "b", "a"])
 
-    def test_probe_egress_ip_ok_parses_json(self) -> None:
+    def test_smart_order_fail_tier_probes_least_failed_first(self) -> None:
+        """In the hard-L1-fail tier, least-failed (most recoverable) probes first."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            # Two dead nodes: last_ok=False, non-l2_fail errors, different fail_counts.
+            big = Node(
+                url="http://big:1",
+                id="big",
+                last_ok=False,
+                last_error="connect_error x",
+                fail_count=9,
+            )
+            small = Node(
+                url="http://small:1",
+                id="small",
+                last_ok=False,
+                last_error="connect_error x",
+                fail_count=1,
+            )
+            save_nodes([big, small], path)
+            order: list[str] = []
+
+            def fake_probe(node, **kwargs):
+                order.append(node.id)
+                return {"id": node.id, "label": node.label, "ok": False, "error": "x"}
+
+            with patch(
+                "register_core.nodes.manager.probe_node",
+                side_effect=fake_probe,
+            ):
+                mgr = NodeManager(path)
+                mgr.check_all(smart_order=True, limit=None, persist=False)
+            # least-failed (small, fail_count=1) must precede heaviest-failed (big, 9)
+            self.assertEqual(order, ["small", "big"])
+
+
         from register_core.nodes import health as health_mod
 
         with patch.object(

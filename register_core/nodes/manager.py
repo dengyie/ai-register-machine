@@ -248,7 +248,8 @@ class NodeManager:
                     return (1, 0)
                 if n.last_ok is True and l2_miss:
                     return (2, 0)
-                return (3, -int(n.fail_count or 0))
+                # Hard L1 fail tier: probe least-failed (most recoverable) first.
+                return (3, int(n.fail_count or 0))
 
             candidates.sort(key=_rank)
 
