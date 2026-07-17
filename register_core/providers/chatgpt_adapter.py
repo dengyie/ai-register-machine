@@ -160,17 +160,24 @@ class ChatGPTProvider:
             logs.append(line)
             print(f"[chatgpt] {line}", flush=True)
 
+        used_codes: set[str] = set()
+
         def otp_provider() -> str:
             # Split budget across first poll + one resend poll inside protocol flow.
+            # Pass used_codes so resend does not re-accept a previously rejected OTP.
             per_poll = max(45.0, otp_timeout / 2.0)
             otp = source.poll_otp(
                 mailbox,
                 timeout_s=per_poll,
                 poll_interval_s=2.5,
+                used_codes=used_codes or None,
                 newer_than_epoch=t0 - 10,
                 sender_hint=None,
             )
-            return otp.code
+            code = str(getattr(otp, "code", "") or "").strip()
+            if code:
+                used_codes.add(code)
+            return code
 
         rot_meta = extra.get("_proxy_rotate") if isinstance(extra.get("_proxy_rotate"), dict) else {}
         arts: dict[str, Any] = {

@@ -26,6 +26,9 @@ class FakeEmail:
     def __init__(self, *, fail_otp: bool = False) -> None:
         self.fail_otp = fail_otp
         self.released: list[tuple[str, bool]] = []
+        self.poll_kwargs: list[dict[str, Any]] = []
+        self._codes = ["111111", "222222", "333333"]
+        self._i = 0
 
     def allocate(self) -> Mailbox:
         return Mailbox(
@@ -36,9 +39,12 @@ class FakeEmail:
         )
 
     def poll_otp(self, mailbox: Mailbox, **kwargs: Any) -> OtpCode:
+        self.poll_kwargs.append(dict(kwargs))
         if self.fail_otp:
             raise MailMissError("otp timeout test")
-        return OtpCode(code="123456", source=self.name)
+        code = self._codes[min(self._i, len(self._codes) - 1)]
+        self._i += 1
+        return OtpCode(code=code, source=self.name)
 
     def release(self, mailbox: Mailbox, *, success: bool) -> None:
         self.released.append((mailbox.address, success))
@@ -168,6 +174,48 @@ class TestChatGPTProtocolHelpers(unittest.TestCase):
         uniform.assert_called_once_with(9.0, 11.0)
         sleep.assert_called_once_with(10.4)
         self.assertTrue(any("human_pace" in x and "after_authorize" in x for x in logs))
+
+
+class TestChatGPTAdapterUsedCodes(unittest.TestCase):
+    def test_otp_provider_accumulates_used_codes_across_polls(self):
+        """Resend path must pass previously returned codes as used_codes."""
+        email = FakeEmail()
+        provider = ChatGPTProvider(proxy="")
+        captured: list[Any] = []
+
+        def fake_register_one(**kwargs: Any):
+            otp_fn = kwargs.get("otp_provider")
+            assert callable(otp_fn)
+            c1 = otp_fn()
+            c2 = otp_fn()
+            captured.extend([c1, c2])
+            from providers.chatgpt.protocol.flow import RegistrationResult
+
+            return RegistrationResult(
+                ok=True,
+                email="newuser@example.com",
+                password="Pw1!abcdef",
+                access_token="a" * 48,
+                refresh_token="r" * 48,
+                id_token="h.p.s",
+                device_id="dev",
+            )
+
+        with patch(
+            "providers.chatgpt.protocol.flow.register_one",
+            side_effect=fake_register_one,
+        ):
+            result = provider.register_one(email_source=email)
+        self.assertTrue(result.ok)
+        self.assertEqual(captured, ["111111", "222222"])
+        self.assertEqual(len(email.poll_kwargs), 2)
+        # first poll: empty used set → None or empty
+        first_used = email.poll_kwargs[0].get("used_codes")
+        self.assertTrue(first_used is None or first_used == set())
+        # second poll must exclude first code
+        second_used = email.poll_kwargs[1].get("used_codes")
+        self.assertIsNotNone(second_used)
+        self.assertIn("111111", second_used)
 
 
 class TestChatGPTAdapterAttribution(unittest.TestCase):

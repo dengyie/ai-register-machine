@@ -435,6 +435,21 @@ class TestGrokParse(unittest.TestCase):
         self.assertEqual(r.secret_kind, "sso")
         self.assertTrue(r.secret.startswith("eyJ"))
 
+    def test_extra_proxy_forwarded_to_env(self):
+        """Pipeline inject_attempt_proxy must reach register_cli via PROXY env."""
+        provider = GrokProvider(accounts_file="/tmp/x")
+        captured: dict = {}
+
+        def _capture_run(cmd, cwd=None, env=None, timeout_s=None):  # noqa: ARG001
+            captured["env"] = dict(env or {})
+            return CmdResult(returncode=1, stdout="fail", stderr="", timed_out=False)
+
+        with patch("register_core.providers.grok_adapter.run_command", side_effect=_capture_run):
+            with patch("register_core.providers.grok_adapter.file_size", return_value=0):
+                provider.register_one(extra={"proxy": "http://user:pw@10.0.0.9:9000"})
+        self.assertEqual(captured["env"].get("PROXY"), "http://user:pw@10.0.0.9:9000")
+        self.assertEqual(captured["env"].get("CPA_PROXY"), "http://user:pw@10.0.0.9:9000")
+
 
 class TestMimoAdapterMock(unittest.TestCase):
     def test_historical_only_is_fail(self):

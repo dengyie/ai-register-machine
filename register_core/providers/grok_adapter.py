@@ -82,6 +82,13 @@ class GrokProvider:
         env = os.environ.copy()
         timeout_s = int(extra.get("timeout_s", 900) or 900)
         otp_timeout = float(extra.get("otp_timeout_s") or 180)
+        # Forward pipeline attempt proxy into register_cli env (PROXY overlay).
+        # Without this, inject_attempt_proxy is ignored by the shell-out path.
+        proxy = str(extra.get("proxy") or "").strip()
+        if proxy:
+            env["PROXY"] = proxy
+            # Keep CPA mint on same egress when child does inline mint.
+            env.setdefault("CPA_PROXY", proxy)
         mailbox = None
         mail_meta: dict[str, Any] = {}
         released = False
