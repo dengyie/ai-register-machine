@@ -4044,11 +4044,13 @@ return 'clicked:' + ((target.innerText || target.textContent || '').replace(/\s+
                 f"[Debug] 点击后未出现邮箱输入框 click={click_status!r} "
                 f"login_progress={login_progress_hits} snap={snap}"
             )
-        # Stuck on login-progress with no email form: hard fail with clear reason
-        # (do not spin until outer deadline with identical dead clicks).
+        # Stuck on login-progress with no email form: recycle browser + slot retry
+        # (do not burn the account as permanent reg_fail/other; do not spin
+        # until outer deadline with identical dead clicks).
         if login_progress_hits >= 8 and not _email_input_ready(page):
-            raise Exception(
-                "邮箱注册按钮点击后停留在「您正在登录」中间态，邮箱表单未挂载"
+            raise AccountRetryNeeded(
+                "browser_boot: signup_spa_stuck 邮箱注册按钮点击后停留在「您正在登录」"
+                "中间态，邮箱表单未挂载"
             )
         # Fall through and click again before deadline.
         continue
@@ -4072,8 +4074,12 @@ return 'clicked:' + ((target.innerText || target.textContent || '').replace(/\s+
             f"browser_boot: chrome error page (no email signup button) ({detail})"
         )
     if _signup_login_in_progress(page):
-        raise Exception(
-            "未找到邮箱表单：页面停在「您正在登录」中间态（点击邮箱注册后未挂载输入框）"
+        # Same pre-email SPA stickiness as the form-wait path above — recycle +
+        # AccountRetryNeeded so register_cli hard-recycles and slot-retries.
+        # Must NOT use plain Exception → kind=other (reg_fail, no retry).
+        raise AccountRetryNeeded(
+            "browser_boot: signup_spa_stuck 未找到邮箱表单：页面停在「您正在登录」"
+            "中间态（点击邮箱注册后未挂载输入框）"
         )
     raise Exception("未找到「使用邮箱注册」按钮或邮箱表单未出现")
 

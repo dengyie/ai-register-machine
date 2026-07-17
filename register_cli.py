@@ -483,6 +483,27 @@ def classify_email_stage_failure(msg: str) -> str:
         or "浏览器启动失败" in text
         or "devtoolsactiveport" in low
         or "user data directory is already in use" in low
+        # Pre-email SPA stuck on「您正在登录」after「使用邮箱注册」— browser recycle +
+        # slot retry (not reg_fail/other). Post-profile SSO mid-state uses different
+        # wording (final-page-no-submit) and must NOT match here.
+        or "signup_spa_stuck" in low
+        or (
+            "您正在登录" in text
+            and (
+                "邮箱表单未挂载" in text
+                or "未挂载输入框" in text
+                or "邮箱注册按钮点击后" in text
+                or "未找到邮箱表单" in text
+            )
+        )
+        or (
+            "signing in" in low
+            and (
+                "signup_spa_stuck" in low
+                or "email form" in low
+                or "email input" in low
+            )
+        )
     ):
         return "browser_boot"
     return "other"

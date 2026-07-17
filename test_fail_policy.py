@@ -69,6 +69,26 @@ def test_classify() -> None:
             "Hotmail plus-alias 已禁用（hotmail_allow_plus_alias=false / mode=off）：主邮箱均已消耗",
             "fatal",
         ),
+        (
+            "browser_boot: signup_spa_stuck 邮箱注册按钮点击后停留在「您正在登录」"
+            "中间态，邮箱表单未挂载",
+            "browser_boot",
+        ),
+        (
+            "browser_boot: signup_spa_stuck 未找到邮箱表单：页面停在「您正在登录」"
+            "中间态（点击邮箱注册后未挂载输入框）",
+            "browser_boot",
+        ),
+        (
+            "邮箱注册按钮点击后停留在「您正在登录」中间态，邮箱表单未挂载",
+            "browser_boot",
+        ),
+        (
+            "未找到邮箱表单：页面停在「您正在登录」中间态（点击邮箱注册后未挂载输入框）",
+            "browser_boot",
+        ),
+        # SSO post-submit mid-state must stay other (not browser_boot recycle policy)
+        ("final-page-no-submit:您正在登录 您正在登录 | 返回 返回", "other"),
     ]
     failed = 0
     for msg, expect in cases:

@@ -89,6 +89,25 @@ def test_start_browser_cleans_orphans_on_fail() -> None:
     print("PASS  start_browser orphan + chrome error page + DISPLAY source")
 
 
+def test_signup_spa_stuck_raises_account_retry() -> None:
+    """Pre-email「您正在登录」stickiness must AccountRetryNeeded, not plain Exception."""
+    src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    assert "def click_email_signup_button" in src
+    assert "signup_spa_stuck" in src
+    assert "browser_boot: signup_spa_stuck" in src
+    # Both raise sites must use AccountRetryNeeded with stable prefix.
+    assert src.count("browser_boot: signup_spa_stuck") >= 2
+    bad_plain = (
+        'raise Exception(\n                "邮箱注册按钮点击后停留在「您正在登录」'
+    )
+    bad_plain2 = (
+        'raise Exception(\n            "未找到邮箱表单：页面停在「您正在登录」'
+    )
+    assert bad_plain not in src, "SPA stuck mid-wait still raises plain Exception"
+    assert bad_plain2 not in src, "SPA stuck final still raises plain Exception"
+    print("PASS  signup_spa_stuck raises AccountRetryNeeded")
+
+
 def test_classify_email_stage_browser_boot() -> None:
     sys.path.insert(0, str(ROOT))
     # Load classify without importing full register_cli side effects.
@@ -134,6 +153,37 @@ def test_classify_email_stage_browser_boot() -> None:
     assert classify("The browser connection fails") == "browser_boot"
     assert classify("standalone chromium start failed after 3 attempts: x") == "browser_boot"
     assert classify("浏览器启动失败，已重试4次: x") == "browser_boot"
+    # Pre-email SPA stuck on「您正在登录」must recycle as browser_boot (slot retry).
+    assert (
+        classify(
+            "browser_boot: signup_spa_stuck 邮箱注册按钮点击后停留在「您正在登录」"
+            "中间态，邮箱表单未挂载"
+        )
+        == "browser_boot"
+    )
+    assert (
+        classify(
+            "browser_boot: signup_spa_stuck 未找到邮箱表单：页面停在「您正在登录」"
+            "中间态（点击邮箱注册后未挂载输入框）"
+        )
+        == "browser_boot"
+    )
+    # Legacy plain-Exception wording (pre-fix) still classifies for safety.
+    assert (
+        classify("邮箱注册按钮点击后停留在「您正在登录」中间态，邮箱表单未挂载")
+        == "browser_boot"
+    )
+    assert (
+        classify(
+            "未找到邮箱表单：页面停在「您正在登录」中间态（点击邮箱注册后未挂载输入框）"
+        )
+        == "browser_boot"
+    )
+    # Post-profile SSO mid-state wording must NOT be browser_boot (different path).
+    assert (
+        classify("final-page-no-submit:您正在登录 您正在登录 | 返回 返回")
+        != "browser_boot"
+    )
     assert classify("未收到验证码") == "mail_miss"
     assert classify("未进入资料页") == "progress_fail"
     assert classify("未找到「使用邮箱注册」按钮或邮箱表单未出现") == "other"
@@ -141,7 +191,7 @@ def test_classify_email_stage_browser_boot() -> None:
     assert is_fatal("Turnstile headless 失败且无可用 DISPLAY/xvfb-run") is True
     assert is_fatal("headed 需要 DISPLAY/xvfb-run（当前 Linux DISPLAY 为空）") is True
     assert classify("Turnstile headless 失败且无可用 DISPLAY/xvfb-run") == "fatal"
-    print("PASS  classify browser_boot + DISPLAY fatal")
+    print("PASS  classify browser_boot + signup_spa_stuck + DISPLAY fatal")
 
 
 def test_is_chrome_error_page_unit() -> None:
@@ -402,6 +452,7 @@ def main() -> int:
     test_create_standalone_retries_and_lock()
     test_hard_recycle_cleans_orphans()
     test_start_browser_cleans_orphans_on_fail()
+    test_signup_spa_stuck_raises_account_retry()
     test_classify_email_stage_browser_boot()
     test_is_chrome_error_page_unit()
     test_create_standalone_retries_mocked()
