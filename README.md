@@ -21,6 +21,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | **Monorepo 骨架与分层边界**（canonical） |
 | [docs/ADDING_PROVIDER.md](docs/ADDING_PROVIDER.md) | 如何新增 provider |
 | [docs/LAYOUT.md](docs/LAYOUT.md) | 目录速查 |
+| [docs/DEVELOPED.md](docs/DEVELOPED.md) | 已落地功能一览（历史设计见 `docs/archive/`） |
 | [DISCLAIMER.md](DISCLAIMER.md) | 免责声明 |
 | [SECURITY.md](SECURITY.md) | 密钥与泄露处理 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR |

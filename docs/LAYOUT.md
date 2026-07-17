@@ -10,6 +10,7 @@ See [ARCHITECTURE.md](../ARCHITECTURE.md) for the full map.
 | `providers/_template/` | Copy-me for new products |
 | `apps/` | Human map of CLI/GUI entrypoints |
 | `docs/` | How-to and layout |
+| `docs/DEVELOPED.md` | 已落地功能一览（历史设计见 [`docs/archive/`](archive/)） |
 | `examples/` | Minimal safe samples |
 | `scripts/` | Ops (doctor, remint, setup) |
 | `tests/` | Preferred location for **new** tests |

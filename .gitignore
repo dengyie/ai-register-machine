@@ -56,6 +56,12 @@ providers/*/dist/
 !providers/_template/.env.example
 
 # local live harness ledgers (never commit)
-_live_activation_accounts.txt
+_live_activation_*.txt
+_live_activation_*.log
+_live_activation_*.py
 created_mailboxes.txt
-_live_activation.log
+# local nodes catalog backups (timestamped .bak copies)
+nodes.json.bak.*
+# underscore-prefixed one-off probe scripts (local ops, not for repo)
+scripts/_*
+output/
