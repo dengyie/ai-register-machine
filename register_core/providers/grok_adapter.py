@@ -88,7 +88,8 @@ class GrokProvider:
         if proxy:
             env["PROXY"] = proxy
             # Keep CPA mint on same egress when child does inline mint.
-            env.setdefault("CPA_PROXY", proxy)
+            # Force-set (not setdefault): ambient CPA_PROXY from host must not win.
+            env["CPA_PROXY"] = proxy
         mailbox = None
         mail_meta: dict[str, Any] = {}
         released = False

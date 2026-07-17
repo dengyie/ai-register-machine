@@ -439,16 +439,27 @@ class TestGrokParse(unittest.TestCase):
         """Pipeline inject_attempt_proxy must reach register_cli via PROXY env."""
         provider = GrokProvider(accounts_file="/tmp/x")
         captured: dict = {}
+        want = "http://user:pw@10.0.0.9:9000"
 
         def _capture_run(cmd, cwd=None, env=None, timeout_s=None):  # noqa: ARG001
             captured["env"] = dict(env or {})
             return CmdResult(returncode=1, stdout="fail", stderr="", timed_out=False)
 
-        with patch("register_core.providers.grok_adapter.run_command", side_effect=_capture_run):
-            with patch("register_core.providers.grok_adapter.file_size", return_value=0):
-                provider.register_one(extra={"proxy": "http://user:pw@10.0.0.9:9000"})
-        self.assertEqual(captured["env"].get("PROXY"), "http://user:pw@10.0.0.9:9000")
-        self.assertEqual(captured["env"].get("CPA_PROXY"), "http://user:pw@10.0.0.9:9000")
+        # Isolate from ambient PROXY/CPA_PROXY left by other tests or host env.
+        scrub = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"PROXY", "CPA_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"}
+        }
+        with patch.dict(os.environ, scrub, clear=True):
+            with patch(
+                "register_core.providers.grok_adapter.run_command",
+                side_effect=_capture_run,
+            ):
+                with patch("register_core.providers.grok_adapter.file_size", return_value=0):
+                    provider.register_one(extra={"proxy": want})
+        self.assertEqual(captured.get("env", {}).get("PROXY"), want)
+        self.assertEqual(captured.get("env", {}).get("CPA_PROXY"), want)
 
 
 class TestMimoAdapterMock(unittest.TestCase):
