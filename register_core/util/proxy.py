@@ -667,7 +667,8 @@ def is_proxy_network_failure(
     if ok:
         return False
     kind = (error_kind or "").strip().lower()
-    # Business / mailbox failures must never burn nodes.
+    # Business / product / protocol failures must never burn nodes.
+    # Keep in sync with report_attempt_proxy_result non-proxy set + contracts taxonomy.
     if kind in {
         "mail_miss",
         "captcha",
@@ -675,6 +676,14 @@ def is_proxy_network_failure(
         "fatal",
         "registration_disallowed",
         "disallowed",
+        "unsupported_email",
+        "already_registered",
+        "otp_invalid",
+        "session",
+        "oauth_callback",
+        "token",
+        "other",
+        "provider",
     }:
         return False
     if kind in {"proxy", "network", "egress", "timeout"}:
@@ -764,8 +773,22 @@ def report_attempt_proxy_result(
             info["action"] = "success_clear_per_use_cool"
         return info
 
-    # Business failures: never quarantine; risk gets soft cool only.
-    if kind in {"mail_miss", "captcha", "verify", "fatal"}:
+    # Business / product / protocol failures: never quarantine.
+    # registration_disallowed gets soft cool only (risk signal, not dead proxy).
+    if kind in {
+        "mail_miss",
+        "captcha",
+        "verify",
+        "fatal",
+        "unsupported_email",
+        "already_registered",
+        "otp_invalid",
+        "session",
+        "oauth_callback",
+        "token",
+        "other",
+        "provider",
+    }:
         info["reason"] = "non_proxy_failure"
         return info
 

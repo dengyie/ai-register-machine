@@ -6,13 +6,28 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+# Public error_kind taxonomy for sinks / strategy / ops dashboards.
+# Keep in sync with strategy defaults, proxy quarantine exclusions, and
+# providers/chatgpt/protocol/flow.py step mapping.
 ALLOWED_ERROR_KINDS: frozenset[str] = frozenset(
     {
+        # Mail / OTP delivery
         "mail_miss",
+        # Product / risk engine
         "registration_disallowed",
+        "unsupported_email",
+        "already_registered",
+        # Anti-bot / captcha / sentinel PoW
         "captcha",
+        # Protocol stages
+        "session",
+        "otp_invalid",
+        "oauth_callback",
+        "token",
+        # Infra
         "proxy",
         "network",
+        # Generic / terminal
         "provider",
         "verify",
         "fatal",
@@ -20,15 +35,52 @@ ALLOWED_ERROR_KINDS: frozenset[str] = frozenset(
     }
 )
 
+# Provider-local / historical aliases → public kind.
+_ERROR_KIND_ALIASES: dict[str, str] = {
+    "disallowed": "registration_disallowed",
+    "registration-disallowed": "registration_disallowed",
+    "sentinel": "captcha",
+    "sentinel_fail": "captcha",
+    "pow": "captcha",
+    "otp_bad": "otp_invalid",
+    "bad_otp": "otp_invalid",
+    "invalid_otp": "otp_invalid",
+    "oauth": "oauth_callback",
+    "callback": "oauth_callback",
+    "missing_oauth_callback": "oauth_callback",
+    "refresh": "token",
+    "missing_refresh": "token",
+    "missing_tokens": "token",
+    "oauth_token": "token",
+}
+
 
 def normalize_error_kind(kind: str | None) -> str:
     """Map provider-reported kind into the public taxonomy; unknown → provider."""
-    k = (kind or "").strip().lower()
-    # Historical / shorthand alias used in some product error strings.
-    if k == "disallowed":
-        return "registration_disallowed"
+    k = (kind or "").strip().lower().replace(" ", "_")
+    if not k:
+        return "provider"
     if k in ALLOWED_ERROR_KINDS:
         return k
+    aliased = _ERROR_KIND_ALIASES.get(k)
+    if aliased is not None:
+        return aliased
+    # Prefix soft-match for compound provider tags (e.g. oauth_token_http_400).
+    for prefix, target in (
+        ("registration_disallowed", "registration_disallowed"),
+        ("unsupported_email", "unsupported_email"),
+        ("already_registered", "already_registered"),
+        ("otp_invalid", "otp_invalid"),
+        ("oauth_callback", "oauth_callback"),
+        ("oauth_token", "token"),
+        ("missing_token", "token"),
+        ("sentinel", "captcha"),
+        ("captcha", "captcha"),
+        ("mail_miss", "mail_miss"),
+        ("session", "session"),
+    ):
+        if k == prefix or k.startswith(prefix + "_") or k.startswith(prefix + ":"):
+            return target
     return "provider"
 
 
@@ -115,7 +167,7 @@ class RegisterResult:
     secret: str = ""  # API key / SSO cookie / token — never log full in public
     secret_kind: str = ""  # api_key | sso | refresh_token | none | pending
     error: str = ""
-    error_kind: str = ""  # mail_miss | registration_disallowed | captcha | proxy | network | provider | verify | fatal | other
+    error_kind: str = ""  # see ALLOWED_ERROR_KINDS / normalize_error_kind
     artifacts: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=_utcnow)
 
@@ -175,6 +227,10 @@ def _public_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:
         "email_source",
         "has_id_token",
         "steps",
+        "step_keys",
+        "fail_step",
+        "protocol",
+        "strategy_burn",
         "otp_wait",
         "mail_proxy",
         "register_proxy",
