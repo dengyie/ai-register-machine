@@ -330,6 +330,14 @@ class PlatformRegistrar:
             "status": status,
         }
         self.log(f"authorize status={status} final_url={final_url[:120]}")
+        # OAuth authorize must land on a usable page; non-2xx is not a soft continue.
+        if not (200 <= status < 300):
+            kind = "network" if status >= 500 else "provider"
+            raise ChatGPTRegisterError(
+                f"authorize_http_{status}:{error or final_url[:120]}",
+                kind=kind,
+                step="authorize",
+            )
         return {
             "code_verifier": code_verifier,
             "final_url": final_url,
@@ -363,14 +371,20 @@ class PlatformRegistrar:
             f"{AUTH_BASE}/api/auth/session",
             f"{AUTH_BASE}/api/client_auth_session_dump",
         ]
+        saw_any_response = False
+        last_transport_err = ""
         for url in candidates:
-            request_with_retry(
+            resp, error = request_with_retry(
                 self.session,
                 "get",
                 str(url),
                 headers=headers,
                 allow_redirects=True,
             )
+            if resp is not None:
+                saw_any_response = True
+            elif error:
+                last_transport_err = str(error)[:200]
         has_session = bool(
             cookie_get(self.session, "oai-client-auth-session")
             or cookie_get(self.session, "auth_session")
@@ -378,7 +392,14 @@ class PlatformRegistrar:
         )
         self.log(f"session establish ok={has_session}")
         if not has_session:
-            # Hard gate: no session cookie → subsequent account APIs are noise.
+            # All candidate GETs transport-failed → network (quarantine-eligible).
+            # At least one HTTP response but no cookie → product session gate.
+            if not saw_any_response:
+                raise ChatGPTRegisterError(
+                    f"session_establish_transport:{last_transport_err or 'empty'}",
+                    kind="network",
+                    step="session",
+                )
             raise ChatGPTRegisterError(
                 "session_cookie_missing",
                 kind="session",
@@ -478,7 +499,72 @@ class PlatformRegistrar:
             if resp is None or status >= 500:
                 kind = "network"
             else:
-                kind = "otp_invalid"
+                # Body-aware: wrong/expired code vs captcha/rate-limit/provider noise.
+                detail = ""
+                try:
+                    err_obj = (body or {}).get("error") if isinstance(body, dict) else None
+                    if isinstance(err_obj, dict):
+                        detail = str(
+                            err_obj.get("message")
+                            or err_obj.get("code")
+                            or err_obj.get("type")
+                            or err_obj
+                        )
+                    elif err_obj is not None:
+                        detail = str(err_obj)
+                    else:
+                        detail = str(
+                            (body or {}).get("detail")
+                            or (body or {}).get("message")
+                            or body
+                            or error
+                            or ""
+                        )
+                except Exception:
+                    detail = str(error or body or "")
+                detail_l = detail.lower()
+                if any(
+                    n in detail_l
+                    for n in (
+                        "captcha",
+                        "sentinel",
+                        "challenge",
+                        "turnstile",
+                        "cloudflare",
+                        "cf-challenge",
+                    )
+                ):
+                    kind = "captcha"
+                elif any(
+                    n in detail_l
+                    for n in (
+                        "rate limit",
+                        "rate_limit",
+                        "too many",
+                        "throttl",
+                        "try again later",
+                    )
+                ):
+                    kind = "provider"
+                elif any(
+                    n in detail_l
+                    for n in (
+                        "invalid",
+                        "incorrect",
+                        "wrong code",
+                        "wrong otp",
+                        "expired",
+                        "bad code",
+                        "mismatch",
+                        "verification code",
+                        "one-time",
+                        "otp",
+                        "does not match",
+                    )
+                ) or status in (400, 422):
+                    kind = "otp_invalid"
+                else:
+                    kind = "provider"
             raise ChatGPTRegisterError(
                 f"validate_otp_http_{status}:{error or body}",
                 kind=kind,
@@ -577,8 +663,10 @@ class PlatformRegistrar:
         if consent_url.startswith("/"):
             consent_url = f"{AUTH_BASE}{consent_url}"
         current = consent_url
+        saw_http = False
+        last_transport_err = ""
         for _ in range(12):
-            resp, _err = request_with_retry(
+            resp, err = request_with_retry(
                 self.session,
                 "get",
                 current,
@@ -586,7 +674,16 @@ class PlatformRegistrar:
                 allow_redirects=False,
             )
             if resp is None:
+                last_transport_err = str(err or "empty")[:200]
+                # Pure transport death mid-consent → network (not oauth_callback).
+                if not saw_http:
+                    raise ChatGPTRegisterError(
+                        f"consent_transport:{last_transport_err}",
+                        kind="network",
+                        step="oauth_callback",
+                    )
                 break
+            saw_http = True
             found = _extract_oauth_code(str(getattr(resp, "url", "") or ""))
             if found:
                 return found
@@ -597,29 +694,37 @@ class PlatformRegistrar:
             status = int(getattr(resp, "status_code", 0) or 0)
             if status not in (301, 302, 303, 307, 308) or not loc:
                 # try allow_redirects once
-                resp2, _ = request_with_retry(
+                resp2, err2 = request_with_retry(
                     self.session,
                     "get",
                     current,
                     headers=NAVIGATE_HEADERS,
                     allow_redirects=True,
                 )
-                if resp2 is not None:
-                    found = _extract_oauth_code(str(getattr(resp2, "url", "") or ""))
+                if resp2 is None:
+                    last_transport_err = str(err2 or "empty")[:200]
+                    break
+                found = _extract_oauth_code(str(getattr(resp2, "url", "") or ""))
+                if found:
+                    return found
+                for hist in getattr(resp2, "history", []) or []:
+                    found = _extract_oauth_code(
+                        str(getattr(hist, "headers", {}).get("Location") or "")
+                    )
                     if found:
                         return found
-                    for hist in getattr(resp2, "history", []) or []:
-                        found = _extract_oauth_code(
-                            str(getattr(hist, "headers", {}).get("Location") or "")
-                        )
-                        if found:
-                            return found
                 break
             current = f"{AUTH_BASE}{loc}" if loc.startswith("/") else loc
 
         # workspace select fallback from oai-client-auth-session cookie
         raw = cookie_get(self.session, "oai-client-auth-session")
         if not raw:
+            if last_transport_err and not saw_http:
+                raise ChatGPTRegisterError(
+                    f"consent_transport:{last_transport_err}",
+                    kind="network",
+                    step="oauth_callback",
+                )
             return None
         try:
             first_part = raw.split(".")[0]
@@ -631,7 +736,7 @@ class PlatformRegistrar:
         except Exception:
             return None
         headers = self._accounts_headers(consent_url, "authorize_continue")
-        ws_resp, _ = request_with_retry(
+        ws_resp, ws_err = request_with_retry(
             self.session,
             "post",
             f"{AUTH_BASE}/api/accounts/workspace/select",
@@ -640,7 +745,11 @@ class PlatformRegistrar:
             allow_redirects=False,
         )
         if ws_resp is None:
-            return None
+            raise ChatGPTRegisterError(
+                f"consent_workspace_transport:{ws_err or 'empty'}",
+                kind="network",
+                step="oauth_callback",
+            )
         found = _extract_oauth_code(
             str(getattr(ws_resp, "headers", {}).get("Location") or "")
         )
@@ -663,7 +772,7 @@ class PlatformRegistrar:
             str(ws_data.get("continue_url") or consent_url),
             "authorize_continue",
         )
-        org_resp, _ = request_with_retry(
+        org_resp, org_err = request_with_retry(
             self.session,
             "post",
             f"{AUTH_BASE}/api/accounts/organization/select",
@@ -672,7 +781,11 @@ class PlatformRegistrar:
             allow_redirects=False,
         )
         if org_resp is None:
-            return None
+            raise ChatGPTRegisterError(
+                f"consent_org_transport:{org_err or 'empty'}",
+                kind="network",
+                step="oauth_callback",
+            )
         return _extract_oauth_code(
             str(getattr(org_resp, "headers", {}).get("Location") or "")
         )
@@ -682,7 +795,22 @@ class PlatformRegistrar:
             "callback_url_present": bool(callback_url),
             "callback_url_preview": str(callback_url or "")[:160],
         }
-        params = self._follow_consent_for_code(callback_url)
+        try:
+            params = self._follow_consent_for_code(callback_url)
+        except ChatGPTRegisterError as exc:
+            # Consent transport death surfaces as network (quarantine-eligible).
+            consent_step["ok"] = False
+            consent_step["error"] = str(exc)[:200]
+            consent_step["error_kind"] = exc.kind
+            return RegistrationResult(
+                ok=False,
+                error=str(exc),
+                error_kind=exc.kind or "network",
+                fail_step=exc.step or "oauth_callback",
+                callback_url=callback_url,
+                device_id=self.device_id,
+                steps={"oauth_callback": consent_step},
+            )
         if not params:
             consent_step["ok"] = False
             consent_step["error"] = "missing_oauth_callback"

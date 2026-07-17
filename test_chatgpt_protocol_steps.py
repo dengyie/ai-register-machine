@@ -69,6 +69,30 @@ class TestSessionHardGate(unittest.TestCase):
         self.assertEqual(cm.exception.kind, "session")
         self.assertEqual(cm.exception.step, "session")
 
+    def test_session_all_transport_fail_is_network(self) -> None:
+        """All candidate GETs return None → network, not product session."""
+        reg = PlatformRegistrar(proxy="", log=lambda _m: None)
+        reg.device_id = "dev-test"
+        reg.state = "st"
+        reg.last_authorize = {"final_url": "https://auth.openai.com/u/signup"}
+
+        with (
+            patch.object(reg, "_ensure_sentinel", return_value="tok"),
+            patch(
+                "providers.chatgpt.protocol.flow.request_with_retry",
+                return_value=(None, "connection reset"),
+            ),
+            patch(
+                "providers.chatgpt.protocol.flow.cookie_get",
+                return_value="",
+            ),
+        ):
+            with self.assertRaises(ChatGPTRegisterError) as cm:
+                reg.establish_session()
+        self.assertEqual(cm.exception.kind, "network")
+        self.assertEqual(cm.exception.step, "session")
+        self.assertIn("transport", str(cm.exception))
+
     def test_sentinel_hard_fail_on_accounts_headers(self) -> None:
         reg = PlatformRegistrar(proxy="", log=lambda _m: None)
         reg.device_id = "dev-test"
@@ -165,6 +189,42 @@ class TestStepKinds(unittest.TestCase):
         self.assertEqual(cm.exception.kind, "otp_invalid")
         self.assertEqual(cm.exception.step, "validate_otp")
 
+    def test_validate_otp_captcha_body_is_captcha(self) -> None:
+        reg = PlatformRegistrar(proxy="", log=lambda _m: None)
+        reg.device_id = "dev"
+        with (
+            patch.object(reg, "_accounts_headers", return_value={}),
+            patch(
+                "providers.chatgpt.protocol.flow.request_with_retry",
+                return_value=(
+                    _Resp(403, {"error": {"code": "captcha_required", "message": "solve captcha"}}),
+                    None,
+                ),
+            ),
+        ):
+            with self.assertRaises(ChatGPTRegisterError) as cm:
+                reg.validate_otp("123456")
+        self.assertEqual(cm.exception.kind, "captcha")
+        self.assertEqual(cm.exception.step, "validate_otp")
+
+    def test_validate_otp_rate_limit_is_provider(self) -> None:
+        reg = PlatformRegistrar(proxy="", log=lambda _m: None)
+        reg.device_id = "dev"
+        with (
+            patch.object(reg, "_accounts_headers", return_value={}),
+            patch(
+                "providers.chatgpt.protocol.flow.request_with_retry",
+                return_value=(
+                    _Resp(429, {"error": {"message": "rate limit exceeded"}}),
+                    None,
+                ),
+            ),
+        ):
+            with self.assertRaises(ChatGPTRegisterError) as cm:
+                reg.validate_otp("123456")
+        self.assertEqual(cm.exception.kind, "provider")
+        self.assertEqual(cm.exception.step, "validate_otp")
+
     def test_validate_otp_transport_is_network(self) -> None:
         reg = PlatformRegistrar(proxy="", log=lambda _m: None)
         reg.device_id = "dev"
@@ -200,6 +260,30 @@ class TestStepKinds(unittest.TestCase):
         with patch(
             "providers.chatgpt.protocol.flow.request_with_retry",
             return_value=(None, "connect timeout"),
+        ):
+            with self.assertRaises(ChatGPTRegisterError) as cm:
+                reg.start_authorize("a@b.com")
+        self.assertEqual(cm.exception.kind, "network")
+        self.assertEqual(cm.exception.step, "authorize")
+
+    def test_authorize_http_4xx_is_provider(self) -> None:
+        reg = PlatformRegistrar(proxy="", log=lambda _m: None)
+        reg.device_id = "dev"
+        with patch(
+            "providers.chatgpt.protocol.flow.request_with_retry",
+            return_value=(_Resp(403, {"error": "forbidden"}), None),
+        ):
+            with self.assertRaises(ChatGPTRegisterError) as cm:
+                reg.start_authorize("a@b.com")
+        self.assertEqual(cm.exception.kind, "provider")
+        self.assertEqual(cm.exception.step, "authorize")
+
+    def test_authorize_http_5xx_is_network(self) -> None:
+        reg = PlatformRegistrar(proxy="", log=lambda _m: None)
+        reg.device_id = "dev"
+        with patch(
+            "providers.chatgpt.protocol.flow.request_with_retry",
+            return_value=(_Resp(502, {"error": "bad gateway"}), None),
         ):
             with self.assertRaises(ChatGPTRegisterError) as cm:
                 reg.start_authorize("a@b.com")
@@ -293,6 +377,41 @@ class TestStepKinds(unittest.TestCase):
         self.assertEqual(result.error_kind, "oauth_callback")
         self.assertEqual(result.fail_step, "oauth_callback")
         self.assertIn("oauth_callback", result.steps)
+
+    def test_exchange_tokens_consent_transport_is_network(self) -> None:
+        reg = PlatformRegistrar(proxy="", log=lambda _m: None)
+        reg.device_id = "dev"
+        reg.code_verifier = "v" * 43
+        with patch.object(
+            reg,
+            "_follow_consent_for_code",
+            side_effect=ChatGPTRegisterError(
+                "consent_transport:connection reset",
+                kind="network",
+                step="oauth_callback",
+            ),
+        ):
+            result = reg.exchange_tokens(
+                "https://auth.openai.com/api/accounts/consent?continue=x"
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_kind, "network")
+        self.assertEqual(result.fail_step, "oauth_callback")
+        self.assertIn("oauth_callback", result.steps)
+
+    def test_follow_consent_first_get_none_is_network(self) -> None:
+        reg = PlatformRegistrar(proxy="", log=lambda _m: None)
+        reg.device_id = "dev"
+        with patch(
+            "providers.chatgpt.protocol.flow.request_with_retry",
+            return_value=(None, "proxy timeout"),
+        ):
+            with self.assertRaises(ChatGPTRegisterError) as cm:
+                reg._follow_consent_for_code(
+                    "https://auth.openai.com/api/accounts/consent?continue=x"
+                )
+        self.assertEqual(cm.exception.kind, "network")
+        self.assertEqual(cm.exception.step, "oauth_callback")
 
     def test_exchange_tokens_http_error_is_token(self) -> None:
         reg = PlatformRegistrar(proxy="", log=lambda _m: None)
