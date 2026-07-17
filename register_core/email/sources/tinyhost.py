@@ -21,14 +21,16 @@ BAD_DOMAIN_RE = re.compile(
 )
 OTP_RE = re.compile(r"\b(\d{4,8})\b")
 DEFAULT_BASE = "https://tinyhost.shop"
-# Prefer domains that historically deliver product OTPs (MiMo harden list + OpenAI path).
+# Prefer domains that historically deliver product OTPs (OpenAI/MiMo path).
+# publicvm.com often accepts allocate but never delivers OpenAI OTP → demoted last.
 PREFERRED_DOMAINS = (
-    "publicvm.com",
+    "huychau.online",
     "sewink.my.id",
     "graphiclens.site",
     "kimora.space",
     "sasukiez.shop",
     "nexorabio.pro.vn",
+    "publicvm.com",
 )
 LOCAL_FALLBACK = PREFERRED_DOMAINS
 

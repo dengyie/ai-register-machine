@@ -75,9 +75,13 @@ class ChatGPTProvider:
         self.otp_timeout_s = float(
             os.environ.get("CHATGPT_OTP_TIMEOUT") or otp_timeout_s
         )
-        self.email_domain = (
-            email_domain or os.environ.get("CHATGPT_EMAIL_DOMAIN") or "publicvm.com"
-        ).strip() or None
+        # No hardcoded domain: publicvm.com historically allocates but often never
+        # delivers OpenAI OTP (mail_miss). Prefer env/profile force, else let
+        # tinyhost PREFERRED_DOMAINS pick (huychau.online first). Cloudflare ignores domain.
+        raw_domain = email_domain if email_domain is not None else os.environ.get(
+            "CHATGPT_EMAIL_DOMAIN", ""
+        )
+        self.email_domain = str(raw_domain or "").strip() or None
 
     def register_one(
         self,
