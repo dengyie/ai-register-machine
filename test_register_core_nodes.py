@@ -844,7 +844,7 @@ class TestManager(unittest.TestCase):
         with patch.object(
             health_mod,
             "_http_get",
-            return_value=("<html>denied</html>", 403),
+            return_value=("<html>denied</html>", 403, "urllib"),
         ):
             r = health_mod.probe_reachable(
                 "http://proxy:1", "https://accounts.x.ai/", timeout=2.0
@@ -852,6 +852,7 @@ class TestManager(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertEqual(r["status"], 403)
         self.assertEqual(r["error"], "")
+        self.assertEqual(r["backend"], "urllib")
 
     def test_http_get_urllib_http_error_returns_status(self) -> None:
         """urllib path: HTTPError must return (body, code), not raise into L2."""
@@ -885,11 +886,12 @@ class TestManager(unittest.TestCase):
         with patch("builtins.__import__", side_effect=_import), patch(
             "urllib.request.build_opener", return_value=_Opener()
         ):
-            body, status = health_mod._http_get(
+            body, status, backend = health_mod._http_get(
                 "http://proxy:1", "https://accounts.x.ai/", timeout=2.0
             )
         self.assertEqual(status, 403)
         self.assertIn("nope", body)
+        self.assertEqual(backend, "urllib")
 
     def test_layered_l2_fail_keeps_l1_stamp_and_annotates_error(self) -> None:
         from register_core.nodes import health as health_mod
@@ -990,14 +992,15 @@ class TestManager(unittest.TestCase):
         with patch.object(
             health_mod,
             "_http_get",
-            return_value=('{"ip":"139.162.20.40"}', 200),
+            return_value=('{"ip":"139.162.20.40"}', 200, "curl_cffi"),
         ):
             r = health_mod.probe_egress_ip("http://127.0.0.1:7897", timeout=2.0)
         self.assertTrue(r["ok"])
         self.assertEqual(r["ip"], "139.162.20.40")
         self.assertEqual(r["proxy"], "http://127.0.0.1:7897")
         self.assertEqual(r["error"], "")
-        self.assertIn(r["backend"], ("curl_cffi", "urllib"))
+        # backend is the transport that served the successful GET, not "importable?"
+        self.assertEqual(r["backend"], "curl_cffi")
 
     def test_probe_egress_ip_falls_through_urls(self) -> None:
         from register_core.nodes import health as health_mod
@@ -1007,8 +1010,8 @@ class TestManager(unittest.TestCase):
         def fake_get(proxy, url, *, timeout=15.0):
             calls.append(url)
             if "ipify" in url:
-                return ("", 502)
-            return ("8.8.8.8\n", 200)
+                return ("", 502, "curl_cffi")
+            return ("8.8.8.8\n", 200, "urllib")
 
         with patch.object(health_mod, "_http_get", side_effect=fake_get):
             r = health_mod.probe_egress_ip(
@@ -1023,6 +1026,7 @@ class TestManager(unittest.TestCase):
         self.assertEqual(r["ip"], "8.8.8.8")
         self.assertEqual(len(calls), 2)
         self.assertIn("ifconfig.me", r["url"])
+        self.assertEqual(r["backend"], "urllib")
 
     def test_probe_egress_ip_all_fail(self) -> None:
         from register_core.nodes import health as health_mod
@@ -1036,6 +1040,7 @@ class TestManager(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(r["ip"], "")
         self.assertIn("boom", r["error"])
+        self.assertEqual(r["backend"], "")
 
 
 if __name__ == "__main__":

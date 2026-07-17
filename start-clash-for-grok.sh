@@ -8,9 +8,10 @@
 #   GROK_NODE     selector pin after start (default GVPS-AnyTLS-googlevps)
 #   CLASH_API     default http://127.0.0.1:9090
 #
-# Pins GLOBAL / PROXY / 🎯Grok注册 / 🔰ChatGPT to GROK_NODE (same set as
-# scripts/probe_clash_nodes.py). After start, prefer scripts/check_clash_egress.py
-# over bare `curl -x` for public IP (pxed system curl can false-report CN).
+# Pins GLOBAL / PROXY / 🎯Grok注册 / ♻️Grok优选 / 🔰ChatGPT to GROK_NODE
+# (aligned with scripts/probe_clash_nodes.py REGISTER_GROUPS + GLOBAL).
+# After start, prefer scripts/check_clash_egress.py over bare `curl -x` for
+# public IP (pxed system curl can false-report CN).
 set -u
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
 
@@ -63,12 +64,14 @@ for i in $(seq 1 20); do
         "${API}/proxies/$g" -d "{\"name\":\"$NODE\"}" -o /dev/null || true
     done
     for gpath in $(
-      python3 -c "import urllib.parse; print(urllib.parse.quote('🎯Grok注册')); print(urllib.parse.quote('🔰ChatGPT'))"
+      python3 -c "import urllib.parse
+for name in ('🎯Grok注册', '♻️Grok优选', '🔰ChatGPT'):
+    print(urllib.parse.quote(name))"
     ); do
       curl -q -sS -X PUT -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' \
         "${API}/proxies/$gpath" -d "{\"name\":\"$NODE\"}" -o /dev/null || true
     done
-    echo "mihomo up mixed-port=7897 cfg=$(basename "$CFG") node=$NODE groups=GLOBAL,PROXY,🎯Grok注册,🔰ChatGPT"
+    echo "mihomo up mixed-port=7897 cfg=$(basename "$CFG") node=$NODE groups=GLOBAL,PROXY,🎯Grok注册,♻️Grok优选,🔰ChatGPT"
     exit 0
   fi
 done

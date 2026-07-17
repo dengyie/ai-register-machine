@@ -396,7 +396,8 @@ def main() -> int:
     if not pick:
         pick = preferred_first[0] if preferred_first else (healthy[0] if healthy else "")
     if pick:
-        for g in ("GLOBAL", "PROXY", "🎯Grok注册", "🔰ChatGPT"):
+        # GLOBAL + every REGISTER_GROUPS selector (incl. ♻️Grok优选 / 🔰ChatGPT).
+        for g in ("GLOBAL",) + tuple(REGISTER_GROUPS):
             put_group_now(secret, g, pick)
     else:
         print("ERROR: no healthy nodes — not changing selection")

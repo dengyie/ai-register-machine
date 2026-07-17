@@ -72,10 +72,20 @@ if "${NODE}" not in d.get("proxies", {}):
     raise SystemExit(2)
 PY
 
-# Pin same register groups as start-clash / probe_clash_nodes.
-GPATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('🎯Grok注册'))")
-CPATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('🔰ChatGPT'))")
-for g in GLOBAL PROXY "$GPATH" "$CPATH"; do
+# Pin same register groups as start-clash / probe_clash_nodes (GLOBAL + REGISTER_GROUPS).
+mapfile -t PIN_GROUPS < <(
+  python3 - <<'PY'
+import urllib.parse
+print("GLOBAL")
+for name in ("🎯Grok注册", "♻️Grok优选", "PROXY", "🔰ChatGPT"):
+    # ASCII groups unquoted; emoji groups URL-encoded for controller path.
+    if all(ord(c) < 128 for c in name):
+        print(name)
+    else:
+        print(urllib.parse.quote(name))
+PY
+)
+for g in "${PIN_GROUPS[@]}"; do
   code=$(curl --noproxy '*' -sS -o /tmp/sel.json -w "%{http_code}" \
     -X PUT -H "Authorization: Bearer $SECRET" -H "Content-Type: application/json" \
     "http://127.0.0.1:9090/proxies/$g" \
@@ -83,7 +93,7 @@ for g in GLOBAL PROXY "$GPATH" "$CPATH"; do
   echo "select $g -> $code $(cat /tmp/sel.json 2>/dev/null || true)"
 done
 
-for g in GLOBAL PROXY "$GPATH" "$CPATH"; do
+for g in "${PIN_GROUPS[@]}"; do
   now=$(curl --noproxy '*' -sS -H "Authorization: Bearer $SECRET" \
     "http://127.0.0.1:9090/proxies/$g" | python3 -c "import sys,json; print(json.load(sys.stdin).get('now'))")
   echo "group=$g now=$now"
@@ -101,11 +111,11 @@ if [[ -f "$EGRESS_CHECK" ]]; then
     exit 2
   }
 else
-  # Inline fallback when script not yet scp'd: same stack as health.probe_egress_ip
-  "$PY" - <<'PY' || exit 2
+  # Inline fallback: same stack as health.probe_egress_ip; prefer monorepo ROOT.
+  "$PY" - <<PY || exit 2
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path("/personal/grok-register")))
+sys.path.insert(0, str(Path(${ROOT@Q})))
 from register_core.nodes.health import probe_egress_ip
 r = probe_egress_ip("http://127.0.0.1:7897", timeout=25.0)
 if r.get("ok"):
@@ -116,11 +126,23 @@ raise SystemExit(2)
 PY
 fi
 
-# Connectivity probes may still use curl for HTTP status only (not for IP identity).
-echo -n "accounts.x.ai "
-curl --noproxy '*' -sS -x http://127.0.0.1:7897 --max-time 30 -o /dev/null \
-  -w "%{http_code} time=%{time_total}\n" https://accounts.x.ai/ || true
-echo -n "cli-chat-proxy "
-curl --noproxy '*' -sS -x http://127.0.0.1:7897 --max-time 30 -o /dev/null \
-  -w "%{http_code} time=%{time_total}\n" https://cli-chat-proxy.grok.com/v1/models || true
-echo "SWITCH_OK node=$NODE"
+# Connectivity via same Python HTTP stack as L1/egress (not system curl -x).
+"$PY" - <<PY
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(${ROOT@Q})))
+from register_core.nodes.health import _http_get
+
+targets = (
+    ("accounts.x.ai", "https://accounts.x.ai/"),
+    ("cli-chat-proxy", "https://cli-chat-proxy.grok.com/v1/models"),
+)
+proxy = "http://127.0.0.1:7897"
+for label, url in targets:
+    try:
+        _body, status, backend = _http_get(proxy, url, timeout=30.0)
+        print(f"{label} status={status} backend={backend}")
+    except Exception as exc:
+        print(f"{label} FAIL {type(exc).__name__}: {exc}", file=sys.stderr)
+print("SWITCH_OK node=${NODE}")
+PY

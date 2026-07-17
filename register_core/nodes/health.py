@@ -34,7 +34,7 @@ def probe_node(
     err = ""
     status: int | None = None
     try:
-        body, status = _http_get(node.url, probe_url, timeout=timeout)
+        body, status, _backend = _http_get(node.url, probe_url, timeout=timeout)
         if status is not None and 200 <= int(status) < 300:
             ok = True
             ip = _extract_ip(body)
@@ -81,8 +81,9 @@ def probe_reachable(
     ok = False
     err = ""
     status: int | None = None
+    backend = ""
     try:
-        _body, status = _http_get(proxy_url, target_url, timeout=timeout)
+        _body, status, backend = _http_get(proxy_url, target_url, timeout=timeout)
         # Transport success: we received an HTTP status line (any code).
         if status is not None:
             ok = True
@@ -97,6 +98,7 @@ def probe_reachable(
         "ms": ms,
         "error": "" if ok else err,
         "target": target_url,
+        "backend": backend,
     }
 
 
@@ -165,14 +167,20 @@ def probe_node_layered(
     return result
 
 
-def _http_get(proxy: str, url: str, *, timeout: float) -> tuple[str, int]:
+def _http_get(proxy: str, url: str, *, timeout: float) -> tuple[str, int, str]:
+    """GET via curl_cffi when importable, else urllib.
+
+    Returns ``(body, status, backend)`` where backend is the stack that actually
+    performed the request (``curl_cffi`` or ``urllib``). Callers that only care
+    about body/status may ignore the third field.
+    """
     proxy = (proxy or "").strip()
     # Prefer curl_cffi — same stack as ChatGPT provider.
     try:
         from curl_cffi import requests as creq
 
         r = creq.get(url, proxy=proxy or None, impersonate="chrome", timeout=timeout)
-        return (r.text or ""), int(r.status_code)
+        return (r.text or ""), int(r.status_code), "curl_cffi"
     except ImportError:
         pass
 
@@ -186,7 +194,7 @@ def _http_get(proxy: str, url: str, *, timeout: float) -> tuple[str, int]:
     req = urllib.request.Request(url, headers={"User-Agent": "register-machine-node-probe/1.0"})
     try:
         with opener.open(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", "replace"), int(resp.status)
+            return resp.read().decode("utf-8", "replace"), int(resp.status), "urllib"
     except urllib.error.HTTPError as e:
         # L2 contract: any HTTP status = transport OK (match curl_cffi).
         # HTTPError is a valid response with .code; do not raise into probe_reachable.
@@ -194,7 +202,7 @@ def _http_get(proxy: str, url: str, *, timeout: float) -> tuple[str, int]:
             body = e.read().decode("utf-8", "replace") if e.fp is not None else ""
         except Exception:
             body = ""
-        return body, int(e.code)
+        return body, int(e.code), "urllib"
 
 
 def _extract_ip(body: str) -> str:
@@ -244,10 +252,12 @@ def probe_egress_ip(
     t0 = time.time()
     errors: list[str] = []
     last_status: int | None = None
+    last_backend = ""
     for url in candidates:
         try:
-            body, status = _http_get(proxy, url, timeout=timeout)
+            body, status, backend = _http_get(proxy, url, timeout=timeout)
             last_status = status
+            last_backend = backend or last_backend
             if status is None or not (200 <= int(status) < 300):
                 errors.append(f"{url}: http_status={status}")
                 continue
@@ -264,7 +274,8 @@ def probe_egress_ip(
                 "url": url,
                 "proxy": proxy,
                 "error": "",
-                "backend": _egress_http_backend_label(),
+                # Actual transport that served the successful GET (not "importable?").
+                "backend": backend,
             }
         except Exception as exc:
             errors.append(f"{url}: {type(exc).__name__}: {exc}"[:160])
@@ -277,14 +288,5 @@ def probe_egress_ip(
         "url": candidates[0] if candidates else "",
         "proxy": proxy,
         "error": ("; ".join(errors) or "egress_ip_failed")[:300],
-        "backend": _egress_http_backend_label(),
+        "backend": last_backend,
     }
-
-
-def _egress_http_backend_label() -> str:
-    try:
-        import curl_cffi  # noqa: F401
-
-        return "curl_cffi"
-    except ImportError:
-        return "urllib"
