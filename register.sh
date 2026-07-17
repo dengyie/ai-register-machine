@@ -140,11 +140,45 @@ case "$cmd" in
   mimo|xiaomi|mimo-tts)
     COUNT="${1:-1}"
     export COUNT
+    # migrate milestone A: production entry → register_core Pipeline (mimo_adapter
+    # shell-out to providers/mimo Node runner, which self-handles clash/xvfb/dp).
+    # MIMO_LEGACY=1 rolls back to the env-only Node runner loop (no Pipeline shell).
+    if [[ "${MIMO_LEGACY:-0}" != "1" ]]; then
+      if [[ -d "$ROOT/.venv" && -x "$ROOT/.venv/bin/python" ]]; then
+        _PY="$ROOT/.venv/bin/python"
+      else
+        _PY="${PYTHON:-python3}"
+      fi
+      exec "$_PY" -m register_core run \
+        --profile "$ROOT/profiles/mimo-tinyhost.example.yaml" \
+        -n "$COUNT"
+    fi
     exec bash "$ROOT/providers/mimo/run-register.sh" "$COUNT"
     ;;
   chatgpt|openai|openai-platform)
     COUNT="${1:-1}"
     export COUNT
+    # migrate milestone A: production entry → register_core profile path.
+    # providers/chatgpt/run-register.sh already drove register_core via env flags;
+    # collapse to profile-declared egress/mailbox/strategy/verify/sink + env overrides.
+    # CHATGPT_LEGACY=1 rolls back to the env-driven providers/chatgpt/run-register.sh.
+    if [[ "${CHATGPT_LEGACY:-0}" != "1" ]]; then
+      if [[ -d "$ROOT/.venv" && -x "$ROOT/.venv/bin/python" ]]; then
+        _PY="$ROOT/.venv/bin/python"
+      else
+        _PY="${PYTHON:-python3}"
+      fi
+      _ARGS=(
+        -m register_core run
+        --profile "$ROOT/profiles/chatgpt-tinyhost.example.yaml"
+        -n "$COUNT"
+        --sink "${CHATGPT_SINK:-$ROOT/providers/chatgpt/output/pipeline.jsonl}"
+      )
+      [[ -n "${REGISTER_EGRESS:-}" ]] && _ARGS+=(--egress "$REGISTER_EGRESS")
+      [[ -n "${CHATGPT_PROXY:-}" ]] && _ARGS+=(--proxy "$CHATGPT_PROXY")
+      [[ -n "${CHATGPT_PROXY_LIST:-}" ]] && _ARGS+=(--proxy-list "$CHATGPT_PROXY_LIST")
+      exec "$_PY" "${_ARGS[@]}"
+    fi
     exec bash "$ROOT/providers/chatgpt/run-register.sh" "$COUNT"
     ;;
   core|framework)
