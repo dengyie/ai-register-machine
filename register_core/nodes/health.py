@@ -4,6 +4,10 @@ Layers:
   L1 (probe_node / DEFAULT_PROBE_URL): require HTTP 2xx; mutates catalog last_ok.
   L2 (probe_reachable / business URL): any HTTP status = transport success; no stamp.
   L1∧L2 (probe_node_layered): registration pool gate when target domains are known.
+
+Ops:
+  probe_egress_ip — authoritative public IP via curl_cffi→urllib. Prefer over bare
+  ``curl -x`` on Bohrium/pxed (system curl can mis-report host CN egress).
 """
 
 from __future__ import annotations
@@ -209,3 +213,78 @@ def _extract_ip(body: str) -> str:
     if text and all(c.isdigit() or c == "." or c == ":" for c in text[:64]):
         return text.split()[0][:64]
     return ""
+
+
+# Authoritative public-IP check for Clash mixed-port / HTTP proxies.
+# Prefer this over bare `curl -x` on Bohrium/pxed hosts: system curl can mis-report
+# host CN egress (e.g. 39.98.70.173) even when mihomo leaf is overseas and delay is green.
+DEFAULT_EGRESS_IP_URLS: tuple[str, ...] = (
+    "https://api.ipify.org?format=json",
+    "https://ifconfig.me/ip",
+    "https://ipinfo.io/ip",
+)
+
+
+def probe_egress_ip(
+    proxy: str = "",
+    *,
+    timeout: float = 15.0,
+    urls: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Return public egress IP via curl_cffi → urllib (same stack as L1 probes).
+
+    Does **not** mutate Node catalog. Safe for ops scripts (Clash 7897 smoke,
+    leaf switch verification). ``ok`` is True only when a parseable IP is returned.
+    """
+    proxy = (proxy or "").strip()
+    candidates = [str(u).strip() for u in (urls or DEFAULT_EGRESS_IP_URLS) if str(u).strip()]
+    if not candidates:
+        candidates = list(DEFAULT_EGRESS_IP_URLS)
+
+    t0 = time.time()
+    errors: list[str] = []
+    last_status: int | None = None
+    for url in candidates:
+        try:
+            body, status = _http_get(proxy, url, timeout=timeout)
+            last_status = status
+            if status is None or not (200 <= int(status) < 300):
+                errors.append(f"{url}: http_status={status}")
+                continue
+            ip = _extract_ip(body)
+            if not ip:
+                errors.append(f"{url}: no_ip body={body[:80]!r}")
+                continue
+            ms = int((time.time() - t0) * 1000)
+            return {
+                "ok": True,
+                "ip": ip,
+                "ms": ms,
+                "status": int(status),
+                "url": url,
+                "proxy": proxy,
+                "error": "",
+                "backend": _egress_http_backend_label(),
+            }
+        except Exception as exc:
+            errors.append(f"{url}: {type(exc).__name__}: {exc}"[:160])
+    ms = int((time.time() - t0) * 1000)
+    return {
+        "ok": False,
+        "ip": "",
+        "ms": ms,
+        "status": last_status,
+        "url": candidates[0] if candidates else "",
+        "proxy": proxy,
+        "error": ("; ".join(errors) or "egress_ip_failed")[:300],
+        "backend": _egress_http_backend_label(),
+    }
+
+
+def _egress_http_backend_label() -> str:
+    try:
+        import curl_cffi  # noqa: F401
+
+        return "curl_cffi"
+    except ImportError:
+        return "urllib"

@@ -6,6 +6,7 @@
 # Do not mask with `| tee` alone — use PIPESTATUS[0] for the python/xvfb side.
 #
 # Grok production egress (pxed): Clash mixed-port :7897 after preflight-clash-nodes.sh.
+# Authoritative public IP: scripts/check_clash_egress.py (not bare curl -x on Bohrium/pxed).
 # Monorepo nodes.json list|auto is a separate backend — see ARCHITECTURE.md.
 set -u
 cd "$(dirname "$0")"

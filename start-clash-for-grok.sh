@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start (or restart) project mihomo for Grok register mixed-port egress.
+# Start (or restart) project mihomo for Grok/ChatGPT register mixed-port egress.
 # Default layout (pxed): CLASH_DIR=/personal/clash, mixed-port 7897, API 9090.
 #
 # Env:
@@ -7,6 +7,10 @@
 #   GROK_CONFIG   preferred config path (mac-merged → mac-sync → grok-register)
 #   GROK_NODE     selector pin after start (default GVPS-AnyTLS-googlevps)
 #   CLASH_API     default http://127.0.0.1:9090
+#
+# Pins GLOBAL / PROXY / 🎯Grok注册 / 🔰ChatGPT to GROK_NODE (same set as
+# scripts/probe_clash_nodes.py). After start, prefer scripts/check_clash_egress.py
+# over bare `curl -x` for public IP (pxed system curl can false-report CN).
 set -u
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
 
@@ -53,14 +57,18 @@ setsid "$BIN" -d "$DIR" -f "$DIR/config.yaml" >>"$LOG" 2>&1 </dev/null &
 for i in $(seq 1 20); do
   sleep 1
   if netstat -tlnp 2>/dev/null | grep -q '127.0.0.1:7897.*mihomo' || ss -tlnp 2>/dev/null | grep -q '127.0.0.1:7897'; then
+    # Pin register groups (ASCII + URL-encoded emoji selectors).
     for g in GLOBAL PROXY; do
       curl -q -sS -X PUT -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' \
         "${API}/proxies/$g" -d "{\"name\":\"$NODE\"}" -o /dev/null || true
     done
-    GPATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('🎯Grok注册'))")
-    curl -q -sS -X PUT -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' \
-      "${API}/proxies/$GPATH" -d "{\"name\":\"$NODE\"}" -o /dev/null || true
-    echo "mihomo up mixed-port=7897 cfg=$(basename "$CFG") node=$NODE"
+    for gpath in $(
+      python3 -c "import urllib.parse; print(urllib.parse.quote('🎯Grok注册')); print(urllib.parse.quote('🔰ChatGPT'))"
+    ); do
+      curl -q -sS -X PUT -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' \
+        "${API}/proxies/$gpath" -d "{\"name\":\"$NODE\"}" -o /dev/null || true
+    done
+    echo "mihomo up mixed-port=7897 cfg=$(basename "$CFG") node=$NODE groups=GLOBAL,PROXY,🎯Grok注册,🔰ChatGPT"
     exit 0
   fi
 done

@@ -90,6 +90,8 @@ pipeline.run (egress=list|auto)
 | **L1** | `https://api.ipify.org?format=json` | HTTP 2xx | mutates `last_ok` |
 | **L2** | provider business URL(s) | any HTTP status (transport) | filter-only; does not hard-quarantine on L2 miss |
 
+**Clash mixed-port egress IP (ops):** on Bohrium/pxed, bare `curl -x http://127.0.0.1:7897 https://api.ipify.org` can false-report the **host CN IP** even when the mihomo leaf is overseas and delay is green. Authoritative check is `register_core.nodes.health.probe_egress_ip` / `scripts/check_clash_egress.py` (curl_cffi → urllib, same stack as L1). Do not gate leaf selection on system-curl IP alone.
+
 Default L2 map: `grok`/`xai` → `accounts.x.ai`; `chatgpt`/`openai` → `auth.openai.com`; `mimo`/`xiaomi`/`mimo-tts` → `api.xiaomimimo.com`. Unknown provider → L1-only (legacy).
 
 | Env | Default | Meaning |

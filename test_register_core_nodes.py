@@ -984,6 +984,59 @@ class TestManager(unittest.TestCase):
             # clean L1 (c) → unprobed (b) → l2_miss (a)
             self.assertEqual(order, ["c", "b", "a"])
 
+    def test_probe_egress_ip_ok_parses_json(self) -> None:
+        from register_core.nodes import health as health_mod
+
+        with patch.object(
+            health_mod,
+            "_http_get",
+            return_value=('{"ip":"139.162.20.40"}', 200),
+        ):
+            r = health_mod.probe_egress_ip("http://127.0.0.1:7897", timeout=2.0)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["ip"], "139.162.20.40")
+        self.assertEqual(r["proxy"], "http://127.0.0.1:7897")
+        self.assertEqual(r["error"], "")
+        self.assertIn(r["backend"], ("curl_cffi", "urllib"))
+
+    def test_probe_egress_ip_falls_through_urls(self) -> None:
+        from register_core.nodes import health as health_mod
+
+        calls: list[str] = []
+
+        def fake_get(proxy, url, *, timeout=15.0):
+            calls.append(url)
+            if "ipify" in url:
+                return ("", 502)
+            return ("8.8.8.8\n", 200)
+
+        with patch.object(health_mod, "_http_get", side_effect=fake_get):
+            r = health_mod.probe_egress_ip(
+                "http://p:1",
+                timeout=2.0,
+                urls=(
+                    "https://api.ipify.org?format=json",
+                    "https://ifconfig.me/ip",
+                ),
+            )
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["ip"], "8.8.8.8")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("ifconfig.me", r["url"])
+
+    def test_probe_egress_ip_all_fail(self) -> None:
+        from register_core.nodes import health as health_mod
+
+        with patch.object(
+            health_mod,
+            "_http_get",
+            side_effect=RuntimeError("boom"),
+        ):
+            r = health_mod.probe_egress_ip("", timeout=1.0, urls=("https://x/",))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["ip"], "")
+        self.assertIn("boom", r["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
