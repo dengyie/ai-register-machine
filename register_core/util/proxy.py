@@ -669,6 +669,9 @@ def is_proxy_network_failure(
     kind = (error_kind or "").strip().lower()
     # Business / product / protocol failures must never burn nodes.
     # Keep in sync with report_attempt_proxy_result non-proxy set + contracts taxonomy.
+    # Business / product / protocol kinds never quarantine.
+    # Intentionally EXCLUDE generic "provider"/"other": those often wrap
+    # transport exhaustion from older adapters; fall through to text markers.
     if kind in {
         "mail_miss",
         "captcha",
@@ -682,8 +685,6 @@ def is_proxy_network_failure(
         "session",
         "oauth_callback",
         "token",
-        "other",
-        "provider",
     }:
         return False
     if kind in {"proxy", "network", "egress", "timeout"}:
@@ -775,6 +776,7 @@ def report_attempt_proxy_result(
 
     # Business / product / protocol failures: never quarantine.
     # registration_disallowed gets soft cool only (risk signal, not dead proxy).
+    # Generic "provider"/"other" are NOT listed: let network_fail + text markers decide.
     if kind in {
         "mail_miss",
         "captcha",
@@ -786,8 +788,6 @@ def report_attempt_proxy_result(
         "session",
         "oauth_callback",
         "token",
-        "other",
-        "provider",
     }:
         info["reason"] = "non_proxy_failure"
         return info

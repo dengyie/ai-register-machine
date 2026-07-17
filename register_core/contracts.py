@@ -65,7 +65,9 @@ def normalize_error_kind(kind: str | None) -> str:
     aliased = _ERROR_KIND_ALIASES.get(k)
     if aliased is not None:
         return aliased
-    # Prefix soft-match for compound provider tags (e.g. oauth_token_http_400).
+    # Product/protocol prefixes first (including captcha:solve_timeout, mail_miss:timeout).
+    # Session: only known product compounds — bare "session_*" is intentionally absent
+    # so session_timeout_network / session_proxy_error fall through to transport.
     for prefix, target in (
         ("registration_disallowed", "registration_disallowed"),
         ("unsupported_email", "unsupported_email"),
@@ -77,10 +79,36 @@ def normalize_error_kind(kind: str | None) -> str:
         ("sentinel", "captcha"),
         ("captcha", "captcha"),
         ("mail_miss", "mail_miss"),
-        ("session", "session"),
+        ("session_cookie", "session"),
+        ("session_missing", "session"),
+        ("session_establish", "session"),
     ):
         if k == prefix or k.startswith(prefix + "_") or k.startswith(prefix + ":"):
             return target
+    # Transport keywords next: compounds like session_timeout_network quarantine correctly.
+    for net_token in (
+        "network",
+        "proxy",
+        "timeout",
+        "timed_out",
+        "connection",
+        "connect_error",
+        "econn",
+        "socket",
+        "dns",
+        "ssl",
+        "tls",
+        "reset",
+        "refused",
+        "unreachable",
+    ):
+        if net_token in k:
+            if "proxy" in k or k.startswith("proxy"):
+                return "proxy"
+            return "network"
+    # Exact / bare session tags (session, session:foo)
+    if k == "session" or k.startswith("session:"):
+        return "session"
     return "provider"
 
 

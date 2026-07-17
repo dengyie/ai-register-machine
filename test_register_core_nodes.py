@@ -836,6 +836,36 @@ class TestManager(unittest.TestCase):
                 error_kind="other",
             )
         )
+        # Generic provider/other no longer hard-exclude: markers can quarantine.
+        self.assertTrue(
+            core_proxy.is_proxy_network_failure(
+                ok=False,
+                error="connection timeout via proxy",
+                error_kind="provider",
+            )
+        )
+        self.assertTrue(
+            core_proxy.is_proxy_network_failure(
+                ok=False,
+                error="proxy connection refused",
+                error_kind="other",
+            )
+        )
+        # Explicit product kinds still never quarantine.
+        self.assertFalse(
+            core_proxy.is_proxy_network_failure(
+                ok=False,
+                error="connection timeout",
+                error_kind="session",
+            )
+        )
+        self.assertFalse(
+            core_proxy.is_proxy_network_failure(
+                ok=False,
+                error="connection timeout",
+                error_kind="token",
+            )
+        )
 
     def test_probe_reachable_http_error_is_transport_ok(self) -> None:
         """Any HTTP status (incl. 4xx/5xx) must count as L2 transport success."""

@@ -72,12 +72,23 @@ class TestErrorKinds(unittest.TestCase):
         self.assertEqual(normalize_error_kind("sentinel_challenge_fail"), "captcha")
         self.assertEqual(normalize_error_kind("captcha:solve_timeout"), "captcha")
         self.assertEqual(normalize_error_kind("session_cookie_missing"), "session")
+        self.assertEqual(normalize_error_kind("session_missing_cookie"), "session")
+        self.assertEqual(normalize_error_kind("session_establish_failed"), "session")
+        self.assertEqual(normalize_error_kind("session:cookie"), "session")
         self.assertEqual(normalize_error_kind("otp_invalid_http_400"), "otp_invalid")
         self.assertEqual(normalize_error_kind("registration_disallowed_http_400"), "registration_disallowed")
         self.assertEqual(normalize_error_kind("already_registered_409"), "already_registered")
         self.assertEqual(normalize_error_kind("unsupported_email_domain"), "unsupported_email")
         self.assertEqual(normalize_error_kind("oauth_callback_missing"), "oauth_callback")
         self.assertEqual(normalize_error_kind("mail_miss:timeout"), "mail_miss")
+
+    def test_normalize_network_beats_session_prefix(self) -> None:
+        """session_* must not swallow transport compounds into kind=session."""
+        self.assertEqual(normalize_error_kind("session_timeout_network"), "network")
+        self.assertEqual(normalize_error_kind("session_proxy_error"), "proxy")
+        self.assertEqual(normalize_error_kind("session_connection_reset"), "network")
+        # Bare session still product kind
+        self.assertEqual(normalize_error_kind("session"), "session")
 
 
 if __name__ == "__main__":

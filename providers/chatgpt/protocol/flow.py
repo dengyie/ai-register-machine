@@ -317,7 +317,7 @@ class PlatformRegistrar:
         if resp is None:
             raise ChatGPTRegisterError(
                 error or "authorize_request_failed",
-                kind="provider",
+                kind="network",
                 step="authorize",
             )
         status = int(getattr(resp, "status_code", 0) or 0)
@@ -403,11 +403,29 @@ class PlatformRegistrar:
         ok = resp is not None and 200 <= status < 300
         self.log(f"register_user status={status} ok={ok}")
         if not ok:
+            if resp is None or status >= 500:
+                raise ChatGPTRegisterError(
+                    f"register_user_http_{status}:{error or body}",
+                    kind="network",
+                    step="register_user",
+                )
             detail = str(body.get("error") or body.get("detail") or error or "")[:200]
             detail_l = detail.lower()
             kind = "provider"
-            # 409 / already-exists signals are product identity collisions, not protocol bugs.
-            if status == 409 or "already" in detail_l or "exists" in detail_l:
+            # Identity collision: HTTP 409 or explicit already-registered phrasing.
+            # Avoid bare "exists"/"already" alone — those appear in unrelated API text.
+            if status == 409 or any(
+                needle in detail_l
+                for needle in (
+                    "already registered",
+                    "already exists",
+                    "user already",
+                    "email already",
+                    "account already",
+                    "username already",
+                    "already_registered",
+                )
+            ):
                 kind = "already_registered"
             raise ChatGPTRegisterError(
                 f"register_user_http_{status}:{detail}",
@@ -431,9 +449,10 @@ class PlatformRegistrar:
         ok = resp is not None and status in (200, 302)
         self.log(f"send_otp status={status} ok={ok}")
         if not ok:
+            kind = "network" if (resp is None or status >= 500) else "provider"
             raise ChatGPTRegisterError(
                 f"send_otp_http_{status}:{error}",
-                kind="provider",
+                kind=kind,
                 step="send_otp",
             )
         return {"ok": True, "status": status, "json": response_json(resp)}
@@ -455,9 +474,14 @@ class PlatformRegistrar:
         ok = resp is not None and 200 <= status < 300
         self.log(f"validate_otp status={status} ok={ok}")
         if not ok:
+            # Transport / upstream 5xx is not a bad OTP code.
+            if resp is None or status >= 500:
+                kind = "network"
+            else:
+                kind = "otp_invalid"
             raise ChatGPTRegisterError(
                 f"validate_otp_http_{status}:{error or body}",
-                kind="otp_invalid",
+                kind=kind,
                 step="validate_otp",
             )
         return {"ok": True, "status": status, "json": body}
@@ -514,13 +538,17 @@ class PlatformRegistrar:
                 code = str(((body or {}).get("error") or {}).get("code") or "")
             except Exception:
                 code = ""
-            kind = "provider"
             detail_blob = body or error or raw_text or ""
-            if code == "registration_disallowed" or "registration_disallowed" in str(
+            # Transport exhaustion / 5xx before risk body → network (quarantine-eligible).
+            if resp is None or (status >= 500 and not code):
+                kind = "network"
+            elif code == "registration_disallowed" or "registration_disallowed" in str(
                 detail_blob
             ):
                 # Risk engine block (IP / domain / device reputation) — not a protocol bug.
                 kind = "registration_disallowed"
+            else:
+                kind = "provider"
             # Include truncated body for risk-engine diagnosis (no secrets here).
             detail = code or error or body or raw_text or "unknown"
             if isinstance(detail, dict):
@@ -698,7 +726,7 @@ class PlatformRegistrar:
             return RegistrationResult(
                 ok=False,
                 error=f"oauth_token_failed:{error}",
-                error_kind="token",
+                error_kind="network",
                 fail_step="token",
                 callback_url=callback_url,
                 device_id=self.device_id,
@@ -709,10 +737,12 @@ class PlatformRegistrar:
         token_step["status"] = status
         if status != 200:
             token_step["ok"] = False
+            # Upstream 5xx during token POST is transport/edge, not bad grant body.
+            err_kind = "network" if status >= 500 else "token"
             return RegistrationResult(
                 ok=False,
                 error=f"oauth_token_http_{status}",
-                error_kind="token",
+                error_kind=err_kind,
                 fail_step="token",
                 callback_url=callback_url,
                 device_id=self.device_id,
