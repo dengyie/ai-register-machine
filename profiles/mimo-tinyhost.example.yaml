@@ -17,7 +17,11 @@ spec:
 
   mailbox:
     type: tinyhost
-    domain: publicvm.com
+    # domain omitted on purpose (same lesson as grok/chatgpt): the tinyhost source
+    # flags publicvm.com as "accepts allocate but never delivers OTP" — a prior MiMo
+    # pxed round was pinned to this dead domain and timed out on OTP. Unpinned,
+    # tinyhost._pick_domain() allocates a currently-healthy random domain from the
+    # tinyhost.shop API which actually receives xiaomi-mimo OTP.
 
   decode:
     type: tinyhost
