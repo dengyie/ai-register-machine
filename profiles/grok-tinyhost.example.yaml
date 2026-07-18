@@ -19,7 +19,14 @@ spec:
 
   mailbox:
     type: tinyhost
-    domain: publicvm.com
+    # domain omitted on purpose (same lesson as chatgpt-tinyhost): the source file
+    # (register_core/email/sources/tinyhost.py L25) flags publicvm.com as "accepts
+    # allocate but never delivers OpenAI OTP" — two pxed grok runs (090655/092054)
+    # only ever hit OTP 30s×5 timeout. An unpinned tinyhost mailbox allocates a
+    # currently-healthy random domain from the tinyhost.shop API (leruvo.icu /
+    # datgemini.io.vn / …), which actually receives xAI OTP. Set
+    # REGISTER_EMAIL_DOMAIN / GROK_EMAIL_DOMAIN to override if a specific domain is
+    # wanted; leave unset for auto.
 
   decode:
     type: tinyhost
