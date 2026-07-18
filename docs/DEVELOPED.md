@@ -63,3 +63,13 @@ CHATGPT_LEGACY=1 ./register.sh chatgpt N       # 回到 providers/chatgpt/run-re
 egress 边界说明（Grok）：grok-tinyhost profile 钉 `strategy.egress.mode: clash proxy 127.0.0.1:7897`，使 `profile_to_job` 设 `extra["proxy"]` → grok_adapter force-set 子进程 `PROXY/CPA_PROXY`（attempt proxy 胜过 ambient shell env），Pipeline 真正持有 Grok egress（而非靠 `run-register-core.sh` 继承的旧 `PROXY` env）。Pipeline 在此 backend 持有 attribution / strategy burn-cool / GrokChatVerifier / sink；Clash 叶子健康仍由 `preflight-clash-nodes.sh` 探（`nodes.json` L1/L2 catalog preflight 是 `list|auto` 独立 backend，非 Grok 默认）。
 
 生产冒烟（Manual-required，非阻塞）：pxed 上 `./register.sh grok 1` 真实节点产 Grok reg+mint 确认切外壳后仍产出；ChatGPT 仍 `registration_disallowed`（外部依赖）。
+
+### Grok fatal 契约修复（phase-3 收尾，pxed smoke 发现）
+
+pxed 上 `./register.sh grok 1` 切外壳后真跑暴露一个回归 bug 并已修复（commit `4d7812a`）：
+
+- 现象：register_cli 在邮件 OTP 阶段超时（tinyhost 桥 30s×5 轮询无码），exit=1，SUMMARY_JSON `"fatal":false,"fatal_reason":""`；但 grok_adapter 旧的致命探测 `any(k in lower(out) for k in ("alias","耗尽","exhausted","fatal","fail-fast","致命"))` 命中了 SUMMARY_JSON body 中**始终存在**的键 `"fatal"`/`"fatal_reason"` → 把一次可重试的 OTP 超时误升为 `FailFastError` → Pipeline `fail-fast stop` + exit=2（致命契约），整批停。
+- 根因：致命判定应走 register_cli 权威退出码契约，而非子串匹配。register_cli contract：`exit 2 = fatal`（`_fatal_stop` set，SUMMARY_JSON `"fatal":true` + `"fatal_reason"`）；`exit 1 = 可重试 not-product`（OTP 超时/验证失败等）；`exit 0 = product ok`。
+- 修复：grok_adapter 改用 `exit==2` 为致命主信号，SUMMARY_JSON `"fatal"`/`"fatal_reason"` 作交叉校验（JSON 内 `fatal:true` 即使 exit=1 也致命，以防契约漂移），仅当 register_cli 无任何输出（spawn 前 crash / 无 summary）时才落老逻辑判致命。致命时携带脱敏后的 register_cli 输出尾（边界证据日志，生产失败可诊断）。
+- 5 个契约测试固化（`test_register_core_layers.py::TestGrokFatalContract`）：exit-1+fatal:false 不致命（pxed 回归）、exit-2 致命、summary fatal:true 升级、无输出 spawn 致命、带 Traceback 的 OTP 超时不致命。本地 + pxed 均 pass。
+- 真实验证（pxed）：切外壳后 `./register.sh grok 1` 现在在可重试邮件超时下退出契约 1（not-product），而非契约 2（fatal）——Pipeline 不再因单次瞬时邮件失败停整批；账号本身是否产出仍取决于 tinyhost 邮件送达（外部依赖）。
