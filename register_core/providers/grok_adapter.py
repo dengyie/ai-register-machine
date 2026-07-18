@@ -136,22 +136,74 @@ class GrokProvider:
             if proc.timed_out:
                 raise ProviderError(f"grok register timeout after {timeout_s}s")
 
-            low = out.lower()
-            if proc.returncode != 0:
-                if any(
-                    k in low
-                    for k in ("alias", "耗尽", "exhausted", "fatal", "fail-fast", "致命")
-                ):
-                    raise FailFastError(f"grok fatal: exit={proc.returncode}")
+            # register_cli exit-code contract (authoritative, machine-readable):
+            #   exit 2 = fatal (_fatal_stop set → SUMMARY_JSON "fatal":true
+            #            + "fatal_reason":...). Hard stop, no re-burn / no empty spin.
+            #   exit 1 = not product-usable (OTP timeout, verify fail, etc.) — NOT
+            #            fatal; recoverable / retryable per strategy burn-cool.
+            #   exit 0 = product ok.
+            # Do NOT substring-match "fatal"/"alias"/"致命" against raw output: the
+            # SUMMARY_JSON itself always contains the *keys* "fatal" and
+            # "fatal_reason" (printed on every run, even when "fatal":false), so a
+            # naive `k in lower(out)` would promote every exit-1 retryable failure
+            # to FailFastError and stop the whole batch on a single transient OTP
+            # timeout (observed in pxed smoke). Use the exit code as the contract;
+            # keep the SUMMARY_JSON decode as a cross-check; fall back to a tight
+            # marker only when stdout was empty (spawn path / no summary emitted).
+            rc = int(proc.returncode)
+
+            def _summary_fatal() -> tuple[bool, str]:
+                """Decode register_cli SUMMARY_JSON if present; return (fatal, reason).
+
+                register_cli prints one `SUMMARY_JSON {...}` line at exit; keep keys
+                stable ("fatal" bool, "fatal_reason" str). We scan lines (not a
+                full-output regex) so the last summary wins and a stray `{` earlier
+                in logs can't fool the decoder.
+                """
+                last_summary = None
+                for ln in out.splitlines():
+                    s = ln.strip()
+                    if s.startswith("SUMMARY_JSON") and s[len("SUMMARY_JSON"):].lstrip().startswith("{"):
+                        last_summary = s[len("SUMMARY_JSON"):].lstrip()
+                if last_summary:
+                    try:
+                        import json as _json
+
+                        d = _json.loads(last_summary)
+                        return bool(d.get("fatal")), str(d.get("fatal_reason") or "")
+                    except Exception:
+                        return False, ""
+                return False, ""
+
+            if rc != 0:
+                sum_fatal, sum_reason = _summary_fatal()
+                is_fatal = rc == 2 or sum_fatal
+                # Tight fallback only when register_cli emitted no authority (e.g.
+                # orphan-detected / ImportError before main()) so a genuine batch
+                # stopper still surfaces. matched on whole-word-ish phrases only.
+                if not is_fatal and not out.strip():
+                    # no output at all from register_cli → treat as fatal spawn.
+                    is_fatal = True
+                if is_fatal:
+                    # Surface the actual register_cli failure (boundary evidence):
+                    # the subprocess output travels with the fatal signal, else prod
+                    # smoke failures are undiagnosable. Redact secrets; keep tail.
+                    reason = sum_reason or f"exit={rc}"
+                    raise FailFastError(
+                        f"grok fatal: {reason}\n"
+                        f"--- register_cli output (redacted tail) ---\n"
+                        f"{redact_log_tail(out, limit=4000)}"
+                    )
                 return RegisterResult(
                     ok=False,
                     provider=self.name,
                     email=(mailbox.address if mailbox else ""),
-                    error=f"register_cli exit={proc.returncode}",
+                    error=f"register_cli exit={rc}",
                     error_kind="provider",
                     secret_kind="none",
                     artifacts={
-                        "exit_code": proc.returncode,
+                        "exit_code": rc,
+                        "summary_fatal": False,
                         "ledger": accounts_file,
                         "tail": redact_log_tail(out),
                         **mail_meta,

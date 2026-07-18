@@ -462,6 +462,102 @@ class TestGrokParse(unittest.TestCase):
         self.assertEqual(captured.get("env", {}).get("CPA_PROXY"), want)
 
 
+class TestGrokFatalContract(unittest.TestCase):
+    """register_cli exit-code contract (authoritative, machine-readable):
+    exit 2 = fatal; exit 1 = retryable not-product; exit 0 = product ok.
+    SUMMARY_JSON "fatal" bool is the cross-check. The old substring matcher
+    (`"fatal" in lower(out)`) mis-promoted exit-1 OTP timeouts — which always
+    print `"fatal":false` and the key "fatal_reason" — to FailFastError, stopping
+    the whole batch on a single transient failure (pxed smoke regression).
+
+    `_SUMMARY` mimics the real register_cli tail (=== 完成 ... ===, banner line,
+    then `SUMMARY_JSON {...}` on its own line).
+    """
+
+    _OK_SUMMARY = (
+        '=== 完成: 注册成功 0, 注册失败 1 ===\n'
+        '[!] 本批未达到产品可用 free Build 标准\n'
+        'SUMMARY_JSON {"event":"register_cli_summary","exit":1,"reg_success":0,'
+        '"reg_fail":1,"fatal":false,"fatal_reason":"","product_ok":false}\n'
+    )
+    _FATAL_SUMMARY = (
+        '=== 完成: 注册成功 0, 注册失败 1 ===\n'
+        '[!] 致命错误已停止任务（不空转）: 可用别名已耗尽\n'
+        'SUMMARY_JSON {"event":"register_cli_summary","exit":2,"reg_success":0,'
+        '"reg_fail":1,"fatal":true,"fatal_reason":"可用别名已耗尽","product_ok":false}\n'
+    )
+
+    def test_exit1_summary_fatalfalse_is_not_failfast(self):
+        # Regression: pxed grok smoke hit a transient OTP timeout → register_cli
+        # exit=1 with "fatal":false; the old substring matcher raised FailFastError
+        # because `"fatal" in lower(out)` matched the JSON key/value. Must be a
+        # recoverable provider failure (error_kind=provider), not fatal.
+        provider = GrokProvider(accounts_file="/tmp/x")
+        fake = CmdResult(returncode=1, stdout=self._OK_SUMMARY, stderr="", timed_out=False)
+        with patch("register_core.providers.grok_adapter.run_command", return_value=fake):
+            with patch("register_core.providers.grok_adapter.file_size", return_value=0):
+                with patch("register_core.providers.grok_adapter.read_appended", return_value=""):
+                    r = provider.register_one()
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "provider", "exit-1 non-fatal must be provider, not fatal")
+        self.assertNotIn("fail_fast", (r.error or "").lower())
+
+    def test_exit2_is_failfast(self):
+        provider = GrokProvider(accounts_file="/tmp/x")
+        fake = CmdResult(returncode=2, stdout=self._FATAL_SUMMARY, stderr="", timed_out=False)
+        with patch("register_core.providers.grok_adapter.run_command", return_value=fake):
+            with patch("register_core.providers.grok_adapter.file_size", return_value=0):
+                with patch("register_core.providers.grok_adapter.read_appended", return_value=""):
+                    with self.assertRaises(FailFastError) as ctx:
+                        provider.register_one()
+        # authority contract reason surfaces (not the old bare "exit=2")
+        self.assertIn("可用别名已耗尽", str(ctx.exception))
+
+    def test_summary_fatal_true_promotes_exit1_to_failfast(self):
+        # Cross-check via SUMMARY_JSON: if register_cli says fatal:true even at exit=1
+        # (shouldn't happen by contract, but the JSON is authoritative) we honor it.
+        provider = GrokProvider(accounts_file="/tmp/x")
+        sum1 = self._FATAL_SUMMARY.replace('"exit":2', '"exit":1')
+        fake = CmdResult(returncode=1, stdout=sum1, stderr="", timed_out=False)
+        with patch("register_core.providers.grok_adapter.run_command", return_value=fake):
+            with patch("register_core.providers.grok_adapter.file_size", return_value=0):
+                with patch("register_core.providers.grok_adapter.read_appended", return_value=""):
+                    with self.assertRaises(FailFastError):
+                        provider.register_one()
+
+    def test_no_summary_no_output_is_failfast(self):
+        # No output at all (orphan before main) → treat as fatal spawn.
+        provider = GrokProvider(accounts_file="/tmp/x")
+        fake = CmdResult(returncode=1, stdout="", stderr="", timed_out=False)
+        with patch("register_core.providers.grok_adapter.run_command", return_value=fake):
+            with patch("register_core.providers.grok_adapter.file_size", return_value=0):
+                with patch("register_core.providers.grok_adapter.read_appended", return_value=""):
+                    with self.assertRaises(FailFastError):
+                        provider.register_one()
+
+    def test_exit1_otp_timeout_is_not_failfast(self):
+        # Even when stdout contains a Traceback (OTP timeout), exit=1 + "fatal":false
+        # must NOT be fail-fast. The OTP timeout is a retryable provider error.
+        provider = GrokProvider(accounts_file="/tmp/x")
+        stdout = (
+            '=== 完成: 注册成功 0, 注册失败 1 ===\n'
+            'SUMMARY_JSON {"event":"register_cli_summary","exit":1,"reg_fail":1,'
+            '"fatal":false,"fatal_reason":"","product_ok":false}\n'
+            'Traceback (most recent call last):\n'
+            '  File "register_cli.py", line 666, in register_one\n'
+            '    code = reg.fill_code_and_submit(\n'
+            'Exception: fixed core OTP timeout for x@publicvm.com: timed out after 30.0 seconds\n'
+        )
+        fake = CmdResult(returncode=1, stdout=stdout, stderr="", timed_out=False)
+        with patch("register_core.providers.grok_adapter.run_command", return_value=fake):
+            with patch("register_core.providers.grok_adapter.file_size", return_value=0):
+                with patch("register_core.providers.grok_adapter.read_appended", return_value=""):
+                    r = provider.register_one()
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "provider")
+
+
+
 class TestMimoAdapterMock(unittest.TestCase):
     def test_historical_only_is_fail(self):
         with tempfile.TemporaryDirectory() as td:
