@@ -26,9 +26,9 @@
 ## Manual-required（需外部介入，本轮不解）
 
 - **免费 Build chat 403 / console.x.ai entitlement**：账号侧权限，不 remint、不 soft inject；需 console 解锁或 grokbuild-proxy 服务端中转。
-- **OpenAI `registration_disallowed`**：IP/风控侧，与 chat 403 同属 external。
+- **OpenAI `registration_disallowed`**：IP/风控侧，与 chat 403 同属 external。**量化复核（2026-07-18，pxed 全 ChatGPT sink）**：77 attempts / 0 ok；error_kind 分布 `registration_disallowed` 59 / `mail_miss` 9 / `provider` 6 / `fatal` 2 / `verify` 1。8 个 distinct 数据中心 IP 轮询全 disallowed（IP 非单一封禁，是 ASN/供应商集合门控）；canonical Clash GVPS(35.212.179.13)`https://auth.openai.com/` 返回 **403**（Google Cloud ASN 被 Cloudflare 预拒，未到 create_account）。`validate_otp` 全 200 / `mail_miss=0`（IP 轮询轮）→ 邮件/OTP 链无问题。**根因：当前代理池无未被 OpenAI 列禁的住宅 ISP ASN**；需住宅代理资产，本轮环境无解，不再烧号实跑。
 
-验证入口：mint 后本地 probe `/v1/responses` 观察 403 body；ChatGPT 注册观察 create_account 是否仍 `registration_disallowed`。
+验证入口：mint 后本地 probe `/v1/responses` 观察 403 body；ChatGPT 注册观察 create_account 是否仍 `registration_disallowed`（再测前先接住宅代理 ASN，否则 77/0 已充分）。
 
 ## 路由门禁验证入口（migrate milestone A）
 
