@@ -3080,18 +3080,31 @@ def _fixed_core_get_oai_code(
                 timeout=sub_to,
                 env=os.environ.copy(),
             )
-            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-            # poll_otp emits the decoded code on stdout line 1 ("042902" or
-            # xAI "FN8-ECQ") plus "OTP <code>" on stderr. Match either format:
-            # xAI alnum+dash XXX-XXX first, then plain 6-digit (OpenAI/old).
+            # Helper contract (register_core.tools.poll_otp): exit 0 with the
+            # decoded code as stdout line 1 (pure "042902" or xAI "FN8-ECQ").
+            # The helper already ran extract_otp_code — the single authoritative
+            # decoder — so TRUST that line rather than re-deriving from a merged
+            # blob with a weaker regex. Re-decoding here was how CSS-hex #333333
+            # slipped in before, and a merged stdout+stderr blob risks grabbing a
+            # stray digit-run out of an error line. Regex on the blob stays only
+            # as a defensive fallback for helper-version drift / partial output.
             code = ""
-            mx = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", out)
-            if mx:
-                code = mx.group(1)
+            if proc.returncode == 0:
+                first = (proc.stdout or "").strip().splitlines()
+                if first:
+                    cand = first[0].strip()
+                    # sanity: helper line 1 is a bare code, not a log/error line
+                    if cand and len(cand) <= 16 and " " not in cand:
+                        code = cand
             if not code:
-                m = re.search(r"\b(\d{6})\b", out)
-                if m:
-                    code = m.group(1)
+                out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                mx = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", out)
+                if mx:
+                    code = mx.group(1)
+                if not code:
+                    m = re.search(r"\b(\d{6})\b", out)
+                    if m:
+                        code = m.group(1)
             code = code.strip()
             if code and code not in used:
                 if log_callback:
