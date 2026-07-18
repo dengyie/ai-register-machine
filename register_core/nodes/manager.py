@@ -110,6 +110,51 @@ class NodeManager:
                     pass
             return node
 
+    def bump_counters(
+        self,
+        url: str,
+        *,
+        attempt: bool = False,
+        success: bool = False,
+        disallow: bool = False,
+        persist: bool = True,
+    ) -> Node | None:
+        """Record credential-granularity quality signal for an attempt outcome.
+
+        Called by ``report_attempt_proxy_result`` (the single outcome hook) at
+        each result branch: ``attempt`` increments ``attempt_count`` once per
+        attempt we observe a node for; ``success`` increments ``success_count``
+        (success branch); ``disallow`` increments ``disallow_count``
+        (registration_disallowed branch). Counts are NOT incremented for
+        network_fail / generic non-proxy failure (attempt_count already +1).
+        Persisted via the existing ``save_nodes`` so quality history survives
+        restarts. See docs/IP-ISOLATION-QUALITY-DESIGN.md (回写键=id=url).
+        """
+        url = (url or "").strip()
+        if not url:
+            return None
+        self.ensure_loaded()
+        with self._lock:
+            node = None
+            for n in self.nodes:
+                if n.url == url:
+                    node = n
+                    break
+            if node is None:
+                return None
+            if attempt:
+                node.attempt_count = int(node.attempt_count or 0) + 1
+            if success:
+                node.success_count = int(node.success_count or 0) + 1
+            if disallow:
+                node.disallow_count = int(node.disallow_count or 0) + 1
+            if persist:
+                try:
+                    save_nodes(self.nodes, self.path)
+                except Exception:
+                    pass
+            return node
+
     def enabled_nodes(self, *, healthy_only: bool = False) -> list[Node]:
         """Enabled dialable nodes.
 

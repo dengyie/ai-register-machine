@@ -34,6 +34,266 @@ class TestNodeModels(unittest.TestCase):
         self.assertEqual(n.tags, ["us", "res"])
         self.assertTrue(n.enabled)
 
+    def test_hpup_string_normalizes_to_socks5h(self) -> None:
+        n = node_from_dict(
+            "us.1024proxy.io:3000:cchv57025-region-Rand-sid-pA5-t-5:tyfnvdhr"
+        )
+        assert n is not None
+        self.assertEqual(
+            n.url,
+            "socks5h://cchv57025-region-Rand-sid-pA5-t-5:tyfnvdhr@us.1024proxy.io:3000",
+        )
+        self.assertTrue(n.url.startswith("socks5h://"))  # remote DNS resolve
+
+    def test_dict_url_hpup_also_normalizes(self) -> None:
+        n = node_from_dict(
+            {"url": "us.1024proxy.io:3000:cchv-region-Rand-sid-x-t-5:pw", "tier": 1}
+        )
+        assert n is not None
+        self.assertEqual(n.tier, 1)
+        self.assertTrue(n.url.startswith("socks5h://"))
+
+    def test_plain_host_port_not_mangled(self) -> None:
+        # bare host:port (2 segments, no auth) must NOT be rewritten.
+        n = node_from_dict("1.2.3.4:8080")
+        assert n is not None
+        self.assertEqual(n.url, "1.2.3.4:8080")
+        # plain url with scheme untouched
+        n2 = node_from_dict("http://u:p@1.2.3.4:8080")
+        assert n2 is not None
+        self.assertEqual(n2.url, "http://u:p@1.2.3.4:8080")
+
+    def test_tier_default_zero_and_roundtrip(self) -> None:
+        n = node_from_dict({"url": "http://a:1", "tier": 1})
+        assert n is not None
+        self.assertEqual(n.tier, 1)
+        n_default = node_from_dict({"url": "http://b:2"})
+        assert n_default is not None
+        self.assertEqual(n_default.tier, 0)  # backward-compat default
+
+    def test_quality_score_derivation(self) -> None:
+        n = node_from_dict(
+            {"url": "http://a:1", "attempt_count": 4, "success_count": 2, "disallow_count": 1}
+        )
+        assert n is not None
+        # 2/4 - 0.5*1 = 0.0
+        self.assertAlmostEqual(n.quality_score(), 0.0, places=6)
+        with patch.dict(os.environ, {"REGISTER_NODES_QUALITY_LAMBDA": "1.0"}):
+            # 2/4 - 1.0*1 = -0.5
+            self.assertAlmostEqual(n.quality_score(), -0.5, places=6)
+        # zero attempts → safe (max(1,0) denominator)
+        n0 = node_from_dict({"url": "http://z:9"})
+        assert n0 is not None
+        self.assertEqual(n0.quality_score(), 0.0)
+
+    def test_counts_roundtrip_through_store(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            n = node_from_dict(
+                {"url": "http://a:1", "tier": 1, "attempt_count": 7, "success_count": 5, "disallow_count": 2}
+            )
+            assert n is not None
+            save_nodes([n], path)
+            loaded = load_nodes(path)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].tier, 1)
+            self.assertEqual(loaded[0].attempt_count, 7)
+            self.assertEqual(loaded[0].success_count, 5)
+            self.assertEqual(loaded[0].disallow_count, 2)
+
+    def test_old_store_without_counts_loads_compat(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            # hand-write a legacy stanza lacking tier/counts → defaults apply
+            path.write_text('[{"url":"http://a:1","id":"a","label":"a","enabled":true}]', encoding="utf-8")
+            loaded = load_nodes(path)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].tier, 0)
+            self.assertEqual(loaded[0].attempt_count, 0)
+            self.assertEqual(loaded[0].success_count, 0)
+            self.assertEqual(loaded[0].disallow_count, 0)
+
+
+class TestReportAttemptCounters(unittest.TestCase):
+    """report_attempt_proxy_result increments tier-quality counters per branch
+    (attempt always; success on ok; disallow on registration_disallowed). The
+    prelude bump is exactly once per call — success path must NOT double-count.
+    """
+
+    def setUp(self) -> None:
+        reset_manager_for_tests()
+        core_proxy.reset_rotation_for_tests()
+
+    def tearDown(self) -> None:
+        reset_manager_for_tests()
+        core_proxy.reset_rotation_for_tests()
+
+    def _env_for(self, path: Path) -> dict:
+        return {
+            "REGISTER_NODES_FILE": str(path),
+            "REGISTER_NODES": "1",
+            "REGISTER_EGRESS": "list",
+            "REGISTER_CORE": "0",
+            "REGISTER_NODES_MAX_FAIL": "50",
+            "PROXY_LIST": "",
+            "REGISTER_NODES_PREFLIGHT": "0",
+        }
+
+    def test_success_increments_attempt_and_success_once(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            url = "http://n1:1"
+            save_nodes([Node(url=url, id="n1", last_ok=True)], path)
+            with patch.dict(os.environ, self._env_for(path), clear=False):
+                reset_manager_for_tests()
+                core_proxy.report_attempt_proxy_result(
+                    {"proxy": url, "egress": "list"}, ok=True
+                )
+                from register_core.nodes import get_manager
+
+                n = get_manager().find_by_url(url)
+                assert n is not None
+                self.assertEqual(n.attempt_count, 1)
+                self.assertEqual(n.success_count, 1)
+                self.assertEqual(n.disallow_count, 0)
+
+    def test_registration_disallowed_increments_attempt_and_disallow(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            url = "http://n1:1"
+            save_nodes([Node(url=url, id="n1", last_ok=True)], path)
+            with patch.dict(os.environ, self._env_for(path), clear=False):
+                reset_manager_for_tests()
+                core_proxy.report_attempt_proxy_result(
+                    {"proxy": url, "egress": "list"},
+                    ok=False,
+                    error="registration_disallowed",
+                    error_kind="registration_disallowed",
+                )
+                from register_core.nodes import get_manager
+
+                n = get_manager().find_by_url(url)
+                assert n is not None
+                self.assertEqual(n.attempt_count, 1)
+                self.assertEqual(n.disallow_count, 1)
+                self.assertEqual(n.success_count, 0)
+
+    def test_network_fail_increments_attempt_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            url = "http://n1:1"
+            # second node keeps the pool non-empty after n1 is fenced out,
+            # so the catalog-wide fail-fast path is not the thing under test.
+            save_nodes(
+                [Node(url=url, id="n1", last_ok=True), Node(url="http://n2:2", id="n2", last_ok=True)],
+                path,
+            )
+            with patch.dict(os.environ, self._env_for(path), clear=False):
+                reset_manager_for_tests()
+                core_proxy.report_attempt_proxy_result(
+                    {"proxy": url, "egress": "list"},
+                    ok=False,
+                    error="connection timeout via proxy",
+                    error_kind="other",
+                )
+                from register_core.nodes import get_manager
+
+                n = get_manager().find_by_url(url)
+                assert n is not None
+                self.assertEqual(n.attempt_count, 1)
+                self.assertEqual(n.success_count, 0)
+                self.assertEqual(n.disallow_count, 0)
+
+    def test_non_proxy_kind_increments_attempt_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            url = "http://n1:1"
+            save_nodes([Node(url=url, id="n1", last_ok=True)], path)
+            with patch.dict(os.environ, self._env_for(path), clear=False):
+                reset_manager_for_tests()
+                core_proxy.report_attempt_proxy_result(
+                    {"proxy": url, "egress": "list"},
+                    ok=False,
+                    error="mail never arrived",
+                    error_kind="mail_miss",
+                )
+                from register_core.nodes import get_manager
+
+                n = get_manager().find_by_url(url)
+                assert n is not None
+                self.assertEqual(n.attempt_count, 1)
+                self.assertEqual(n.success_count, 0)
+                self.assertEqual(n.disallow_count, 0)
+
+    def test_node_not_in_catalog_skips_counters(self) -> None:
+        # unknown proxy url → no counter writes, no crash.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes([Node(url="http://other:1", id="other")], path)
+            with patch.dict(os.environ, self._env_for(path), clear=False):
+                reset_manager_for_tests()
+                info = core_proxy.report_attempt_proxy_result(
+                    {"proxy": "http://not-in-catalog:1", "egress": "list"}, ok=True
+                )
+                self.assertEqual(info.get("reason"), "not_in_catalog")
+                from register_core.nodes import get_manager
+
+                self.assertIsNone(get_manager().find_by_url("http://not-in-catalog:1"))
+
+
+class TestTierDoesNotAffectRotationOrder(unittest.TestCase):
+    """Cement 'tier present but not consumed this round' — a tier=1 node does
+    NOT jump ahead of tier=0 nodes in inject_attempt_proxy's rotation order.
+    Consuming tier into rotation weight is the NEXT milestone.
+    """
+
+    def setUp(self) -> None:
+        reset_manager_for_tests()
+        core_proxy.reset_rotation_for_tests()
+
+    def tearDown(self) -> None:
+        reset_manager_for_tests()
+        core_proxy.reset_rotation_for_tests()
+
+    def test_tier_nodes_rotate_in_original_order(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes(
+                [
+                    Node(url="http://dc0:1", id="dc0", tier=0),
+                    Node(url="http://res1:1", id="res1", tier=1),
+                    Node(url="http://res2:1", id="res2", tier=1),
+                ],
+                path,
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES": "1",
+                    "REGISTER_EGRESS": "list",
+                    "REGISTER_CORE": "0",
+                    "PROXY_LIST": "",
+                    "REGISTER_NODES_PREFLIGHT": "0",
+                },
+                clear=False,
+            ):
+                reset_manager_for_tests()
+                extra = {
+                    "egress": "list",
+                    "proxy_list": "http://dc0:1,http://res1:1,http://res2:1",
+                    "proxy_rotate_mode": "list",
+                    "proxy_rotate_on_start": True,
+                    "nodes_preflight": False,
+                }
+                # Round-robin must preserve catalog order regardless of tier.
+                seq = []
+                for _ in range(3):
+                    p, _ = core_proxy.resolve_attempt_proxy(extra)
+                    seq.append(p)
+                self.assertEqual(seq, ["http://dc0:1", "http://res1:1", "http://res2:1"])
+
+
 
 class TestCatalog(unittest.TestCase):
     def test_json_roundtrip(self) -> None:

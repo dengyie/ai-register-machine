@@ -740,6 +740,12 @@ def report_attempt_proxy_result(
         info["reason"] = "not_in_catalog"
         return info
 
+    # Credential-granularity quality signal: every observed outcome is one
+    # attempt against this node (回写键=id=url). success/disallow bumps are
+    # added in the respective branches below; network_fail & non-proxy kinds
+    # leave attempt_count+1 as the only signal (per design doc).
+    mgr.bump_counters(proxy, attempt=True, persist=True)
+
     def _cool_seconds(env_name: str, default: float) -> float:
         raw = _env_first(env_name, default=str(default))
         try:
@@ -752,6 +758,7 @@ def report_attempt_proxy_result(
 
     if ok:
         mgr.mark_result(proxy, ok=True, error="", persist=True)
+        mgr.bump_counters(proxy, success=True, persist=True)
         info["marked"] = True
         info["action"] = "success_clear"
         # Clear soft cool on success so the node re-enters rotation immediately.
@@ -795,6 +802,7 @@ def report_attempt_proxy_result(
     if kind in {"registration_disallowed", "disallowed"} or (
         "registration_disallowed" in (error or "").lower()
     ):
+        mgr.bump_counters(proxy, disallow=True, persist=True)
         risk_s = _cool_seconds("REGISTER_NODES_COOLDOWN_RISK", 600.0)
         if risk_s > 0:
             mgr.cooldown(proxy, risk_s, reason="registration_disallowed", persist=True)
