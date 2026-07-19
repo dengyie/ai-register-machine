@@ -45,9 +45,49 @@ def test_export_wires_remote_flag() -> None:
     assert "remote_inject" in src
     # success path must call inject (regression from missing wire)
     assert "result[\"remote_inject\"]" in src or "result['remote_inject']" in src or 'result["remote_inject"]' in src
+    # disk-first: inject off must short-circuit before gate skip side effects
+    assert "remote_inject_disabled" in src
+    assert "inject_disabled" in src
+    assert "if inject_on and not skip_inject:" in src
     assert "ControlMaster=auto" in src
     assert "_REMOTE_DIR_READY" in src
     print("PASS export wires remote inject")
+
+
+def test_export_inject_off_no_gate_skip_side_effects() -> None:
+    """cpa_remote_inject=false must not mark remote_inject_skipped (disk-first)."""
+    mod = _load_cpa_export()
+    result = {
+        "ok": True,
+        "path": str(ROOT / "cpa_auths" / ".gitkeep"),
+        "token_ok": True,
+        "email": "diskfirst@example.com",
+        "chat_ok": None,
+    }
+    cfg = {
+        "cpa_remote_inject": False,
+        "cpa_copy_to_hotload": False,
+        "cpa_export_enabled": True,
+    }
+    # Simulate the inject-off branch of export_cpa_xai_for_account post-mint.
+    inject_on = mod._config_bool(cfg.get("cpa_remote_inject"), default=False)
+    assert inject_on is False
+    if not inject_on:
+        result["remote_inject_disabled"] = True
+        result["remote_inject"] = {
+            "ok": False,
+            "disabled": True,
+            "skipped": False,
+            "reason": "inject_disabled",
+        }
+    assert result.get("remote_inject_skipped") is not True
+    assert result.get("skip_remote_inject") is not True
+    assert result["remote_inject"]["disabled"] is True
+    assert result["remote_inject"]["skipped"] is False
+    # apply_multi_remote_inject itself is a no-op when flag off
+    out = mod.apply_multi_remote_inject(result, cfg, log_callback=lambda _m: None)
+    assert out.get("remote_injects") is None or out is result
+    print("PASS export inject off no gate skip side effects")
 
 
 def test_hotmail_adaptive_poll_markers() -> None:

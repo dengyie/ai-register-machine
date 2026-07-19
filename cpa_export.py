@@ -1074,18 +1074,20 @@ def export_cpa_xai_for_account(
         )
         result["priority"] = auth_priority
 
-    # Product hard-gate: only free Build chat_ok may enter remote live/inventory.
-    # evaluate_remote_inject_gate is also enforced inside apply_multi_remote_inject
-    # so ops scripts cannot bypass by calling inject helpers directly.
-    gate = evaluate_remote_inject_gate(result, cfg)
-    result["import_gate"] = gate.get("import_gate") or result.get("import_gate")
-    skip_inject = not bool(gate.get("allow"))
-    if skip_inject:
-        result["skip_remote_inject"] = True
-        result["remote_inject_skipped"] = True
-        result["remote_inject_skip_reason"] = str(gate.get("reason") or "chat_not_ok")
+    # Register main path ends at disk auth. Remote inject is a separate pipeline
+    # (import_cpa_auth_dir / ops) and must not run or emit skip counters when off.
+    inject_on = _config_bool(cfg.get("cpa_remote_inject"), default=False)
+    skip_inject = True
+    if not inject_on:
+        result["remote_inject_disabled"] = True
+        result["remote_inject"] = {
+            "ok": False,
+            "disabled": True,
+            "skipped": False,
+            "reason": "inject_disabled",
+        }
+        # Entitlement ledger still useful when probe was on (ops inventory).
         if result.get("entitlement_denied"):
-            log(f"[cpa] skip remote inject (entitlement_denied): {email}")
             try:
                 from cpa_xai.writer import record_entitlement_denied
 
@@ -1099,10 +1101,37 @@ def export_cpa_xai_for_account(
                 )
             except Exception as e:  # noqa: BLE001
                 log(f"[cpa] entitlement ledger write failed: {e}")
-        else:
-            log(
-                f"[cpa] skip remote inject ({result.get('remote_inject_skip_reason')}): {email}"
-            )
+    else:
+        # Product hard-gate: only free Build chat_ok may enter remote live/inventory.
+        # evaluate_remote_inject_gate is also enforced inside apply_multi_remote_inject
+        # so ops scripts cannot bypass by calling inject helpers directly.
+        gate = evaluate_remote_inject_gate(result, cfg)
+        result["import_gate"] = gate.get("import_gate") or result.get("import_gate")
+        skip_inject = not bool(gate.get("allow"))
+        if skip_inject:
+            result["skip_remote_inject"] = True
+            result["remote_inject_skipped"] = True
+            result["remote_inject_skip_reason"] = str(gate.get("reason") or "chat_not_ok")
+            if result.get("entitlement_denied"):
+                log(f"[cpa] skip remote inject (entitlement_denied): {email}")
+                try:
+                    from cpa_xai.writer import record_entitlement_denied
+
+                    record_entitlement_denied(
+                        out_dir,
+                        email,
+                        extra={
+                            "path": result.get("path"),
+                            "chat_error_code": result.get("chat_error_code"),
+                        },
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log(f"[cpa] entitlement ledger write failed: {e}")
+            else:
+                log(
+                    f"[cpa] skip remote inject "
+                    f"({result.get('remote_inject_skip_reason')}): {email}"
+                )
 
     # Re-stamp full chat fields after finalize/gate (not only import_gate).
     # mint stamps pre-finalize; finalize may flip entitlement/ok/skip flags.
@@ -1121,6 +1150,7 @@ def export_cpa_xai_for_account(
         and result.get("path")
         and _config_bool(cfg.get("cpa_copy_to_hotload"), default=False)
         and cpa_dir
+        and inject_on
         and not skip_inject
     ):
         try:
@@ -1136,11 +1166,10 @@ def export_cpa_xai_for_account(
             result["cpa_copy_error"] = str(e)
 
     # Optional: auto inject minted auth into remote CPA live + inventory dirs.
-    # One-click product gate: live dir success is required by default.
-    # Never inject dead-entitlement / unconfirmed chat tokens into live pool.
-    if not skip_inject:
+    # Only when inject is explicitly on; never emit gate-skip side effects when off.
+    if inject_on and not skip_inject:
         apply_multi_remote_inject(result, cfg, log_callback=log)
-    else:
+    elif inject_on and skip_inject:
         result["remote_live_ok"] = False
         result["remote_inject"] = {
             "ok": False,

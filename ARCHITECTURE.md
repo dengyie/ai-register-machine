@@ -161,6 +161,40 @@ Two leaf-health preflights exist; both strip dead nodes before batch work, **bac
 
 Root-level Grok modules (`register_cli.py`, `grok_register_ttk.py`, `cpa_xai/`, `proxy_*`) are **adapter targets** for `register_core/providers/grok_adapter`, reached via shell-out. Since migrate milestone A, the three `./register.sh` production entries (`grok | mimo | chatgpt`) route through the `register_core` Pipeline (attribution / strategy burn-cool / GrokChatVerifier·MimoTtsVerifier·ChatGPTTokenVerifier / JSONL sink). Egress ownership is backend-dependent and **declared in the profile**, not implicit: Grok/MiMo profiles pin `strategy.egress.mode: clash proxy 127.0.0.1:7897` so `profile_to_job` sets `extra["proxy"]` truthy and the grok/mimo adapter **force-sets the child `PROXY/CPA_PROXY`** from the attempt proxy (attempt proxy wins over ambient shell env — Pipeline owns the egress); Clash leaf health is still probed by `preflight-clash-nodes.sh` (Grok) / Node runner (MiMo), since `preflight_nodes_for_register` skips `clash` backend (the `nodes.json` L1/L2 catalog preflight is the separate `list|auto` backend). ChatGPT in-process selects mailbox by `CHATGPT_EMAIL_SOURCE` → matching profile (cf default `clash:7897`; tinyhost/gmail variants), with `CHATGPT_*` env overrides forwarded as `register_core` CLI flags. Grok and MiMo still shell out to legacy runners internally. Rollback per provider: `GROK_LEGACY=1` / `MIMO_LEGACY=1` / `CHATGPT_LEGACY=1`. In-process rewrites of Grok/MiMo (no shell-out) remain backlog (not started). `providers/grok/` documents the target package shape without breaking imports.
 
+## Dual production tracks (Grok bulk vs CLI shell)
+
+These are **intentional** dual authorities — not a temporary dual-track bug:
+
+| Track | Entry | When | Success criterion |
+|-------|-------|------|-------------------|
+| **CLI / single-shot** | `./register.sh grok N` → `run-register-core.sh` → register_core Pipeline → grok_adapter shell-out `register_cli --extra 1` | smoke、profile 编排、strategy/sink 统一归因 | register_core product exit (0/1/2) |
+| **Bulk concurrent** | `scripts/launch_batch_supervisor.sh` (pxed often `logs/…`) → xvfb → **`register_cli.py --extra $chunk`** directly | 大批量产号（chunk/threads/soft browser recycle/Clash rotate） | **disk-first**：new complete `xai-*.json` with access+refresh (`mint_token_ok`) |
+
+Bulk deliberately bypasses register_core serial shell-out (adapter hard-codes `--extra 1` per attempt). Do **not** force bulk through Pipeline until B (in-process concurrent) exists. Supervisor freezes disk-first env:
+
+- `CPA_EXPORT_ENABLED=true`
+- `CPA_PROBE_CHAT=false`
+- `CPA_REMOTE_INJECT=false`
+
+CPA inject is a **separate pipeline** (`scripts/import_cpa_auth_dir.py` / ops), never part of register product success when inject is off.
+
+## Dual production tracks (Grok bulk vs CLI shell)
+
+These are **intentional** dual authorities — not a temporary dual-track bug:
+
+| Track | Entry | When | Success criterion |
+|-------|-------|------|-------------------|
+| **CLI / single-shot** | `./register.sh grok N` → `run-register-core.sh` → register_core Pipeline → grok_adapter shell-out `register_cli --extra 1` | smoke、profile 编排、strategy/sink 统一归因 | register_core product exit (0/1/2) |
+| **Bulk concurrent** | `scripts/launch_batch_supervisor.sh` (pxed often `logs/…`) → xvfb → **`register_cli.py --extra $chunk`** directly | 大批量产号（chunk/threads/soft browser recycle/Clash rotate） | **disk-first**：new complete `xai-*.json` with access+refresh (`mint_token_ok`) |
+
+Bulk deliberately bypasses register_core serial shell-out (adapter hard-codes `--extra 1` per attempt). Do **not** force bulk through Pipeline until B (in-process concurrent) exists. Supervisor freezes disk-first env:
+
+- `CPA_EXPORT_ENABLED=true`
+- `CPA_PROBE_CHAT=false`
+- `CPA_REMOTE_INJECT=false`
+
+CPA inject is a **separate pipeline** (`scripts/import_cpa_auth_dir.py` / ops), never part of register product success when inject is off.
+
 ## Registry pattern
 
 Factories live in `register_core/*/registry.py`:
@@ -183,8 +217,8 @@ New products: implement adapter → register factory → optional verifier → d
 | Contract | Enforcement |
 |----------|-------------|
 | API key shape | `register_core.util.secrets` — single source; adapter/verify/inject/redact must agree |
-| Grok product-ready | this-run **SSO** required (`ok=False` if email-only / pending); free Build inject/product exit requires **`chat_ok is True`** (models-only / token write alone never soft-pass inject) |
-| Mint honesty | `token_ok=True` after OIDC write; product `ok` only after required probes resolve (or all probes off) |
+| Grok product-ready | this-run **SSO** required (`ok=False` if email-only / pending). **Register main path (disk-first):** `cpa_probe_chat=false` → product success = `mint_token_ok` (complete auth on disk with refresh); chat probe / inject off. **Inject path (separate):** free Build live inject still requires **`chat_ok is True`** — models-only / token write alone never soft-pass inject |
+| Mint honesty | `token_ok=True` after OIDC write; product `ok` follows configured probes (`product_batch_success`: disk-first → mint_token_ok; probe_chat on → chat_ok; inject on → remote_live_ok) |
 | MiMo product-ready | this-run **secret** via RESULT_JSON or file delta (never historical tail) |
 | CPA OpenAI inject | no default prod path; `--config`/`CPA_CONFIG` + prod requires `--i-understand-production` |
 | Deploy path | `GROK_CODE_ROOT` or first existing `/personal/{ai-register-machine,register-machine,grok-register}` |

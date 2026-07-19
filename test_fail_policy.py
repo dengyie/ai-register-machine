@@ -191,6 +191,19 @@ def test_product_batch_success() -> None:
     ) is True
     # pure register mode
     assert product({"reg_success": 2, "chat_ok": 0}, {"cpa_export_enabled": False}) is True
+    # disk-first (probe_chat=off): mint_token_ok is product success; chat/inject irrelevant
+    assert product(
+        {"reg_success": 1, "mint_token_ok": 1, "chat_ok": 0, "remote_live_ok": 0},
+        {
+            "cpa_export_enabled": True,
+            "cpa_probe_chat": False,
+            "cpa_remote_inject": False,
+        },
+    ) is True
+    assert product(
+        {"reg_success": 1, "mint_token_ok": 0, "chat_ok": 0},
+        {"cpa_export_enabled": True, "cpa_probe_chat": False},
+    ) is False
     # fatal markers for alias kill-switch
     assert is_fatal("Hotmail plus-alias 已禁用（mode=off）") is True
     assert is_fatal("plus-alias 已禁用") is True

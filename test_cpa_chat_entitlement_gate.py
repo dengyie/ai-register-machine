@@ -181,11 +181,13 @@ def test_export_finalize_and_defaults() -> None:
 
 def test_config_example_chat_keys() -> None:
     raw = (ROOT / "config.example.json").read_text(encoding="utf-8")
-    assert '"cpa_probe_chat": true' in raw
+    # disk-first defaults: probe/inject off on main register path
+    assert '"cpa_probe_chat": false' in raw
+    assert '"cpa_remote_inject": false' in raw
     assert "cpa_probe_chat_required" in raw
     assert "clash_pin_node" in raw
     assert '"cpa_allow_device_flow_fallback": true' in raw
-    assert "best-effort" in raw or "Manual-required" in raw
+    assert "best-effort" in raw or "Manual-required" in raw or "disk-first" in raw
     env = (ROOT / ".env.example").read_text(encoding="utf-8")
     assert "CPA_ALLOW_DEVICE_FLOW_FALLBACK=true" in env
     assert "GROK_NODE" in env or "CLASH_PIN_NODE" in env

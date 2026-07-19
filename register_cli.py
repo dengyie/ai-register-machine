@@ -1035,59 +1035,80 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
             elif mm:
                 _inc("mint_method_other")
 
+        def _inj_bool(val, default: bool = False) -> bool:
+            if isinstance(val, bool):
+                return val
+            if val is None:
+                return default
+            return str(val).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+        inject_on = _inj_bool(config.get("cpa_remote_inject"), default=False)
         if result.get("ok"):
             log(worker_id, f"+ CPA auth (product ok): {result.get('path')}")
             _inc("mint_success")
-            multi = result.get("remote_injects")
-            remote = result.get("remote_inject") or {}
-            live_ok = result.get("remote_live_ok")
-            if live_ok is True:
-                _inc("remote_live_ok")
-            elif live_ok is False:
-                _inc("remote_live_fail")
-            if result.get("remote_inject_skipped") or remote.get("skipped"):
-                _inc("remote_inject_skip")
-            if isinstance(multi, list) and multi:
-                ok_n = sum(1 for r in multi if r.get("ok"))
-                fail_n = sum(1 for r in multi if not r.get("ok") and not r.get("skipped"))
-                skip_n = sum(1 for r in multi if r.get("skipped"))
-                # Product success = live ok when live was targeted; else any ok.
-                product_ok = live_ok if live_ok is not None else bool(ok_n)
-                if product_ok:
+            # Inject counters only when remote inject is part of this run.
+            # inject=false (disk-first) must not inflate skip/fail from export payload.
+            if inject_on and not result.get("remote_inject_disabled"):
+                multi = result.get("remote_injects")
+                remote = result.get("remote_inject") or {}
+                live_ok = result.get("remote_live_ok")
+                if live_ok is True:
+                    _inc("remote_live_ok")
+                elif live_ok is False:
+                    _inc("remote_live_fail")
+                if result.get("remote_inject_skipped") or remote.get("skipped"):
+                    _inc("remote_inject_skip")
+                if isinstance(multi, list) and multi:
+                    ok_n = sum(1 for r in multi if r.get("ok"))
+                    fail_n = sum(
+                        1 for r in multi if not r.get("ok") and not r.get("skipped")
+                    )
+                    skip_n = sum(1 for r in multi if r.get("skipped"))
+                    # Product success = live ok when live was targeted; else any ok.
+                    product_ok = live_ok if live_ok is not None else bool(ok_n)
+                    if product_ok:
+                        _inc("remote_inject_ok")
+                        paths = result.get("remote_paths") or [
+                            r.get("remote_path") or r.get("dir")
+                            for r in multi
+                            if r.get("ok")
+                        ]
+                        log(
+                            worker_id,
+                            f"+ tebi inject x{ok_n}"
+                            f"{' (live ok)' if live_ok is True else ''}: {paths}",
+                        )
+                    if fail_n or live_ok is False:
+                        _inc("remote_inject_fail")
+                        log(
+                            worker_id,
+                            f"! tebi inject 部分/全部失败"
+                            f"{' (live fail)' if live_ok is False else ''}: "
+                            f"{result.get('remote_inject_error') or result.get('remote_inject_partial_errors')}",
+                        )
+                    if skip_n and not ok_n and not fail_n:
+                        _inc("remote_inject_skip")
+                elif remote.get("ok"):
                     _inc("remote_inject_ok")
-                    paths = result.get("remote_paths") or [
-                        r.get("remote_path") or r.get("dir") for r in multi if r.get("ok")
-                    ]
                     log(
                         worker_id,
-                        f"+ tebi inject x{ok_n}"
-                        f"{' (live ok)' if live_ok is True else ''}: {paths}",
+                        f"+ tebi inject: {remote.get('remote_path') or result.get('remote_path')}",
                     )
-                if fail_n or live_ok is False:
+                elif remote.get("skipped"):
+                    _inc("remote_inject_skip")
+                elif result.get("remote_inject_error") or (
+                    remote and not remote.get("disabled")
+                ):
                     _inc("remote_inject_fail")
                     log(
                         worker_id,
-                        f"! tebi inject 部分/全部失败"
-                        f"{' (live fail)' if live_ok is False else ''}: "
-                        f"{result.get('remote_inject_error') or result.get('remote_inject_partial_errors')}",
+                        f"! tebi inject 失败: "
+                        f"{result.get('remote_inject_error') or remote.get('error') or remote}",
                     )
-                if skip_n and not ok_n and not fail_n:
-                    _inc("remote_inject_skip")
-            elif remote.get("ok"):
-                _inc("remote_inject_ok")
-                log(worker_id, f"+ tebi inject: {remote.get('remote_path') or result.get('remote_path')}")
-            elif remote.get("skipped"):
-                _inc("remote_inject_skip")
-            elif result.get("remote_inject_error") or remote:
-                _inc("remote_inject_fail")
-                log(
-                    worker_id,
-                    f"! tebi inject 失败: {result.get('remote_inject_error') or remote.get('error') or remote}",
-                )
-            elif config.get("cpa_remote_inject"):
-                # flag on but no remote_inject payload — wiring bug / old code path
-                _inc("remote_inject_fail")
-                log(worker_id, "! tebi inject 未执行（export 未返回 remote_inject）")
+                else:
+                    # flag on but no remote_inject payload — wiring bug / old code path
+                    _inc("remote_inject_fail")
+                    log(worker_id, "! tebi inject 未执行（export 未返回 remote_inject）")
             try:
                 import account_backup as _ab
 
@@ -1122,10 +1143,11 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
                 )
             else:
                 log(worker_id, f"! CPA auth 未成功: {result.get('error') or result}")
-            if result.get("remote_inject_skipped"):
-                _inc("remote_inject_skip")
-            elif result.get("remote_inject_error"):
-                _inc("remote_inject_fail")
+            if inject_on and not result.get("remote_inject_disabled"):
+                if result.get("remote_inject_skipped"):
+                    _inc("remote_inject_skip")
+                elif result.get("remote_inject_error"):
+                    _inc("remote_inject_fail")
         return result
     except Exception as exc:
         _inc("mint_fail")

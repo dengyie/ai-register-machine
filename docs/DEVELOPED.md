@@ -2,7 +2,7 @@
 
 本索引汇总**已在 main 落地**的功能开发，便于一眼看清「开发了什么」。每条附代表 commit；对应的设计文档（design spec / plan）已归档至 [`docs/archive/`](archive/)。
 
-> 生产现状：三个 `./register.sh` 生产入口（`grok | mimo | chatgpt`）统一经 `register_core` Pipeline 调度（attribution / strategy burn-cool / 节点 L1+L2 preflight / 代理轮换 / 验证器 / JSONL sink）。Grok/MiMo adapter 仍 shell-out 到 legacy runner（`register_cli.py` + `grok_register_ttk.py` / `providers/mimo` Node runner）作为 adapter 目标 + 回滚后路（`GROK_LEGACY=1` / `MIMO_LEGACY=1` / `CHATGPT_LEGACY=1`）。in-process 重写（B 方案）未启动。下表「归档 spec/plan」指设计稿，不代表代码落点。
+> 生产现状：**双轨权威（有意）**——(1) CLI 单发：`./register.sh grok|mimo|chatgpt` 经 `register_core` Pipeline（attribution / strategy burn-cool / 节点 preflight / 代理轮换 / 验证器 / JSONL sink）；Grok/MiMo adapter 仍 shell-out legacy（`GROK_LEGACY`/`MIMO_LEGACY`/`CHATGPT_LEGACY=1` 回滚）。(2) **Grok 大批量**：`scripts/launch_batch_supervisor.sh` → `register_cli.py` 并发 chunk（**不经** register_core 串行外壳），disk-first：`CPA_EXPORT=true` / `PROBE_CHAT=false` / `REMOTE_INJECT=false`，成功=complete auth 落盘。CPA inject 独立链路，不绑产号成功。in-process 重写（B）未启动。下表「归档 spec/plan」指设计稿，不代表代码落点。
 
 | 功能 | 交付内容 | 代表 commit | 归档 spec/plan |
 |---|---|---|---|
@@ -19,7 +19,7 @@
 
 ## 待开发（backlog，未启动，本轮不做）
 
-- **register_core 迁移收尾**：**A 已落地 / B in-process 未启动**。A（生产入口切 register_core 外壳）完成：`./register.sh grok|mimo|chatgpt` 经 Pipeline 调度，Grok/MiMo shell-out legacy 保留。B（把 `grok_register_ttk.py` + `cpa_xai` 改 in-process、保留 batch 并发）未启动。
+- **register_core 迁移收尾**：**A 已落地 / B in-process 未启动**。A（CLI 生产入口切 register_core 外壳）完成。**Bulk supervisor 有意保留直调 `register_cli` 并发**（见 ARCHITECTURE · Dual production tracks）；B（in-process 并发 + 可选把 bulk 收进 Pipeline）未启动——勿把 bulk 强行串行化当「修双轨」。
 - **CF `token长度=0` 日志噪声**：P3，非阻塞。
 - 节点 catalog / Clash 产物进一步瘦身（`nodes.json` 2.2MB；可选）。
 
