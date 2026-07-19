@@ -301,13 +301,16 @@ GUI：`uv run python grok_register_ttk.py`
 | `chat无权限` / `entitlement_denied` | models 可能 200，但 chat **403** | **不要 remint**；换获权渠道或付费 API |
 | 只有 `accounts_cli.txt` 有 SSO | 注册成功，OIDC/chat 未过 | SSO 可给 grok2api；**≠** free Build |
 
-默认（简易模板）：
+默认（产号主链路 · disk-first）：
 
-- `cpa_probe_chat=true` — mint 后打最小 chat  
-- `cpa_remote_inject=false` — **不**自动推远端  
-- 无权限号进 `cpa_auths/entitlement_denied.jsonl`，remint 会跳过  
+- `cpa_export_enabled=true` — 注册后 mint OIDC，写出完整 `xai-*.json`（含 refresh）  
+- `cpa_probe_chat=false` — **不**在主链路打 chat；成功 = 落盘 complete auth  
+- `cpa_remote_inject=false` — **不**自动推远端 CPA；注入是独立后续链路  
+- supervisor 强制：`CPA_EXPORT_ENABLED=true` / `CPA_PROBE_CHAT=false` / `CPA_REMOTE_INJECT=false`
 
-> **重要：** 本工具不能「生成」xAI free Build 权限。权限由 xAI 服务端授予；脚本只负责检测并 fail-fast。
+> **边界：** 注册机主链路到「账号信息完整落盘」为止。CPA healthy 筛选与 tebi 注入单独做，勿绑进注册成功判定，以免 chat 403 / SSH 拖死产号。
+
+> **重要：** 本工具不能「生成」xAI free Build 权限。权限由 xAI 服务端授予；chat probe / 导入链路只负责检测。
 
 ### 常见卡点
 
@@ -320,23 +323,23 @@ GUI：`uv run python grok_register_ttk.py`
 | `entitlement_denied` / chat 403 | **号无 free Build 权**，勿 remint；见上文权限说明 |
 | Python 版本错误 | 需要 **3.13** + [uv](https://docs.astral.sh/uv/) |
 
-### 生产模式（可选 · 远端 live 注入）
+### CPA 注入（独立链路 · 非注册主路径）
 
-一键写入 CPA live 池时，用全量模板并打开这些键（详见 `config.example.json` 注释）：
+注册机默认 **不** 注入远端。需要进 tebi live 时，在**另一条链路**对已落盘 auth 做 healthy-only 导入（先 chat probe，仅 scp healthy）：
 
-| 键 | 建议 |
+| 键 | 建议（仅独立注入工具/手动步骤） |
 |----|------|
-| `cpa_remote_inject` | `true` |
-| `cpa_remote_live_required` | `true`（live 失败则整次失败） |
-| `cpa_remote_ssh_host` | 如 `tebi-tunnel` |
-| `cpa_remote_auth_dirs` | 默认 live+inventory：`/root/.cli-proxy-api,/personal/cpa/auths` |
-| `cpa_remote_credentials_file` | Bohrium/SSH 密码文件，或环境变量 `CPA_REMOTE_SSHPASS` |
-| `cpa_probe_chat` / `cpa_probe_chat_required` | 保持 `true`（无权限号不进 live） |
+| 候选源 | pxed `cpa_auths/xai-*.json`（complete + refresh） |
+| 门禁 | 仅 chat healthy；403 / reauth / incomplete **不进** CPA |
+| `cpa_remote_inject` | 注册主链路保持 `false`；注入用独立脚本/手动 scp |
+| `cpa_remote_ssh_host` 等 | 仅注入工具侧配置（如 `tebi-tunnel`） |
 
 ```bash
-cp config.example.json config.json
-# 编辑上表字段后：
-uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
+# 产号（主链路）— supervisor 已 disk-first
+logs/launch_batch_supervisor.sh ordinary N
+
+# 注入（独立，用户触发）— 先 probe healthy，再只导入 healthy 列表
+# 勿在 register_cli 成功路径里一键绑死
 ```
 
 开发自检：
@@ -465,7 +468,7 @@ PROXY_ROTATE_MODE=list PROXY_LIST="http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:80
 | `cpa_copy_to_hotload` | `false` | 是否复制到本机 CPA 热加载目录 |
 | `cpa_hotload_dir` | 空 | 本机 CPA `auth-dir` |
 | `cpa_auth_priority` | `1000` | 写入 `xai-*.json` 的 CPA 路由权重（mint/写盘/注入统一） |
-| `cpa_remote_inject` | `false` | mint 后是否 SSH **一键**注入远端（注册/backfill/remint 同链路）；**生产推荐 true** |
+| `cpa_remote_inject` | `false` | mint 后是否 SSH 注入远端。**注册主链路保持 false**（只落盘）；注入走独立 healthy-only 链路 |
 | `cpa_remote_live_dir` | `/root/.cli-proxy-api` | 一键成功门闩目录（live 池） |
 | `cpa_remote_live_required` | `true` | live 注入失败则整次 export 失败（inventory-only 不算一键成功） |
 | `cpa_remote_inject_required` | `false` | 所有远端目录都必须成功；比 live 门闩更严 |
@@ -474,7 +477,8 @@ PROXY_ROTATE_MODE=list PROXY_LIST="http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:80
 | `cpa_remote_auth_dir` | 兼容单目录 | 仅当 **未** 开 inject 且未设 `cpa_remote_auth_dirs` 时使用 |
 | `cpa_remote_credentials_file` | `~/.ssh/bohrium_credentials` | 可选密码文件；也可用环境变量 `CPA_REMOTE_SSHPASS` / `SSHPASS` |
 
-**一键进 CPA：** 注册成功 → 协议 mint → 本地 `cpa_auths`（含 `priority`）→ 远端 **live** `/root/.cli-proxy-api`（必须成功）+ inventory `/personal/cpa/auths`。inventory 成功而 live 失败 **不算** 一键成功。存量续期：
+**产号主链路：** 注册成功 → mint → 本地 `cpa_auths` complete auth（含 refresh）即结束。  
+**CPA 注入（独立）：** 对落盘文件 chat probe → **仅 healthy** 导入 live/inventory；勿在 register 成功路径绑 `cpa_remote_inject=true`。存量 remint 工具仍可用：
 
 ```bash
 uv run python -u scripts/remint_expired_and_sync_authdir.py --limit 5
