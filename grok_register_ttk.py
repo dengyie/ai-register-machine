@@ -3250,13 +3250,20 @@ def get_email_and_token(api_key=None):
         try:
             return _allocate_email_for_provider(provider, api_key=api_key)
         except Exception:
-            # Failover: mark next channel for subsequent attempt; keep error for caller.
-            advance_email_provider_failover()
+            # Release bind so RR/random reselect on next attempt; failover advances index.
+            try:
+                advance_email_provider_failover()
+            finally:
+                clear_email_provider_bind()
             raise
 
     provider = get_email_provider()
     bind_email_provider(provider)
-    return _allocate_email_for_provider(provider, api_key=api_key)
+    try:
+        return _allocate_email_for_provider(provider, api_key=api_key)
+    except Exception:
+        clear_email_provider_bind()
+        raise
 
 
 def _fixed_core_get_oai_code(
