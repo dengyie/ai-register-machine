@@ -9,11 +9,13 @@ Browser lifecycle:
   - Full recycle every N accounts or on error
   - Register browser released BEFORE mint (mint always standalone Chromium)
   - Peak browsers ≈ R + M (not 2×R)
-  - Startup: kill PPID=1 orphan Drission Chromes left by crashed runs
+  - Startup: kill PPID=1 orphan Drission Chromes + empty Xvfb left by crashed runs
+  - Process-level flock (default) prevents dual register_cli device-page stalls
 """
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import queue
@@ -207,6 +209,146 @@ _MINT_STOP = object()
 _fatal_stop = threading.Event()
 _fatal_reason_lock = threading.Lock()
 _fatal_reason: list[str] = [""]
+
+# Process-level single-instance lock (ad-hoc CLI / smoke). Bulk supervisor has its own.
+# Path overridable via GROK_REGISTER_CLI_LOCK. SKIP_REGISTER_CLI_LOCK=1 disables.
+_DEFAULT_CLI_LOCK_PATH = "/tmp/grok_register_cli.lock"
+_cli_lock_fd: int | None = None
+_cli_lock_path: str = ""
+# Last mint fail taxonomy for SUMMARY_JSON (best-effort, not a product gate).
+_last_mint_fail_reason: list[str] = [""]
+_last_mint_fail_phase: list[str] = [""]
+_last_mint_fail_lock = threading.Lock()
+
+
+def _note_mint_fail(reason: str, phase: str = "") -> None:
+    with _last_mint_fail_lock:
+        _last_mint_fail_reason[0] = (reason or "")[:200]
+        _last_mint_fail_phase[0] = (phase or "")[:80]
+
+
+def _classify_mint_fail(result: dict[str, Any] | None) -> tuple[str, str]:
+    """Derive (mint_fail_reason, mint_fail_phase) from export/mint result dict."""
+    if not isinstance(result, dict):
+        return ("mint_error", "")
+    explicit = str(result.get("mint_fail_reason") or "").strip()
+    phase = str(result.get("mint_fail_phase") or "").strip()
+    if explicit:
+        return (explicit[:200], phase[:80])
+    err = str(result.get("error") or result.get("fail_reason") or "").strip()
+    low = err.lower()
+    if "device_click_stall" in low:
+        return ("device_click_stall", phase or "device")
+    if "browser confirm timeout" in low or "timeout phase=" in low:
+        # phase=device|consent|password|email ...
+        p = phase
+        if not p and "phase=" in low:
+            try:
+                p = low.split("phase=", 1)[1].split(None, 1)[0].strip()
+            except Exception:
+                p = ""
+        return ("browser_timeout", p or "device")
+    if "auth failed" in low or "turnstile" in low:
+        return ("auth_failed", phase or "password")
+    if "chromium" in low or "browser connection" in low:
+        return ("browser_boot", phase or "boot")
+    if err:
+        return ("mint_error", phase)
+    return ("mint_error", phase)
+
+
+def _release_cli_lock() -> None:
+    """Best-effort unlock + close flock fd (atexit / early return)."""
+    global _cli_lock_fd, _cli_lock_path
+    fd = _cli_lock_fd
+    path = _cli_lock_path
+    _cli_lock_fd = None
+    _cli_lock_path = ""
+    if fd is None:
+        return
+    try:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        os.close(fd)
+    except Exception:
+        pass
+    # Leave lock file on disk (path marker); do not unlink — other waiter may open it.
+
+
+def acquire_register_cli_lock(
+    *,
+    lock_path: str | None = None,
+    skip: bool | None = None,
+) -> tuple[bool, str]:
+    """Non-blocking exclusive flock for single-instance ad-hoc register_cli.
+
+    Returns (ok, message). ok=False → another process holds the lock (caller exit 1).
+    skip=True / env SKIP_REGISTER_CLI_LOCK=1 → always ok (bulk supervisor path).
+    """
+    global _cli_lock_fd, _cli_lock_path
+    if skip is None:
+        skip = str(os.environ.get("SKIP_REGISTER_CLI_LOCK") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if skip:
+        return True, "lock skipped (SKIP_REGISTER_CLI_LOCK)"
+    path = (lock_path or os.environ.get("GROK_REGISTER_CLI_LOCK") or _DEFAULT_CLI_LOCK_PATH).strip()
+    if not path:
+        path = _DEFAULT_CLI_LOCK_PATH
+    try:
+        import fcntl
+    except ImportError:
+        # Windows / non-POSIX: best-effort no-op (production is Linux pxed).
+        return True, "lock skipped (no fcntl)"
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        return False, f"lock open failed path={path}: {e}"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        holder = ""
+        try:
+            with open(f"{path}.pid", encoding="utf-8") as pf:
+                holder = (pf.read() or "").strip()
+        except Exception:
+            pass
+        msg = f"another register_cli holds {path}"
+        if holder:
+            msg = f"{msg} pid={holder}"
+        return False, msg
+    except OSError as e:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        return False, f"lock flock failed path={path}: {e}"
+    _cli_lock_fd = fd
+    _cli_lock_path = path
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        os.fsync(fd)
+    except Exception:
+        pass
+    try:
+        with open(f"{path}.pid", "w", encoding="utf-8") as pf:
+            pf.write(f"{os.getpid()}\n")
+    except Exception:
+        pass
+    atexit.register(_release_cli_lock)
+    return True, f"lock acquired path={path} pid={os.getpid()}"
 
 
 class FatalRegisterError(Exception):
@@ -1128,6 +1270,11 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
             # token_ok + chat fail is a product gate miss, not a mint write failure.
             if result.get("token_ok") is not True:
                 _inc("mint_fail")
+                reason, phase = _classify_mint_fail(result)
+                _note_mint_fail(reason, phase)
+                result.setdefault("mint_fail_reason", reason)
+                if phase:
+                    result.setdefault("mint_fail_phase", phase)
             if result.get("entitlement_denied"):
                 log(
                     worker_id,
@@ -1142,7 +1289,13 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
                     f"{result.get('error') or result.get('fail_reason') or result}",
                 )
             else:
-                log(worker_id, f"! CPA auth 未成功: {result.get('error') or result}")
+                mfr = result.get("mint_fail_reason") or ""
+                log(
+                    worker_id,
+                    f"! CPA auth 未成功"
+                    f"{f' reason={mfr}' if mfr else ''}: "
+                    f"{result.get('error') or result}",
+                )
             if inject_on and not result.get("remote_inject_disabled"):
                 if result.get("remote_inject_skipped"):
                     _inc("remote_inject_skip")
@@ -1151,9 +1304,15 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
         return result
     except Exception as exc:
         _inc("mint_fail")
+        _note_mint_fail("mint_exception", "")
         log(worker_id, f"! CPA export 异常: {exc}")
         traceback.print_exc()
-        return {"ok": False, "error": str(exc), "email": email}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "email": email,
+            "mint_fail_reason": "mint_exception",
+        }
 
 
 def _register_worker(
@@ -1314,7 +1473,20 @@ def main() -> int:
         default="",
         help="clash 模式命中域名（逗号分隔，默认 x.ai,grok.com,grok.x.ai,assets.grok.com）",
     )
+    parser.add_argument(
+        "--no-cli-lock",
+        action="store_true",
+        help="跳过单实例 flock（调试/测试用；生产 smoke/CLI 默认加锁）",
+    )
     args = parser.parse_args()
+
+    # Single-instance flock early: dual register_cli → dual Chromium/Xvfb →
+    # device page stall (visible 继续 never clicked) for ~7min then timeout.
+    lock_ok, lock_msg = acquire_register_cli_lock(skip=bool(args.no_cli_lock))
+    if not lock_ok:
+        print(f"[!] {lock_msg}; exit 1", flush=True)
+        return 1
+    print(f"[*] {lock_msg}", flush=True)
 
     reg.load_config()
     cfg0 = getattr(reg, "config", {}) or {}
@@ -1433,10 +1605,10 @@ def main() -> int:
     log_thread = threading.Thread(target=_log_writer, daemon=True)
     log_thread.start()
 
-    # Crashed prior runs can leave Drission Chrome reparented to launchd (PPID=1).
+    # Crashed prior runs leave Drission Chrome / empty Xvfb reparented to init.
     # Clean those before starting workers; never touch live children of this process.
     try:
-        from tab_pool import cleanup_orphan_drission_chromes
+        from tab_pool import cleanup_orphan_drission_chromes, cleanup_orphan_xvfb
 
         cres = cleanup_orphan_drission_chromes(
             log_callback=lambda m: print(m, flush=True),
@@ -1447,8 +1619,19 @@ def main() -> int:
                 f"[*] 启动清理孤儿浏览器: killed={cres['killed']} pids={cres.get('pids')}",
                 flush=True,
             )
+        xres = cleanup_orphan_xvfb(
+            log_callback=lambda m: print(m, flush=True),
+            only_ppid_init=True,
+            require_no_children=True,
+        )
+        if xres.get("killed") or xres.get("tmp_removed"):
+            print(
+                f"[*] 启动清理孤儿 Xvfb: killed={xres.get('killed')} "
+                f"tmp_removed={xres.get('tmp_removed')} pids={xres.get('pids')}",
+                flush=True,
+            )
     except Exception as exc:  # noqa: BLE001
-        print(f"[!] 孤儿浏览器清理跳过: {exc}", flush=True)
+        print(f"[!] 孤儿资源清理跳过: {exc}", flush=True)
 
     try:
         # Factory only; real start_browser pins proxy bridge per worker thread.
@@ -1646,6 +1829,9 @@ def main() -> int:
             "fatal": bool(_fatal_stop.is_set()),
             "fatal_reason": fatal_stop_reason() if _fatal_stop.is_set() else "",
             "product_ok": bool(exit_code == 0),
+            # Last mint write failure taxonomy (observability; empty on clean success).
+            "mint_fail_reason": _last_mint_fail_reason[0] if s.get("mint_fail") else "",
+            "mint_fail_phase": _last_mint_fail_phase[0] if s.get("mint_fail") else "",
         }
         print(
             "SUMMARY_JSON "

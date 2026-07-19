@@ -1297,6 +1297,13 @@ def approve_device_code(
     phase = "device"
     login_attempts = 0
     last_url = ""
+    # Device-page click stall: dual Chromium contention leaves "继续" visible but
+    # unclickable / no navigation. Abort early instead of full timeout (~7 min).
+    device_stall_started: float | None = None
+    device_stall_clicks = 0
+    # Wall-clock stall budget (unscaled): enough for a few click retries, far under full timeout.
+    device_stall_budget_sec = min(45.0, max(20.0, float(timeout_sec) * 0.25))
+    device_stall_click_limit = 6
 
     while time.time() < deadline:
         if stop_event is not None and stop_event.is_set():
@@ -1311,6 +1318,9 @@ def approve_device_code(
             snip = _norm(text)[:160]
             if snip:
                 log(f"visible: {snip}")
+            # URL changed → reset device stall tracker (progress happened).
+            device_stall_started = None
+            device_stall_clicks = 0
 
         # Non-retryable auth / CF block — skip account immediately (no timeout wait)
         auth_err = _detect_auth_error(text, url)
@@ -1340,6 +1350,8 @@ def approve_device_code(
             page.get(verification_uri_complete)
             _sleep(2.0)
             phase = "device"
+            device_stall_started = None
+            device_stall_clicks = 0
             continue
 
         # Cookie / privacy modal first (blocks OAuth 允许 on consent page)
@@ -1357,6 +1369,8 @@ def approve_device_code(
         # Consent page — REAL click exact 允许 (never 全部允许)
         if "/consent" in url or "授权 Grok Build" in text or "Authorize Grok Build" in text:
             phase = "consent"
+            device_stall_started = None
+            device_stall_clicks = 0
             # double-check banner cleared this frame
             if _cookie_banner_visible(_visible_text(page)):
                 _dismiss_cookie_banner(page, log)
@@ -1399,6 +1413,8 @@ def approve_device_code(
         # Device code entry
         if page.ele("css:input[name='user_code']", timeout=0.3) and "consent" not in url:
             phase = "device"
+            if device_stall_started is None:
+                device_stall_started = time.time()
             if user_code:
                 try:
                     uc = page.ele("css:input[name='user_code']")
@@ -1409,18 +1425,49 @@ def approve_device_code(
                         log("filled user_code")
                 except Exception:
                     pass
+            clicked = False
             if _click_exact(page, ["继续", "Continue"], log, real=False):
+                clicked = True
+                device_stall_clicks += 1
                 _sleep(2.0)
+            else:
+                try:
+                    el = page.ele("css:button[type='submit']", timeout=0.5)
+                    if el:
+                        el.click(by_js=True)
+                        log("clicked device submit")
+                        clicked = True
+                        device_stall_clicks += 1
+                        _sleep(2.0)
+                except Exception:
+                    pass
+            # Early-abort: still on device form after repeated clicks / stall budget.
+            still_device = bool(
+                page.ele("css:input[name='user_code']", timeout=0.2)
+            ) and "consent" not in _page_url(page)
+            stall_elapsed = (
+                time.time() - device_stall_started if device_stall_started else 0.0
+            )
+            if still_device and (
+                device_stall_clicks >= device_stall_click_limit
+                or stall_elapsed >= device_stall_budget_sec
+            ):
+                shot = _save_debug_shot(
+                    page, tag="device-click-stall", email=email, log=log
+                )
+                msg = (
+                    f"device_click_stall phase=device clicks={device_stall_clicks} "
+                    f"stall_sec={stall_elapsed:.1f} budget={device_stall_budget_sec:.0f}"
+                )
+                if shot:
+                    msg = f"{msg} shot={shot}"
+                log(msg)
+                raise BrowserConfirmError(msg)
+            if clicked:
                 continue
-            try:
-                el = page.ele("css:button[type='submit']", timeout=0.5)
-                if el:
-                    el.click(by_js=True)
-                    log("clicked device submit")
-                    _sleep(2.0)
-                    continue
-            except Exception:
-                pass
+            # No click landed this frame — still count toward stall wall clock.
+            _sleep(1.0)
+            continue
 
         # Account redirect
         if "正在重定向" in text or ("/account" in url and "sign-in" not in url):

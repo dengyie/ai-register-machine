@@ -83,10 +83,39 @@ def test_cleanup_dry_run_only_ppid_init() -> None:
     print("PASS cleanup_dry_run_only_ppid_init")
 
 
+def test_is_xvfb_and_parse() -> None:
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    from tab_pool import is_xvfb_cmdline, parse_ps_xvfb_rows
+
+    assert is_xvfb_cmdline("/usr/bin/Xvfb :99 -screen 0 1280x900x24")
+    assert not is_xvfb_cmdline("xvfb-run -a python")
+    rows = parse_ps_xvfb_rows(
+        " 10 1 /usr/bin/Xvfb :99 -screen 0 1x1x24\n 11 2 /usr/bin/Xvfb :100\n"
+    )
+    assert {r[0] for r in rows} == {10, 11}
+    print("PASS is_xvfb_and_parse")
+
+
+def test_cleanup_orphan_xvfb_dry_run() -> None:
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    from tab_pool import cleanup_orphan_xvfb
+
+    res = cleanup_orphan_xvfb(only_ppid_init=True, dry_run=True, clean_tmp_dirs=False)
+    assert res.get("dry_run") is True
+    assert "scanned" in res
+    print("PASS cleanup_orphan_xvfb_dry_run")
+
+
 def main() -> int:
     test_is_drission_chrome_cmdline()
     test_parse_ps_chrome_rows_filters_ppid()
     test_cleanup_dry_run_only_ppid_init()
+    test_is_xvfb_and_parse()
+    test_cleanup_orphan_xvfb_dry_run()
     print("\nALL PASS")
     return 0
 

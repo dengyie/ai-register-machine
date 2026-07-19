@@ -16,6 +16,18 @@
 | SPA-stuck browser_boot 回收 | pre-email「您正在登录」粘滞 → `AccountRetryNeeded browser_boot` slot-retry；legacy wording 兼容归类 | `773404c`、`e635334`、`530f770` | — |
 | Hotmail plus-alias 关停 | 别名农场 kill-switch（mode=off / allow=false），别名耗尽立即致命停止不空转 | `78fd894` | [chatgpt-code-align](archive/specs/2026-07-16-chatgpt-code-align-design.md) |
 | register_core 迁移 A（生产入口切 Pipeline） | `./register.sh grok\|mimo\|chatgpt` 统一经 register_core Pipeline 调度（attribution/strategy/节点 preflight/代理轮换/验证器/sink）；Grok/MiMo 仍 shell-out legacy；`GROK_LEGACY`/`MIMO_LEGACY`/`CHATGPT_LEGACY=1` 回滚；退出码映射 0/1/2；路由静态门禁 `test_router.py` | `5c10946`、`18f2976`、(phase-3) | — |
+| mint 稳定性（disk-first smoke 暴露） | 单实例 flock（register_cli + smoke 包装）；`scripts/smoke_diskfirst_one.sh` 官方单发 disk-first；device 页 `device_click_stall` 早停；`mint_fail_reason`/`phase` 进 SUMMARY_JSON；启动清理孤儿 Chrome + 无子进程 Xvfb/`/tmp/xvfb-run.*` | （本轮 commit） | — |
+
+### mint 稳定性验证入口（disk-first）
+
+```bash
+# 官方单发 smoke（flock + export=true/probe=false/inject=false；成功=complete+refresh）
+bash scripts/smoke_diskfirst_one.sh
+# 跳过 Clash 叶子 preflight（调试）
+SKIP_CLASH_PREFLIGHT=1 bash scripts/smoke_diskfirst_one.sh
+# 门禁
+python -m pytest test_mint_stability.py test_orphan_chrome_cleanup.py test_bulk_supervisor_disk_first.py -q
+```
 
 ## 待开发（backlog，未启动，本轮不做）
 

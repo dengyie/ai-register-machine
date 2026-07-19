@@ -103,6 +103,7 @@ def _cancelled_result(
         "email": email,
         "error": "cancelled",
         "mint_method": mint_method,
+        "mint_fail_reason": "cancelled",
         "pkce_retryable": False,
     }
     if pkce_error_code:
@@ -110,6 +111,41 @@ def _cancelled_result(
     if protocol_err:
         out["protocol_error"] = str(protocol_err)[:500]
     return out
+
+
+def classify_browser_mint_error(err: Exception | str | None) -> tuple[str, str]:
+    """Map browser/protocol mint exceptions → (mint_fail_reason, mint_fail_phase).
+
+    Stable taxonomy for SUMMARY_JSON / ops:
+      device_click_stall | browser_timeout | auth_failed | browser_boot | mint_error | cancelled
+    """
+    s = str(err if err is not None else "").strip()
+    low = s.lower()
+    if not s:
+        return ("mint_error", "")
+    if low == "cancelled" or low.startswith("cancelled"):
+        return ("cancelled", "")
+    phase = ""
+    if "phase=" in low:
+        try:
+            phase = low.split("phase=", 1)[1].split(None, 1)[0].strip()
+        except Exception:
+            phase = ""
+    if "device_click_stall" in low:
+        return ("device_click_stall", phase or "device")
+    if "browser confirm timeout" in low or (
+        "timeout" in low and "phase=" in low
+    ):
+        return ("browser_timeout", phase or "device")
+    if "auth failed" in low or "turnstile" in low:
+        return ("auth_failed", phase or "password")
+    if (
+        "chromium" in low
+        or "browser connection" in low
+        or "the browser connection fails" in low
+    ):
+        return ("browser_boot", phase or "boot")
+    return ("mint_error", phase)
 
 
 def mint_and_export(
@@ -442,13 +478,18 @@ def mint_and_export(
             err = str(e)
             if protocol_err:
                 err = f"{err} (protocol: {protocol_err})"
-            return {
+            reason, phase = classify_browser_mint_error(e)
+            out_fail: dict[str, Any] = {
                 "ok": False,
                 "email": email,
                 "error": err,
                 "protocol_error": protocol_err,
                 "mint_method": "browser",
+                "mint_fail_reason": reason,
             }
+            if phase:
+                out_fail["mint_fail_phase"] = phase
+            return out_fail
 
     try:
         pri = int(priority)

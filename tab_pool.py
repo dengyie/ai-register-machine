@@ -8,6 +8,7 @@ Interface:
     TabPool.release_tab()         → quit current thread browser + drop registry
     TabPool.shutdown()            → quit all known browsers
     cleanup_orphan_drission_chromes() → kill PPID=1 leftover Drission Chromes
+    cleanup_orphan_xvfb()            → kill PPID=1 Xvfb with no children + stale tmp
 
 Notes:
     - One Chromium per worker thread (cookie isolation).
@@ -15,6 +16,8 @@ Notes:
     - _all_browsers is pruned on release to avoid zombie list growth.
     - Success path reuses the process; orphans usually come from crashed runs
       where quit() never ran and Chrome was reparented to init/launchd (PPID=1).
+    - Xvfb orphans accumulate from xvfb-run crashes; only kill when PPID=init
+      and no live children remain (active displays are left alone).
 """
 
 from __future__ import annotations
@@ -192,6 +195,217 @@ def cleanup_orphan_drission_chromes(
         log(
             f"[browser] orphan cleanup: matched={result['matched']} "
             f"killed={result['killed']} skipped={result['protected_skipped']}"
+        )
+    return result
+
+
+def is_xvfb_cmdline(cmd: str) -> bool:
+    """True for Xvfb display servers (not xvfb-run shell wrappers)."""
+    if not cmd:
+        return False
+    s = cmd.strip()
+    # argv0 is Xvfb or .../Xvfb; ignore xvfb-run (shell helper still live).
+    first = s.split(None, 1)[0]
+    base = first.rsplit("/", 1)[-1]
+    return base == "Xvfb"
+
+
+def parse_ps_xvfb_rows(ps_text: str) -> list[tuple[int, int, str]]:
+    """Parse ``ps -ax -o pid=,ppid=,command=`` → Xvfb (pid, ppid, cmd)."""
+    rows: list[tuple[int, int, str]] = []
+    for line in (ps_text or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        parts = s.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        cmd = parts[2]
+        if is_xvfb_cmdline(cmd):
+            rows.append((pid, ppid, cmd))
+    return rows
+
+
+def _pids_with_ppid(ps_text: str, parent_pid: int) -> list[int]:
+    """Return child pids whose ppid equals parent_pid."""
+    kids: list[int] = []
+    for line in (ps_text or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        parts = s.split(None, 2)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        if ppid == parent_pid:
+            kids.append(pid)
+    return kids
+
+
+def cleanup_orphan_xvfb(
+    *,
+    log_callback: LogFn | None = None,
+    protect_pids: set[int] | None = None,
+    only_ppid_init: bool = True,
+    require_no_children: bool = True,
+    dry_run: bool = False,
+    term_grace_sec: float = 1.0,
+    clean_tmp_dirs: bool = True,
+    tmp_dir_max_age_sec: float = 3600.0,
+) -> dict[str, Any]:
+    """Kill orphan Xvfb servers left by crashed xvfb-run / register sessions.
+
+    Safety:
+      - Only matches real Xvfb binaries (not xvfb-run wrappers).
+      - Default only_ppid_init=True → PPID in {0, 1} (orphans reparented to init).
+      - Default require_no_children=True → skip Xvfb that still has live children
+        (active display still serving chrome/python).
+      - Never signals protect_pids / self / parent.
+      - Optionally removes stale empty-ish /tmp/xvfb-run.* dirs older than max age.
+
+    Returns dict: scanned, matched, killed, protected_skipped, tmp_removed, errors, pids.
+    """
+    log = log_callback or (lambda _m: None)
+    protect = set(protect_pids or ())
+    protect.add(os.getpid())
+    try:
+        protect.add(os.getppid())
+    except Exception:
+        pass
+
+    result: dict[str, Any] = {
+        "scanned": 0,
+        "matched": 0,
+        "killed": 0,
+        "protected_skipped": 0,
+        "child_skipped": 0,
+        "tmp_removed": 0,
+        "errors": [],
+        "pids": [],
+        "dry_run": dry_run,
+    }
+
+    try:
+        proc = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        ps_text = proc.stdout or ""
+    except Exception as e:  # noqa: BLE001
+        result["errors"].append(f"ps failed: {e}")
+        log(f"[xvfb] orphan cleanup: ps failed: {e}")
+        return result
+
+    rows = parse_ps_xvfb_rows(ps_text)
+    result["scanned"] = len(rows)
+    init_ppids = {0, 1}
+
+    for pid, ppid, cmd in rows:
+        if only_ppid_init and ppid not in init_ppids:
+            continue
+        result["matched"] += 1
+        if pid in protect or ppid in protect or ppid == os.getpid():
+            result["protected_skipped"] += 1
+            continue
+        if require_no_children:
+            kids = _pids_with_ppid(ps_text, pid)
+            if kids:
+                result["child_skipped"] += 1
+                continue
+        disp = ""
+        try:
+            # Xvfb :99 -screen ...
+            toks = cmd.split()
+            for t in toks[1:]:
+                if t.startswith(":"):
+                    disp = t
+                    break
+        except Exception:
+            disp = "?"
+        if dry_run:
+            log(f"[xvfb] orphan would kill pid={pid} ppid={ppid} display={disp}")
+            result["pids"].append(pid)
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError as e:
+            result["errors"].append(f"pid={pid}: {e}")
+            continue
+        except OSError as e:
+            result["errors"].append(f"pid={pid}: {e}")
+            continue
+
+        deadline = time.time() + max(0.1, float(term_grace_sec))
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+        result["killed"] += 1
+        result["pids"].append(pid)
+        log(f"[xvfb] killed orphan Xvfb pid={pid} ppid={ppid} display={disp}")
+
+    if clean_tmp_dirs and sys.platform.startswith("linux"):
+        # Stale xvfb-run workdirs from crashed sessions (safe: age + empty-ish).
+        try:
+            import glob
+            import shutil
+            from pathlib import Path
+
+            now = time.time()
+            max_age = max(60.0, float(tmp_dir_max_age_sec))
+            for path_s in glob.glob("/tmp/xvfb-run.*"):
+                p = Path(path_s)
+                if not p.is_dir():
+                    continue
+                try:
+                    age = now - p.stat().st_mtime
+                except OSError:
+                    continue
+                if age < max_age:
+                    continue
+                # Skip if any live process still references the path in cmdline.
+                if path_s in ps_text:
+                    continue
+                if dry_run:
+                    log(f"[xvfb] would remove stale tmp {path_s} age={int(age)}s")
+                    result["tmp_removed"] += 1
+                    continue
+                try:
+                    shutil.rmtree(path_s, ignore_errors=True)
+                    result["tmp_removed"] += 1
+                    log(f"[xvfb] removed stale tmp {path_s} age={int(age)}s")
+                except Exception as e:  # noqa: BLE001
+                    result["errors"].append(f"tmp {path_s}: {e}")
+        except Exception as e:  # noqa: BLE001
+            result["errors"].append(f"tmp cleanup: {e}")
+
+    if result["matched"] or result["killed"] or result["tmp_removed"]:
+        log(
+            f"[xvfb] orphan cleanup: matched={result['matched']} "
+            f"killed={result['killed']} child_skip={result['child_skipped']} "
+            f"tmp_removed={result['tmp_removed']}"
         )
     return result
 

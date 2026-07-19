@@ -168,30 +168,16 @@ These are **intentional** dual authorities — not a temporary dual-track bug:
 | Track | Entry | When | Success criterion |
 |-------|-------|------|-------------------|
 | **CLI / single-shot** | `./register.sh grok N` → `run-register-core.sh` → register_core Pipeline → grok_adapter shell-out `register_cli --extra 1` | smoke、profile 编排、strategy/sink 统一归因 | register_core product exit (0/1/2) |
-| **Bulk concurrent** | `scripts/launch_batch_supervisor.sh` (pxed often `logs/…`) → xvfb → **`register_cli.py --extra $chunk`** directly | 大批量产号（chunk/threads/soft browser recycle/Clash rotate） | **disk-first**：new complete `xai-*.json` with access+refresh (`mint_token_ok`) |
+| **Disk-first smoke** | `scripts/smoke_diskfirst_one.sh` → flock + xvfb → `register_cli.py --extra 1` | 官方单发边界验证 | +1 complete `xai-*.json` (access+refresh) |
+| **Bulk concurrent** | `scripts/launch_batch_supervisor.sh` → xvfb → **`register_cli.py --extra $chunk`** directly | 大批量产号（chunk/threads/soft browser recycle/Clash rotate） | **disk-first**：new complete `xai-*.json` with access+refresh (`mint_token_ok`) |
 
-Bulk deliberately bypasses register_core serial shell-out (adapter hard-codes `--extra 1` per attempt). Do **not** force bulk through Pipeline until B (in-process concurrent) exists. Supervisor freezes disk-first env:
-
-- `CPA_EXPORT_ENABLED=true`
-- `CPA_PROBE_CHAT=false`
-- `CPA_REMOTE_INJECT=false`
-
-CPA inject is a **separate pipeline** (`scripts/import_cpa_auth_dir.py` / ops), never part of register product success when inject is off.
-
-## Dual production tracks (Grok bulk vs CLI shell)
-
-These are **intentional** dual authorities — not a temporary dual-track bug:
-
-| Track | Entry | When | Success criterion |
-|-------|-------|------|-------------------|
-| **CLI / single-shot** | `./register.sh grok N` → `run-register-core.sh` → register_core Pipeline → grok_adapter shell-out `register_cli --extra 1` | smoke、profile 编排、strategy/sink 统一归因 | register_core product exit (0/1/2) |
-| **Bulk concurrent** | `scripts/launch_batch_supervisor.sh` (pxed often `logs/…`) → xvfb → **`register_cli.py --extra $chunk`** directly | 大批量产号（chunk/threads/soft browser recycle/Clash rotate） | **disk-first**：new complete `xai-*.json` with access+refresh (`mint_token_ok`) |
-
-Bulk deliberately bypasses register_core serial shell-out (adapter hard-codes `--extra 1` per attempt). Do **not** force bulk through Pipeline until B (in-process concurrent) exists. Supervisor freezes disk-first env:
+Bulk deliberately bypasses register_core serial shell-out (adapter hard-codes `--extra 1` per attempt). Do **not** force bulk through Pipeline until B (in-process concurrent) exists. Supervisor / smoke freeze disk-first env:
 
 - `CPA_EXPORT_ENABLED=true`
 - `CPA_PROBE_CHAT=false`
 - `CPA_REMOTE_INJECT=false`
+
+**Mint stability (runtime hygiene):** ad-hoc `register_cli` takes non-blocking flock `/tmp/grok_register_cli.lock` (skip: `SKIP_REGISTER_CLI_LOCK=1` / `--no-cli-lock`) so dual Chromium/Xvfb cannot stall device-page clicks. Startup cleans PPID=1 orphan Drission Chromes and empty Xvfb (+ stale `/tmp/xvfb-run.*`). Browser mint early-aborts `device_click_stall` instead of full timeout; `SUMMARY_JSON` carries `mint_fail_reason` / `mint_fail_phase`.
 
 CPA inject is a **separate pipeline** (`scripts/import_cpa_auth_dir.py` / ops), never part of register product success when inject is off.
 
