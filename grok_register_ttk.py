@@ -125,6 +125,11 @@ DEFAULT_CONFIG = {
     # PKCE often fails CreateCookieSetterLink; device fallback completes local mint.
     # entitlement_denied still hard-blocks tebi/live inject (no remint spin).
     "cpa_allow_device_flow_fallback": True,
+    # Email channel: single email_provider, or multi-select email_providers pool.
+    # Empty email_providers → fall back to email_provider. Env EMAIL_PROVIDERS wins.
+    "email_provider": "duckmail",
+    "email_providers": [],
+    "email_provider_strategy": "round_robin",  # round_robin | random | failover
 }
 
 config = DEFAULT_CONFIG.copy()
@@ -138,6 +143,25 @@ _hotmail_accounts_mtime = None
 _hotmail_accounts_lock = threading.Lock()
 _hotmail_selection_lock = threading.Lock()
 _hotmail_reserved_aliases = set()
+# Multi-select email provider pool (EMAIL_PROVIDERS): thread-local bind so
+# allocate + OTP stay on the same channel for one attempt; RR index is global.
+_email_provider_tls = threading.local()
+_email_provider_rr_lock = threading.Lock()
+_email_provider_rr_index = 0
+_EMAIL_PROVIDER_ALIASES = {
+    "outlook": "hotmail",
+    "outlookmail": "hotmail",
+    "microsoft": "hotmail",
+    "google": "gmail",
+    "googlemail": "gmail",
+    "cf": "cloudflare",
+    "cloudflare_worker": "cloudflare",
+}
+# Channels implemented by get_email_and_token / get_oai_code (not register_core-only).
+_EMAIL_PROVIDER_POOL_KNOWN = frozenset(
+    {"duckmail", "yyds", "cloudflare", "cloudmail", "hotmail", "gmail"}
+)
+_EMAIL_PROVIDER_STRATEGIES = frozenset({"round_robin", "random", "failover"})
 _hotmail_token_map = {}
 _hotmail_refresh_locks = {}
 _hotmail_refresh_locks_lock = threading.Lock()
@@ -353,6 +377,8 @@ def load_env():
 _ENV_CONFIG_OVERLAYS = (
     ("HOTMAIL_ACCOUNTS_FILE", "hotmail_accounts_file"),
     ("EMAIL_PROVIDER", "email_provider"),
+    ("EMAIL_PROVIDERS", "email_providers"),
+    ("EMAIL_PROVIDER_STRATEGY", "email_provider_strategy"),
     ("GMAIL_IMAP_USER", "gmail_imap_user"),
     ("GMAIL_IMAP_PASSWORD", "gmail_imap_password"),
     ("GMAIL_APP_PASSWORD", "gmail_imap_password"),
@@ -2970,16 +2996,173 @@ def gmail_get_oai_code(
 
 # ──────────────────────── 公共邮箱工具 ────────────────────────
 
+def normalize_email_provider_key(name: str) -> str:
+    """Canonicalize provider aliases (outlook→hotmail, google→gmail, …)."""
+    p = str(name or "").strip().lower()
+    if not p:
+        return ""
+    return _EMAIL_PROVIDER_ALIASES.get(p, p)
+
+
+def parse_email_providers_list(raw) -> list[str]:
+    """Parse multi-select provider list from env/config string or sequence.
+
+    Accepts comma / Chinese comma / semicolon / whitespace separators.
+    Dedupes while preserving order. Unknown names raise (fail-fast).
+    ``fixed`` / register_core inject channels are not pool members.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        parts = [str(x) for x in raw]
+    else:
+        parts = re.split(r"[,，;\s]+", str(raw))
+    out: list[str] = []
+    seen: set[str] = set()
+    unknown: list[str] = []
+    for part in parts:
+        key = normalize_email_provider_key(part)
+        if not key:
+            continue
+        if key in ("fixed", "core", "register_core"):
+            raise Exception(
+                "EMAIL_PROVIDERS 不能包含 fixed/core（由 register_core FIXED_EMAIL inject 独占）"
+            )
+        if key not in _EMAIL_PROVIDER_POOL_KNOWN:
+            unknown.append(str(part).strip() or key)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    if unknown:
+        raise Exception(
+            f"EMAIL_PROVIDERS 含未知链路: {', '.join(unknown)}; "
+            f"known={sorted(_EMAIL_PROVIDER_POOL_KNOWN)}"
+        )
+    return out
+
+
+def get_email_provider_strategy() -> str:
+    raw = str(
+        os.environ.get("EMAIL_PROVIDER_STRATEGY")
+        or config.get("email_provider_strategy")
+        or "round_robin"
+    ).strip().lower()
+    if raw in _EMAIL_PROVIDER_STRATEGIES:
+        return raw
+    return "round_robin"
+
+
+def get_email_providers_pool() -> list[str]:
+    """Resolved multi-select pool (empty = single-provider mode).
+
+    Priority: EMAIL_PROVIDERS env → config.email_providers → [].
+    Single EMAIL_PROVIDER is not expanded into a one-item pool here; callers
+    fall back via get_email_provider().
+    """
+    env_raw = (os.environ.get("EMAIL_PROVIDERS") or "").strip()
+    if env_raw:
+        return parse_email_providers_list(env_raw)
+    cfg_raw = config.get("email_providers") if isinstance(config, dict) else None
+    if cfg_raw:
+        return parse_email_providers_list(cfg_raw)
+    return []
+
+
+def bind_email_provider(provider: str | None) -> None:
+    """Pin provider for this thread's current attempt (allocate + OTP)."""
+    key = normalize_email_provider_key(provider) if provider else ""
+    _email_provider_tls.bound = key or None
+
+
+def clear_email_provider_bind() -> None:
+    """Clear attempt bind (call after mail attempt ends or fails)."""
+    _email_provider_tls.bound = None
+
+
+def get_bound_email_provider() -> str | None:
+    bound = getattr(_email_provider_tls, "bound", None)
+    return str(bound).strip().lower() if bound else None
+
+
+def select_email_provider_from_pool(
+    pool: list[str] | None = None,
+    *,
+    strategy: str | None = None,
+    bind: bool = True,
+) -> str:
+    """Pick next provider from multi-select pool; optionally bind for attempt."""
+    providers = list(pool) if pool is not None else get_email_providers_pool()
+    if not providers:
+        raise Exception("email provider pool is empty")
+    strat = (strategy or get_email_provider_strategy()).strip().lower()
+    if strat not in _EMAIL_PROVIDER_STRATEGIES:
+        strat = "round_robin"
+    if len(providers) == 1:
+        chosen = providers[0]
+    elif strat == "random":
+        chosen = random.choice(providers)
+    elif strat == "failover":
+        # Prefer first; advance only when TLS failover_index is raised by caller.
+        idx = int(getattr(_email_provider_tls, "failover_index", 0) or 0)
+        if idx < 0:
+            idx = 0
+        if idx >= len(providers):
+            raise Exception(
+                f"EMAIL_PROVIDERS failover exhausted all {len(providers)} channels: "
+                f"{','.join(providers)}"
+            )
+        chosen = providers[idx]
+    else:
+        # round_robin (default)
+        global _email_provider_rr_index
+        with _email_provider_rr_lock:
+            chosen = providers[_email_provider_rr_index % len(providers)]
+            _email_provider_rr_index += 1
+    if bind:
+        bind_email_provider(chosen)
+    return chosen
+
+
+def advance_email_provider_failover() -> None:
+    """On allocate/mail_miss under failover strategy, try next pool member."""
+    if get_email_provider_strategy() != "failover":
+        return
+    pool = get_email_providers_pool()
+    if len(pool) <= 1:
+        return
+    cur = int(getattr(_email_provider_tls, "failover_index", 0) or 0)
+    _email_provider_tls.failover_index = cur + 1
+    clear_email_provider_bind()
+
+
+def reset_email_provider_failover() -> None:
+    _email_provider_tls.failover_index = 0
+
+
 def get_email_provider():
     # Env EMAIL_PROVIDER overlays config via _ENV_CONFIG_OVERLAYS; FIXED_EMAIL forces fixed.
+    # Attempt bind (multi-select) wins so allocate + OTP stay on one channel.
     fixed = str(os.environ.get("FIXED_EMAIL") or os.environ.get("MIMO_FIXED_EMAIL") or "").strip()
     if fixed and "@" in fixed:
         return "fixed"
-    return str(config.get("email_provider", "duckmail") or "duckmail").strip().lower()
+    bound = get_bound_email_provider()
+    if bound:
+        return bound
+    pool = get_email_providers_pool()
+    if pool:
+        # Unbound read during multi-select: report first pool member for logs/UI;
+        # actual selection happens in get_email_and_token via select_*.
+        return pool[0]
+    return normalize_email_provider_key(
+        str(config.get("email_provider", "duckmail") or "duckmail")
+    ) or "duckmail"
 
 
-def get_email_and_token(api_key=None):
-    provider = get_email_provider()
+def _allocate_email_for_provider(provider: str, api_key=None):
+    """Allocate address+token for a concrete provider (no pool selection)."""
+    provider = normalize_email_provider_key(provider) or "duckmail"
     # register_core inject: FIXED_EMAIL + EMAIL_PROVIDER=fixed (M4)
     if provider in ("fixed", "core", "register_core"):
         fixed = str(os.environ.get("FIXED_EMAIL") or os.environ.get("MIMO_FIXED_EMAIL") or "").strip()
@@ -3046,6 +3229,34 @@ def get_email_and_token(api_key=None):
     if not token:
         raise Exception("获取 DuckMail token 失败")
     return address, token
+
+
+def get_email_and_token(api_key=None):
+    """Allocate mailbox; multi-select pool picks+binds provider for this attempt."""
+    # FIXED_EMAIL inject always wins (register_core shell-out path).
+    fixed = str(os.environ.get("FIXED_EMAIL") or os.environ.get("MIMO_FIXED_EMAIL") or "").strip()
+    if fixed and "@" in fixed:
+        bind_email_provider("fixed")
+        return _allocate_email_for_provider("fixed", api_key=api_key)
+
+    pool = get_email_providers_pool()
+    if pool:
+        # Reuse bind if already set (e.g. caller pre-selected); else pick next.
+        provider = get_bound_email_provider()
+        if not provider:
+            provider = select_email_provider_from_pool(pool, bind=True)
+        else:
+            bind_email_provider(provider)
+        try:
+            return _allocate_email_for_provider(provider, api_key=api_key)
+        except Exception:
+            # Failover: mark next channel for subsequent attempt; keep error for caller.
+            advance_email_provider_failover()
+            raise
+
+    provider = get_email_provider()
+    bind_email_provider(provider)
+    return _allocate_email_for_provider(provider, api_key=api_key)
 
 
 def _fixed_core_get_oai_code(
@@ -6688,7 +6899,15 @@ class GrokRegisterGUI:
         worker_count = max(1, min(config.get("register_threads", 1), count))
         self.log(f"[*] 配置已保存，开始执行。目标数量: {count}，并发线程: {worker_count}")
         self.log(f"[*] 成功账号将实时保存到: {self.accounts_output_file}")
-        self.log(f"[*] 邮箱服务商: {provider}")
+        try:
+            pool = get_email_providers_pool()
+        except Exception:
+            pool = []
+        if pool:
+            strat = get_email_provider_strategy()
+            self.log(f"[*] 邮箱链路多选: {','.join(pool)} strategy={strat}")
+        else:
+            self.log(f"[*] 邮箱服务商: {provider}")
         threading.Thread(
             target=self.run_registration,
             args=(count, worker_count),
@@ -6714,16 +6933,16 @@ class GrokRegisterGUI:
             logf(f"[*] 1. 打开注册页 (尝试 {mail_try}/{max_mail_retry})")
             open_signup_page(log_callback=logf, cancel_callback=self.should_stop)
             logf("[*] 2. 创建邮箱并提交")
-            email, dev_token = fill_email_and_submit(log_callback=logf, cancel_callback=self.should_stop)
-            logf(f"[*] 邮箱: {email}")
-            if get_email_provider() not in ("hotmail", "outlook", "outlookmail", "microsoft"):
-                try:
-                    with open(os.path.join(os.path.dirname(__file__), "created_mailboxes.txt"), "a", encoding="utf-8") as f:
-                        f.write(f"{email}\t{dev_token}\n")
-                except Exception:
-                    pass
-            logf("[*] 3. 拉取验证码")
             try:
+                email, dev_token = fill_email_and_submit(log_callback=logf, cancel_callback=self.should_stop)
+                logf(f"[*] 邮箱: {email} (provider={get_email_provider()})")
+                if get_email_provider() not in ("hotmail", "outlook", "outlookmail", "microsoft"):
+                    try:
+                        with open(os.path.join(os.path.dirname(__file__), "created_mailboxes.txt"), "a", encoding="utf-8") as f:
+                            f.write(f"{email}\t{dev_token}\n")
+                    except Exception:
+                        pass
+                logf("[*] 3. 拉取验证码")
                 code = fill_code_and_submit(email, dev_token, log_callback=logf, cancel_callback=self.should_stop)
                 mail_ok = True
                 break
@@ -6755,10 +6974,20 @@ class GrokRegisterGUI:
                 )
                 if mail_miss and mail_try < max_mail_retry:
                     logf(f"[!] 本邮箱未取到验证码，自动更换新邮箱重试: {msg}")
+                    try:
+                        advance_email_provider_failover()
+                    except Exception:
+                        pass
+                    clear_email_provider_bind()
                     restart_browser(log_callback=logf)
                     sleep_with_cancel(1, self.should_stop)
                     continue
+                clear_email_provider_bind()
                 raise
+            finally:
+                if mail_ok:
+                    clear_email_provider_bind()
+        clear_email_provider_bind()
         if not mail_ok:
             raise Exception("验证码阶段失败，已达到最大重试次数")
         logf(f"[*] 验证码: {code}")

@@ -853,6 +853,24 @@ def register_one(
             return {"ok": False, "error": f"browser start: {exc}", "idx": idx}
 
         mail_ok = False
+
+        def _clear_mail_provider_bind() -> None:
+            try:
+                if hasattr(reg, "clear_email_provider_bind"):
+                    reg.clear_email_provider_bind()
+            except Exception:
+                pass
+
+        def _advance_mail_provider_on_miss() -> None:
+            # Multi-select: release bind so next try picks next channel
+            # (RR/random) or next failover member.
+            try:
+                if hasattr(reg, "advance_email_provider_failover"):
+                    reg.advance_email_provider_failover()
+            except Exception:
+                pass
+            _clear_mail_provider_bind()
+
         for mail_try in range(1, max_mail_retry + 1):
             email = ""
             dev_token = ""
@@ -868,7 +886,11 @@ def register_one(
                 email, dev_token = reg.fill_email_and_submit(
                     log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
                 )
-                log(worker_id, f"邮箱: {email}")
+                try:
+                    provider_now = reg.get_email_provider()
+                except Exception:
+                    provider_now = "?"
+                log(worker_id, f"邮箱: {email} (provider={provider_now})")
                 log(worker_id, "3. 拉取验证码")
                 code = reg.fill_code_and_submit(
                     email,
@@ -880,6 +902,7 @@ def register_one(
                 mail_ok = True
                 break
             except AccountRetryNeeded:
+                _clear_mail_provider_bind()
                 raise
             except Exception as exc:
                 msg = str(exc)
@@ -887,11 +910,13 @@ def register_one(
                 if kind == "fatal":
                     log(worker_id, f"! 致命错误，停止整批（不空转）: {msg}")
                     _inc("reg_fail")
+                    _clear_mail_provider_bind()
                     request_fatal_stop(msg)
                     raise FatalRegisterError(msg) from exc
                 if kind == "mail_miss" and mail_try < max_mail_retry:
                     log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
                     _mark_email_stage_error(email, msg)
+                    _advance_mail_provider_on_miss()
                     # 收码失败通常不是浏览器崩溃；优先软回收避免进程爆炸
                     _soft_recycle_browser(worker_id)
                     reg.sleep_with_cancel(1, cancel)
@@ -904,6 +929,7 @@ def register_one(
                     _mark_email_stage_error(email, msg)
                     traceback.print_exc()
                     _inc("reg_fail")
+                    _clear_mail_provider_bind()
                     # 页面可能卡在中间态，强制完整回收
                     _hard_recycle_browser(worker_id)
                     return {"ok": False, "error": msg, "idx": idx, "kind": "progress_fail"}
@@ -913,15 +939,18 @@ def register_one(
                     # quota as if signup UI logic failed; do not spin on same dead node).
                     log(worker_id, f"! 浏览器启动/错误页/连接断开({kind}): {msg}")
                     _mark_email_stage_error(email, msg)
+                    _clear_mail_provider_bind()
                     _force_rotate_path(worker_id, reason=f"browser_boot:{msg[:80]}")
                     raise AccountRetryNeeded(f"browser_boot: {msg}") from exc
                 log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
                 _mark_email_stage_error(email, msg)
                 traceback.print_exc()
                 _inc("reg_fail")
+                _clear_mail_provider_bind()
                 _hard_recycle_browser(worker_id)
                 return {"ok": False, "error": msg, "idx": idx, "kind": kind}
 
+        _clear_mail_provider_bind()
         if not mail_ok:
             return {"ok": False, "error": "mail stage failed", "idx": idx}
 

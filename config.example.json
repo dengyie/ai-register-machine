@@ -3,8 +3,12 @@
   "//_paths": "相对路径相对 grok_reg 目录；CPA 相关绝对路径更清晰。",
 
   "// ===== 邮箱：注册验证码来源 =====": "",
-  "// email_provider": "cloudmail | cloudflare | duckmail | yyds | hotmail | outlookmail | gmail。推荐自建 cloudmail；微软邮箱选 hotmail/outlookmail；CF 域名 catch-all 进 Gmail 选 gmail。",
+  "// email_provider": "单选：cloudmail | cloudflare | duckmail | yyds | hotmail | outlookmail | gmail。推荐自建 cloudmail；微软邮箱选 hotmail/outlookmail；CF 域名 catch-all 进 Gmail 选 gmail。",
   "email_provider": "cloudmail",
+  "// email_providers": "多选列表（优先于 email_provider）。env EMAIL_PROVIDERS 可覆盖。例：[\"duckmail\",\"gmail\",\"cloudflare\"]。合法名同 email_provider（不含 fixed）。",
+  "email_providers": [],
+  "// email_provider_strategy": "round_robin（默认，每 attempt 轮询）| random | failover（仅 allocate/mail_miss 时切下一家）。env EMAIL_PROVIDER_STRATEGY。",
+  "email_provider_strategy": "round_robin",
   "// defaultDomains": "注册用邮箱域名，逗号分隔；cloudmail/gmail catch-all 域名写这里。",
   "defaultDomains": "example.com",
 
