@@ -592,6 +592,9 @@ def create_standalone_page(
 
 
 def close_standalone(browser: Any) -> None:
+    """Quit mint Chromium + auth proxy bridge; drop from process registry."""
+    if browser is None:
+        return
     try:
         bridge = getattr(browser, "_auth_proxy_bridge", None)
         if bridge is not None:
@@ -617,10 +620,16 @@ def close_standalone(browser: Any) -> None:
         quit_ok = False
     if not quit_ok:
         _hard_kill_browser_pid(browser)
+    _mint_registry_drop(browser)
 
 
-# ── mint browser reuse (per-thread) ──
+# ── mint browser reuse (per-thread + process registry) ──
+# Thread-local holds the live browser for the mint worker / inline-mint thread.
+# Process-wide weak registry lets main/atexit best-effort close leftovers when
+# a worker dies without calling shutdown_mint_browsers() on its own TLS.
 _mint_tls = threading.local()
+_mint_browsers_all: list[Any] = []
+_mint_browsers_lock = threading.Lock()
 
 
 def _mint_tls_get() -> dict[str, Any]:
@@ -631,8 +640,30 @@ def _mint_tls_get() -> dict[str, Any]:
     return d
 
 
+def _mint_registry_add(browser: Any) -> None:
+    if browser is None:
+        return
+    with _mint_browsers_lock:
+        if browser not in _mint_browsers_all:
+            _mint_browsers_all.append(browser)
+
+
+def _mint_registry_drop(browser: Any) -> None:
+    if browser is None:
+        return
+    with _mint_browsers_lock:
+        try:
+            _mint_browsers_all[:] = [b for b in _mint_browsers_all if b is not browser]
+        except Exception:
+            pass
+
+
 def clear_page_session(page: Any, browser: Any | None = None, log: LogFn | None = None) -> None:
-    """Blank page + wipe storage/cookies for reuse between mint jobs."""
+    """Blank page + wipe storage/cookies for reuse between mint jobs.
+
+    Also best-effort: ServiceWorker unregister + multi-tab close so soft reuse
+    does not leave SSO cookies / SW caches across accounts.
+    """
     log = log or _noop_log
     try:
         if page is not None:
@@ -643,21 +674,42 @@ def clear_page_session(page: Any, browser: Any | None = None, log: LogFn | None 
             for js in (
                 "try{localStorage.clear()}catch(e){}",
                 "try{sessionStorage.clear()}catch(e){}",
+                "try{indexedDB.databases&&indexedDB.databases().then(ds=>ds.forEach(d=>indexedDB.deleteDatabase(d.name)))}catch(e){}",
+                "try{navigator.serviceWorker&&navigator.serviceWorker.getRegistrations&&"
+                "navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.unregister()))}catch(e){}",
             ):
                 try:
                     page.run_js(js)
                 except Exception:
                     pass
+        # Prefer a single clean tab when browser is known
+        if browser is not None:
+            try:
+                tabs = list(getattr(browser, "tab_ids", None) or [])
+                if len(tabs) > 1:
+                    keep = tabs[0]
+                    for tid in tabs[1:]:
+                        try:
+                            browser.get_tab(tid).close()
+                        except Exception:
+                            pass
+                    try:
+                        page = browser.get_tab(keep)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        cleared = False
         for target in (page, browser):
             if target is None:
                 continue
             try:
                 target.set.cookies.clear()  # type: ignore[attr-defined]
+                cleared = True
                 log("mint session cookies cleared")
                 break
             except Exception:
                 try:
-                    # older API
                     cks = target.cookies()
                     if isinstance(cks, list):
                         for c in cks:
@@ -665,8 +717,11 @@ def clear_page_session(page: Any, browser: Any | None = None, log: LogFn | None 
                                 target.set.cookies.remove(c)  # type: ignore[attr-defined]
                             except Exception:
                                 pass
+                        cleared = True
                 except Exception:
                     pass
+        if not cleared:
+            log("mint session cookie wipe incomplete (best-effort)")
     except Exception as e:
         log(f"clear_page_session: {e}")
 
@@ -810,7 +865,6 @@ def inject_cookies(page: Any, cookies: Any, log: LogFn | None = None) -> int:
 
 
 def acquire_mint_browser(
-
     *,
     proxy: str | None = None,
     headless: bool = False,
@@ -818,7 +872,7 @@ def acquire_mint_browser(
     recycle_every: int = 15,
     log: LogFn | None = None,
 ) -> tuple[Any, Any, bool]:
-    """Return (browser, page, owned). owned=True means caller must close if not reusing.
+    """Return (browser, page, owned). owned=True means caller must close_standalone.
 
     When reuse=True, browser is kept in thread-local and cleared between jobs.
     """
@@ -847,6 +901,7 @@ def acquire_mint_browser(
         st["served"] = 0
 
     browser, page = create_standalone_page(proxy=proxy, headless=headless, log=log)
+    _mint_registry_add(browser)
     if reuse:
         st["browser"] = browser
         st["page"] = page
@@ -859,21 +914,39 @@ def acquire_mint_browser(
 
 def release_mint_browser(
     *,
-    owned: bool,
+    owned: bool = False,
+    browser: Any | None = None,
     success: bool = True,
     force_quit: bool = False,
     log: LogFn | None = None,
 ) -> None:
+    """Release mint browser after a job.
+
+    - owned=True: close the explicit ``browser`` (non-reuse path). Must pass browser.
+    - reuse path (owned=False): on success bump served; on fail or force_quit close TLS browser.
+    """
     log = log or _noop_log
     st = _mint_tls_get()
-    if force_quit or owned:
-        browser = st.get("browser") if not owned else None
-        # if owned, caller passes via closing create path — handle both
-        if owned:
-            # owned browser not in tls
-            return
-        if browser is not None:
-            close_standalone(browser)
+    if owned:
+        target = browser
+        if target is None:
+            # Defensive: some call sites may have put it in TLS by mistake
+            target = st.get("browser")
+        if target is not None:
+            try:
+                close_standalone(target)
+            except Exception as e:  # noqa: BLE001
+                log(f"release owned mint browser: {e}")
+            if st.get("browser") is target:
+                st["browser"] = None
+                st["page"] = None
+                st["served"] = 0
+            log("mint browser quit (owned)")
+        return
+    if force_quit:
+        target = st.get("browser")
+        if target is not None:
+            close_standalone(target)
         st["browser"] = None
         st["page"] = None
         st["served"] = 0
@@ -892,14 +965,31 @@ def release_mint_browser(
 
 
 def shutdown_mint_browsers() -> None:
+    """Close current-thread mint browser and any process-registry leftovers.
+
+    Safe to call from mint workers (own TLS) and from main after join (registry
+    sweeps browsers whose worker died without cleanup).
+    """
     st = getattr(_mint_tls, "state", None)
-    if not st:
-        return
-    if st.get("browser") is not None:
-        close_standalone(st.get("browser"))
-    st["browser"] = None
-    st["page"] = None
-    st["served"] = 0
+    if st and st.get("browser") is not None:
+        try:
+            close_standalone(st.get("browser"))
+        except Exception:
+            pass
+        st["browser"] = None
+        st["page"] = None
+        st["served"] = 0
+    with _mint_browsers_lock:
+        leftovers = list(_mint_browsers_all)
+        _mint_browsers_all.clear()
+    for b in leftovers:
+        try:
+            close_standalone(b)
+        except Exception:
+            try:
+                _hard_kill_browser_pid(b)
+            except Exception:
+                pass
 
 
 def _page_url(page: Any) -> str:
@@ -1739,6 +1829,9 @@ def mint_with_browser(
     finally:
         if own_browser is not None:
             if owned:
-                close_standalone(own_browser)
+                # Non-reuse: always close via release API (closes + drops registry).
+                release_mint_browser(
+                    owned=True, browser=own_browser, success=success, log=log
+                )
             else:
                 release_mint_browser(owned=False, success=success, log=log)

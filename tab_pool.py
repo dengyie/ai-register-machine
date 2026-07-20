@@ -509,7 +509,13 @@ class TabPool:
     def clear_session(cls, log_callback=None) -> bool:
         """Clear cookies/storage and blank the page; keep Chromium process.
 
-        Returns True if session was cleared on a live browser; False if no browser.
+        Returns True if session was cleared on a live browser; False if no browser
+        or if cookie wipe could not run at all (caller should hard-recycle).
+
+        Hardening vs soft-reuse session bleed:
+          - multi-tab close to a single keep tab
+          - localStorage / sessionStorage / IndexedDB / ServiceWorker best-effort
+          - cookie clear via set.cookies.clear, cookies.clear, or per-cookie remove
         """
         browser = getattr(cls._thread_local, "browser", None)
         tab = getattr(cls._thread_local, "tab", None)
@@ -517,6 +523,33 @@ class TabPool:
             return False
         ok = True
         try:
+            # Prefer a single clean tab first so later blank/storage hits the keep tab
+            try:
+                tabs = list(browser.tab_ids or [])
+                if len(tabs) > 1:
+                    keep = tabs[0]
+                    for tid in tabs[1:]:
+                        try:
+                            browser.get_tab(tid).close()
+                        except Exception:
+                            pass
+                    try:
+                        tab = browser.get_tab(keep)
+                        cls._thread_local.tab = tab
+                    except Exception:
+                        cls.sync_tab()
+                        tab = getattr(cls._thread_local, "tab", None)
+                elif tabs:
+                    try:
+                        tab = browser.get_tab(tabs[0])
+                        cls._thread_local.tab = tab
+                    except Exception:
+                        cls.sync_tab()
+                        tab = getattr(cls._thread_local, "tab", None)
+            except Exception:
+                cls.sync_tab()
+                tab = getattr(cls._thread_local, "tab", None)
+
             if tab is not None:
                 try:
                     tab.get("about:blank")
@@ -526,6 +559,8 @@ class TabPool:
                     "try{localStorage.clear()}catch(e){}",
                     "try{sessionStorage.clear()}catch(e){}",
                     "try{indexedDB.databases&&indexedDB.databases().then(ds=>ds.forEach(d=>indexedDB.deleteDatabase(d.name)))}catch(e){}",
+                    "try{navigator.serviceWorker&&navigator.serviceWorker.getRegistrations&&"
+                    "navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.unregister()))}catch(e){}",
                 ):
                     try:
                         tab.run_js(js)
@@ -555,31 +590,26 @@ class TabPool:
                     # Fallback: drop all cookies via CDP-ish helper if present
                     cks = browser.cookies()
                     if isinstance(cks, list):
+                        removed_any = False
                         for c in cks:
                             try:
                                 browser.set.cookies.remove(c)  # type: ignore[attr-defined]
+                                removed_any = True
                             except Exception:
                                 pass
+                        # empty list counts as cleared; non-empty but none removed → fail
+                        cleared = removed_any or len(cks) == 0
                 except Exception:
-                    ok = False
-            # Prefer a single clean tab
-            try:
-                tabs = list(browser.tab_ids or [])
-                if len(tabs) > 1:
-                    keep = tabs[0]
-                    for tid in tabs[1:]:
-                        try:
-                            browser.get_tab(tid).close()
-                        except Exception:
-                            pass
-                    cls._thread_local.tab = browser.get_tab(keep)
-                elif tabs:
-                    cls._thread_local.tab = browser.get_tab(tabs[0])
-            except Exception:
-                cls.sync_tab()
+                    cleared = False
+            if not cleared:
+                ok = False
+                if log_callback:
+                    log_callback("[!] clear_session cookie wipe incomplete — caller should hard recycle")
             if log_callback:
                 served = int(getattr(cls._thread_local, "served", 0) or 0)
-                log_callback(f"[*] 浏览器会话已清理（复用进程, served={served}）")
+                log_callback(
+                    f"[*] 浏览器会话已清理（复用进程, served={served}, cookies_ok={cleared}）"
+                )
             return ok
         except Exception as exc:
             if log_callback:

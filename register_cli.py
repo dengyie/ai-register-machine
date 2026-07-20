@@ -586,10 +586,26 @@ def _ensure_browser(worker_id: int, force_recycle: bool = False):
         except Exception:
             pass
     # Rotate egress before (re)creating the browser so --proxy-server picks it up.
+    rotate_result: dict = {}
     try:
-        maybe_rotate_proxy(log=lambda m: log(worker_id, m), config=reg.config)
+        rotate_result = maybe_rotate_proxy(log=lambda m: log(worker_id, m), config=reg.config) or {}
     except Exception as exc:
         log(worker_id, f"[!] 代理轮换失败(继续用当前出口): {exc}")
+        rotate_result = {}
+    # list mode rewrites config.proxy into Chromium --proxy-server; a live browser
+    # still holds the old flag → hard-stop so start_browser rebuilds options.
+    # clash mode keeps mixed-port 127.0.0.1:7897 and only switches the leaf — soft OK.
+    mode = str((rotate_result or {}).get("mode") or "").strip().lower()
+    if (
+        mode == "list"
+        and bool(rotate_result.get("rotated"))
+        and reg.TabPool.get_browser() is not None
+    ):
+        log(worker_id, "[*] list 代理已轮换，硬回收浏览器以绑定新 --proxy-server")
+        try:
+            reg.stop_browser()
+        except Exception:
+            pass
     if reg.TabPool.get_browser() is None:
         reg.start_browser(log_callback=lambda m: log(worker_id, m))
 
@@ -775,10 +791,10 @@ def _resolved_recycle_mode() -> str:
     mode = str(
         (getattr(reg, "PERF_FLAGS", {}) or {}).get("browser_recycle_mode")
         or (getattr(reg, "config", {}) or {}).get("browser_recycle_mode")
-        or "soft"
+        or "hybrid"
     ).strip().lower()
     if mode not in ("soft", "hybrid", "hard"):
-        return "soft"
+        return "hybrid"
     return mode
 
 
@@ -1414,9 +1430,17 @@ def _register_worker(
         if _fatal_stop.is_set():
             break
 
-    # worker exit: free browser
+    # worker exit: free register browser + any inline-mint Chromium on this thread
     try:
         reg.stop_browser()
+    except Exception:
+        pass
+    # Inline mint (mint_workers=0) reuses mint TLS on the *register* thread.
+    # Queue mint workers clean themselves in _mint_worker; this covers inline.
+    try:
+        from cpa_xai.browser_confirm import shutdown_mint_browsers
+
+        shutdown_mint_browsers()
     except Exception:
         pass
     log(worker_id, "register worker exit")
@@ -1746,6 +1770,15 @@ def main() -> int:
 
     try:
         reg.shutdown_browser()
+    except Exception:
+        pass
+
+    # Sweep any mint Chromium left in the process registry (workers that died
+    # without calling shutdown_mint_browsers on their own TLS).
+    try:
+        from cpa_xai.browser_confirm import shutdown_mint_browsers
+
+        shutdown_mint_browsers()
     except Exception:
         pass
 

@@ -5,7 +5,7 @@
 #   residential — Clash front tunnel + 1024proxy HTTP CONNECT (家宽)
 #   ordinary    — Clash mixed-port only (普通节点轮换)
 # Ordinary: healthy-only preflight before batch / after zero-gain;
-# fail-fast Clash next-node on stuck; soft browser reuse via SUPERVISOR_CHUNK (default 3).
+# fail-fast Clash next-node on stuck; hybrid browser recycle (soft until recycle_every) via SUPERVISOR_CHUNK (default 3).
 set -u
 cd /personal/grok-register || exit 1
 
@@ -255,7 +255,7 @@ while true; do
   xvfb-run -a -s "-screen 0 1280x900x24 -ac +extension GLX +render -noreset" \
     python -u register_cli.py --extra "$chunk" --threads "$THREADS" --no-headless --fast \
       --account-slot-retry "$SLOT_RETRY" \
-      --browser-recycle-mode soft \
+      --browser-recycle-mode hybrid \
       --proxy-rotate clash --proxy-rotate-every 1 \
     >"$SUB_LOG" 2>&1
   code=$?

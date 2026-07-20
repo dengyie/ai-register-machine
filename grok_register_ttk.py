@@ -94,8 +94,9 @@ DEFAULT_CONFIG = {
     "gmail_imap_last_n": 30,
     "gmail_require_recipient_match": True,
     # browser recycle: soft=clear_session; hard=always quit; hybrid=soft then periodic hard
-    "browser_recycle_mode": "soft",
-    "browser_recycle_every": 25,
+    # Default hybrid: soft reuse with periodic hard quit to avoid cookie/SW bleed.
+    "browser_recycle_mode": "hybrid",
+    "browser_recycle_every": 15,
     # per-account soft retry when final page / SSO path is stuck (does not override fatal)
     "account_slot_retry": 3,
     "final_page_no_submit_timeout": 45,
@@ -244,9 +245,9 @@ PERF_FLAGS = {
     "cookie_snapshot": True, # save_cookies_snapshot
     "async_side_effects": True,  # grok2api / cookie snapshot in background
     "browser_reuse": True,   # clear_session instead of quit between accounts
-    "browser_recycle_every": 25,  # full quit+recreate after N successful reuses
-    # soft | hybrid | hard — hybrid = soft until recycle_every then hard
-    "browser_recycle_mode": "soft",
+    "browser_recycle_every": 15,  # full quit+recreate after N successful reuses (hybrid)
+    # soft | hybrid | hard — hybrid = soft until recycle_every then hard (prod default)
+    "browser_recycle_mode": "hybrid",
 }
 
 _side_effect_pool = None
@@ -3838,10 +3839,10 @@ def _resolved_recycle_mode() -> str:
     mode = str(
         PERF_FLAGS.get("browser_recycle_mode")
         or config.get("browser_recycle_mode")
-        or "soft"
+        or "hybrid"
     ).strip().lower()
     if mode not in ("soft", "hybrid", "hard"):
-        return "soft"
+        return "hybrid"
     return mode
 
 
