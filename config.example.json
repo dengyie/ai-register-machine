@@ -9,8 +9,8 @@
   "email_providers": [],
   "// email_provider_strategy": "round_robin（默认，每 attempt 轮询）| random | failover（仅 allocate/mail_miss 时切下一家）。env EMAIL_PROVIDER_STRATEGY。",
   "email_provider_strategy": "round_robin",
-  "// defaultDomains": "注册用邮箱域名，逗号分隔；cloudmail/gmail catch-all 域名写这里。",
-  "defaultDomains": "example.com",
+  "// defaultDomains": "注册用邮箱域名，逗号分隔；cloudflare/cloudmail/gmail catch-all 写这里。自建 CF temp-mail 用 mangoqwq.com。",
+  "defaultDomains": "mangoqwq.com",
 
   "// gmail_imap_user": "接收 catch-all 的 Gmail 地址（email_provider=gmail）。也可用 env GMAIL_IMAP_USER。",
   "gmail_imap_user": "",
