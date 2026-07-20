@@ -10,8 +10,10 @@ Safety rules:
      persist the new RT immediately and **re-read verify** before any probe.
   3) Probe models + chat; only chat_ok may inject (product gate).
   4) Never inject usage_exhausted / entitlement_denied / refresh-dead tokens.
-  5) After successful live inject, stamp the source auth + append archive ledger
-     so later runs skip already-injected accounts (no re-inject storm).
+  5) After *any* live probe/import attempt (ok or fail), stamp the source auth as
+     tested/archived + append ledger so later runs skip used accounts.
+  6) Process in small batches (default 5) with a pause between batches to avoid
+     hammering Clash / token / chat endpoints.
 
 Usage (project root):
   uv run python -u scripts/import_cpa_auth_dir.py \\
@@ -26,6 +28,9 @@ Usage (project root):
 
   # re-inject even if cpa_remote_injected stamp is set
   uv run python -u scripts/import_cpa_auth_dir.py --src ./incoming --force-reinject
+
+  # batch size / pause (Clash-friendly; default 5 / 3s)
+  uv run python -u scripts/import_cpa_auth_dir.py --src ./incoming --batch-size 5 --batch-pause 3
 """
 
 from __future__ import annotations
@@ -53,8 +58,13 @@ from cpa_xai.writer import patch_cpa_xai_auth, write_cpa_xai_auth  # noqa: E402
 INJECTED_STAMP_KEY = "cpa_remote_injected"
 INJECTED_AT_KEY = "cpa_remote_injected_at"
 INJECTED_PATH_KEY = "cpa_remote_path"
+TESTED_STAMP_KEY = "import_tested"
+TESTED_AT_KEY = "import_tested_at"
+TESTED_RESULT_KEY = "import_tested_result"
 ARCHIVE_LEDGER_NAME = "cpa_import_archive.jsonl"
 DEFAULT_ARCHIVE_DIR = "output/cpa_injected_archive"
+DEFAULT_BATCH_SIZE = 5
+DEFAULT_BATCH_PAUSE_SEC = 3.0
 
 
 def _load_cfg(path: Path | None) -> dict:
@@ -134,13 +144,25 @@ def _read_auth_obj(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _is_already_injected(path: Path) -> tuple[bool, dict]:
-    """True when source auth was previously live-injected and archived."""
+def _is_already_handled(path: Path) -> tuple[bool, dict, str]:
+    """True when source was already injected or previously import-tested/archived."""
     data = _read_auth_obj(path)
     if data.get(INJECTED_STAMP_KEY) is True:
-        return True, data
-    # Also treat explicit archive flags from older ops as injected.
+        return True, data, "already_cpa_remote_injected"
     if data.get("import_archived") is True and data.get("remote_live_ok") is True:
+        return True, data, "already_cpa_remote_injected"
+    # Any prior import attempt counts as used (ok or fail) — do not re-probe.
+    if data.get(TESTED_STAMP_KEY) is True or data.get("import_archived") is True:
+        return True, data, "already_import_tested"
+    return False, data, ""
+
+
+def _is_already_injected(path: Path) -> tuple[bool, dict]:
+    """Compat: injected-only check."""
+    handled, data, reason = _is_already_handled(path)
+    if handled and reason == "already_cpa_remote_injected":
+        return True, data
+    if data.get(INJECTED_STAMP_KEY) is True:
         return True, data
     return False, data
 
@@ -183,7 +205,7 @@ def _append_archive_ledger(
         pass
 
 
-def _archive_injected_copy(src_path: Path, archive_dir: Path) -> str | None:
+def _archive_copy(src_path: Path, archive_dir: Path) -> str | None:
     """Copy auth JSON into archive_dir (does not remove product file)."""
     try:
         archive_dir.mkdir(parents=True, exist_ok=True)
@@ -198,6 +220,87 @@ def _archive_injected_copy(src_path: Path, archive_dir: Path) -> str | None:
         return None
 
 
+def _stamp_import_result(
+    src_path: Path,
+    local_path: Path | None,
+    *,
+    archive_dir: Path,
+    ledger_path: Path,
+    email: str,
+    result: dict,
+) -> dict:
+    """Stamp any import attempt (ok/fail) as tested+archived. Auth stays in cpa_auths.
+
+    Used accounts must not re-enter the import queue next run.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stage = str(result.get("stage") or "")
+    live_ok = bool(result.get("remote_live_ok"))
+    injected = live_ok and stage == "inject" and bool(result.get("ok"))
+    stamp = {
+        TESTED_STAMP_KEY: True,
+        TESTED_AT_KEY: now,
+        TESTED_RESULT_KEY: {
+            "ok": bool(result.get("ok")),
+            "stage": stage,
+            "error": str(result.get("error") or "")[:240],
+            "token_source": result.get("token_source"),
+            "chat_ok": result.get("chat_ok"),
+            "remote_live_ok": result.get("remote_live_ok"),
+        },
+        "import_archived": True,
+        "import_gate": result.get("import_gate")
+        or stage
+        or ("chat_ok" if result.get("chat_ok") else ""),
+    }
+    if injected:
+        stamp[INJECTED_STAMP_KEY] = True
+        stamp[INJECTED_AT_KEY] = now
+        stamp[INJECTED_PATH_KEY] = str(result.get("remote_path") or "")
+        stamp["remote_live_ok"] = True
+        stamp["remote_inventory_ok"] = result.get("remote_inventory_ok")
+        stamp["chat_ok"] = True
+        stamp["usable"] = True
+        stamp["import_gate"] = "chat_ok"
+    elif result.get("chat_ok") is False:
+        stamp["chat_ok"] = False
+        stamp["usable"] = False
+    if result.get("entitlement_denied") is not None:
+        stamp["entitlement_denied"] = bool(result.get("entitlement_denied"))
+
+    try:
+        patch_cpa_xai_auth(src_path, stamp)
+    except Exception as e:  # noqa: BLE001
+        stamp["src_stamp_error"] = str(e)[:160]
+    if local_path and Path(local_path).is_file() and Path(local_path).resolve() != src_path.resolve():
+        try:
+            patch_cpa_xai_auth(Path(local_path), stamp)
+        except Exception as e:  # noqa: BLE001
+            stamp["local_stamp_error"] = str(e)[:160]
+
+    arch = _archive_copy(src_path, archive_dir)
+    if arch:
+        stamp["archive_copy"] = arch
+    _append_archive_ledger(
+        ledger_path,
+        email=email or str(result.get("email") or ""),
+        src_path=src_path,
+        remote_path=str(result.get("remote_path") or ""),
+        live_ok=live_ok,
+        inv_ok=result.get("remote_inventory_ok"),
+        extra={
+            "archive_copy": arch,
+            "injected": injected,
+            "stage": stage,
+            "ok": bool(result.get("ok")),
+            "error": str(result.get("error") or "")[:240],
+            "token_source": result.get("token_source"),
+            "tested": True,
+        },
+    )
+    return stamp
+
+
 def _stamp_injected(
     src_path: Path,
     local_path: Path | None,
@@ -209,41 +312,24 @@ def _stamp_injected(
     ledger_path: Path,
     email: str,
 ) -> dict:
-    """Stamp product auth + local out copy; ledger + archive copy. Auth stays put."""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    stamp = {
-        INJECTED_STAMP_KEY: True,
-        INJECTED_AT_KEY: now,
-        INJECTED_PATH_KEY: remote_path or "",
-        "import_archived": True,
-        "remote_live_ok": bool(live_ok),
-        "remote_inventory_ok": inv_ok,
-        "import_gate": "chat_ok",
-        "chat_ok": True,
-        "usable": True,
-    }
-    try:
-        patch_cpa_xai_auth(src_path, stamp)
-    except Exception as e:  # noqa: BLE001
-        stamp["src_stamp_error"] = str(e)[:160]
-    if local_path and local_path.is_file() and local_path.resolve() != src_path.resolve():
-        try:
-            patch_cpa_xai_auth(local_path, stamp)
-        except Exception as e:  # noqa: BLE001
-            stamp["local_stamp_error"] = str(e)[:160]
-    arch = _archive_injected_copy(src_path, archive_dir)
-    if arch:
-        stamp["archive_copy"] = arch
-    _append_archive_ledger(
-        ledger_path,
+    """Compat wrapper: successful live inject archive stamp."""
+    return _stamp_import_result(
+        src_path,
+        local_path,
+        archive_dir=archive_dir,
+        ledger_path=ledger_path,
         email=email,
-        src_path=src_path,
-        remote_path=remote_path,
-        live_ok=live_ok,
-        inv_ok=inv_ok,
-        extra={"archive_copy": arch},
+        result={
+            "ok": True,
+            "stage": "inject",
+            "email": email,
+            "remote_live_ok": live_ok,
+            "remote_inventory_ok": inv_ok,
+            "remote_path": remote_path or "",
+            "chat_ok": True,
+            "import_gate": "chat_ok",
+        },
     )
-    return stamp
 
 
 def import_one(
@@ -266,21 +352,26 @@ def import_one(
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 
-    # 0) Skip already live-injected accounts (ops archive stamp).
+    # 0) Skip already-handled accounts (injected OR previously tested/archived).
     if skip_injected and not force_reinject:
-        already, prev = _is_already_injected(src_path)
+        already, prev, skip_reason = _is_already_handled(src_path)
         if already:
+            was_injected = skip_reason == "already_cpa_remote_injected" or bool(
+                prev.get(INJECTED_STAMP_KEY)
+            )
             rec.update(
                 {
                     "ok": True,
-                    "stage": "skip_injected",
+                    "stage": "skip_injected" if was_injected else "skip_tested",
                     "email": str(prev.get("email") or email_hint),
                     "skipped": True,
-                    "skip_reason": "already_cpa_remote_injected",
-                    "remote_live_ok": True,
+                    "skip_reason": skip_reason or "already_handled",
+                    "remote_live_ok": True if was_injected else prev.get("remote_live_ok"),
                     "chat_ok": prev.get("chat_ok"),
                     "remote_path": prev.get(INJECTED_PATH_KEY) or prev.get("remote_path"),
                     "injected_at": prev.get(INJECTED_AT_KEY),
+                    "tested_at": prev.get(TESTED_AT_KEY),
+                    "tested_result": prev.get(TESTED_RESULT_KEY),
                 }
             )
             return rec
@@ -526,24 +617,36 @@ def import_one(
             or inj.get("remote_inject_skip_reason")
             or "live inject failed"
         )
-        return rec
+    # Archive/tested stamp happens in main for every non-skip attempt.
+    return rec
 
-    # 5) Archive stamp so next import skips this account (auth stays in cpa_auths).
-    arch_dir = archive_dir or (_ROOT / DEFAULT_ARCHIVE_DIR)
-    led = ledger_path or (out_dir / ARCHIVE_LEDGER_NAME)
-    stamp_info = _stamp_injected(
+
+def _maybe_archive_attempt(
+    rec: dict,
+    src_path: Path,
+    *,
+    archive_dir: Path,
+    ledger_path: Path,
+) -> dict:
+    """Stamp+ledger+copy for any real attempt (not skip_*). Mutates rec."""
+    stage = str(rec.get("stage") or "")
+    if stage.startswith("skip_") or rec.get("skipped"):
+        return rec
+    local = Path(rec["path"]) if rec.get("path") else None
+    stamp_info = _stamp_import_result(
         src_path,
-        local_path,
-        remote_path=str(inj.get("remote_path") or ""),
-        live_ok=True,
-        inv_ok=inv_ok,
-        archive_dir=arch_dir,
-        ledger_path=led,
-        email=email,
+        local,
+        archive_dir=archive_dir,
+        ledger_path=ledger_path,
+        email=str(rec.get("email") or ""),
+        result=rec,
     )
     rec["archived"] = True
+    rec["tested"] = True
     rec["archive_copy"] = stamp_info.get("archive_copy")
-    rec[INJECTED_AT_KEY] = stamp_info.get(INJECTED_AT_KEY)
+    if stamp_info.get(INJECTED_AT_KEY):
+        rec[INJECTED_AT_KEY] = stamp_info.get(INJECTED_AT_KEY)
+    rec[TESTED_AT_KEY] = stamp_info.get(TESTED_AT_KEY)
     return rec
 
 
@@ -562,17 +665,29 @@ def main() -> int:
     ap.add_argument(
         "--force-reinject",
         action="store_true",
-        help="Re-inject even when cpa_remote_injected stamp is set",
+        help="Re-inject even when cpa_remote_injected / import_tested stamp is set",
     )
     ap.add_argument(
         "--no-skip-injected",
         action="store_true",
-        help="Do not skip already-injected stamps (same as --force-reinject for skip gate)",
+        help="Do not skip already-handled stamps (same as --force-reinject for skip gate)",
     )
     ap.add_argument(
         "--archive-dir",
         default="",
-        help=f"Copy injected auths here (default: {_ROOT / DEFAULT_ARCHIVE_DIR})",
+        help=f"Copy tested/injected auths here (default: {_ROOT / DEFAULT_ARCHIVE_DIR})",
+    )
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help=f"Accounts per batch before pause (default {DEFAULT_BATCH_SIZE}; 0=no batching)",
+    )
+    ap.add_argument(
+        "--batch-pause",
+        type=float,
+        default=DEFAULT_BATCH_PAUSE_SEC,
+        help=f"Seconds to sleep between batches (default {DEFAULT_BATCH_PAUSE_SEC})",
     )
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
@@ -595,6 +710,8 @@ def main() -> int:
     archive_dir = archive_dir.resolve()
     ledger_path = out_dir / ARCHIVE_LEDGER_NAME
     skip_injected = not (args.force_reinject or args.no_skip_injected)
+    batch_size = max(0, int(args.batch_size or 0))
+    batch_pause = max(0.0, float(args.batch_pause or 0.0))
 
     files = sorted(src.glob("xai-*.json"))
     if args.limit and args.limit > 0:
@@ -613,12 +730,26 @@ def main() -> int:
     print(
         f"import src={src} n={len(files)} out={out_dir} remote={remote} "
         f"force_refresh={bool(args.force_refresh)} skip_injected={skip_injected} "
+        f"batch_size={batch_size or 'off'} batch_pause={batch_pause}s "
         f"archive={archive_dir} proxy={proxy or '(none)'}",
         flush=True,
     )
     results: list[dict] = []
     t0 = time.time()
+    attempted_in_batch = 0
+    batch_idx = 0
     for i, p in enumerate(files, 1):
+        # Batch pause only counts non-skip attempts (real Clash/network work).
+        if batch_size > 0 and attempted_in_batch >= batch_size:
+            batch_idx += 1
+            log(
+                f"[import] batch {batch_idx} done (size={batch_size}); "
+                f"pause {batch_pause}s to ease Clash load"
+            )
+            if batch_pause > 0:
+                time.sleep(batch_pause)
+            attempted_in_batch = 0
+
         rec = import_one(
             p,
             out_dir=out_dir,
@@ -632,6 +763,12 @@ def main() -> int:
             archive_dir=archive_dir,
             ledger_path=ledger_path,
         )
+        # Archive every real attempt (ok or fail) so the account is "used".
+        rec = _maybe_archive_attempt(
+            rec, p, archive_dir=archive_dir, ledger_path=ledger_path
+        )
+        if not rec.get("skipped"):
+            attempted_in_batch += 1
         results.append(rec)
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -654,7 +791,11 @@ def main() -> int:
         "inventory_ok": sum(1 for r in results if r.get("remote_inventory_ok")),
         "chat_ok": sum(1 for r in results if r.get("chat_ok")),
         "skipped_injected": sum(1 for r in results if r.get("stage") == "skip_injected"),
+        "skipped_tested": sum(1 for r in results if r.get("stage") == "skip_tested"),
         "archived": sum(1 for r in results if r.get("archived")),
+        "tested": sum(1 for r in results if r.get("tested")),
+        "batch_size": batch_size,
+        "batch_pause_s": batch_pause,
         "access_reuse": sum(1 for r in results if r.get("token_source") == "access_reuse"),
         "refreshed": sum(
             1
@@ -683,7 +824,7 @@ def main() -> int:
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print("=== STATE ===", flush=True)
     print(json.dumps(state, ensure_ascii=False, indent=2), flush=True)
-    # Product exit: skip_injected counts as ok; only hard fails pull exit=1.
+    # Product exit: skip_* counts as ok; only hard fails pull exit=1.
     return 0 if ok_n == len(results) else 1
 
 

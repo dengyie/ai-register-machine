@@ -298,9 +298,13 @@ def test_import_script_access_first_markers() -> None:
     assert "apply_multi_remote_inject" in src
     # Archive / skip-reinject ops contract
     assert "cpa_remote_injected" in src
-    assert "_stamp_injected" in src
+    assert "import_tested" in src
+    assert "_stamp_import_result" in src
+    assert "_maybe_archive_attempt" in src
     assert "skip_injected" in src
     assert "cpa_import_archive.jsonl" in src
+    assert "DEFAULT_BATCH_SIZE = 5" in src
+    assert "--batch-size" in src
     # Call order inside import_one: ensure_auth_tokens before probe_models/chat.
     fn_start = src.index("def import_one")
     fn_body = src[fn_start : src.index("\ndef main")]
@@ -309,8 +313,9 @@ def test_import_script_access_first_markers() -> None:
     # Must NOT unconditionally call refresh_auth_file at start of import_one.
     # (refresh only via ensure_auth_tokens when needed)
     assert "refresh_auth_file(" not in fn_body
-    # After live inject, archive stamp path must exist
-    assert "_stamp_injected(" in fn_body
+    # main archives every real attempt
+    main_body = src[src.index("def main") :]
+    assert "_maybe_archive_attempt(" in main_body
     print("PASS import script access-first markers")
 
 
