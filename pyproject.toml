@@ -12,11 +12,15 @@ dependencies = [
     "curl_cffi>=0.7",
     # Clash YAML convert (register_core.nodes.convert); CI uv sync must install it
     "PyYAML>=6.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "httpx>=0.27",
 ]
 
 [project.urls]
