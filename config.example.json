@@ -195,7 +195,7 @@
   "cpa_hotload_dir": "",
   "// cpa_auth_priority": "写入 xai-*.json 的 CPA 路由权重（CLIProxyAPI priority）；mint/写盘/注入统一使用。",
   "cpa_auth_priority": 1000,
-  "// cpa_remote_inject": "mint 成功后是否自动注入远端 CPA auth-dir。注册机主链路默认 false：只 mint 落盘 cpa_auths 即结束；CPA 注入是独立后续链路（healthy-only），勿绑进 supervisor/注册成功判定以免阻塞产号。",
+  "// cpa_remote_inject": "含义分流：① 单号 mint/export 路径=是否立即 SSH 注入（生产 bulk 务必 false，避免阻塞产号）。② bulk supervisor=只作「批末统一导入」意图；产号全程仍强制 CPA_REMOTE_INJECT=false，目标 complete 达成后才跑 scripts/import_cpa_auth_dir.py（batch5 + healthy-only + archive）。也可用 env CPA_BATCH_END_INJECT=true 显式打开批末导入。",
   "cpa_remote_inject": false,
   "// cpa_remote_inject_require_chat_ok": "true=仅 chat_ok 可注入 live/inventory（默认）。false 会被拒绝（chat_gate_disabled_refused），不再软放行。",
   "cpa_remote_inject_require_chat_ok": true,

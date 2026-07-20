@@ -6,6 +6,12 @@
 #   ordinary    — Clash mixed-port only (普通节点轮换)
 # Ordinary: healthy-only preflight before batch / after zero-gain;
 # fail-fast Clash next-node on stuck; hybrid browser recycle (soft until recycle_every) via SUPERVISOR_CHUNK (default 3).
+#
+# CPA inject contract (disk-first):
+#   - Per-account mint path ALWAYS forces CPA_REMOTE_INJECT=false (never SSH mid-batch).
+#   - If inject intent is on (CPA_BATCH_END_INJECT / pre-freeze CPA_REMOTE_INJECT /
+#     config.json cpa_remote_inject), AFTER target complete run ONE unified import:
+#     scripts/import_cpa_auth_dir.py --batch-size 5 (healthy-only + archive).
 set -u
 cd /personal/grok-register || exit 1
 
@@ -26,6 +32,7 @@ TS0=$(date +%Y%m%d_%H%M%S)
 RUN_TAG=${TAG_PREFIX}_${MODE}_${TARGET}_${TS0}
 SUP_LOG=logs/${RUN_TAG}.supervisor.log
 STATE=logs/${RUN_TAG}.state.json
+IMPORT_LOG=logs/${RUN_TAG}.cpa_import.log
 mkdir -p logs
 
 RES_CREDS=(
@@ -49,9 +56,35 @@ fi
 # shellcheck source=/dev/null
 source .venv/bin/activate
 
+# Capture inject *intent* before freezing per-account inject off.
+# Intent sources (any true wins): CPA_BATCH_END_INJECT, CPA_REMOTE_INJECT (env/.env),
+# config.json cpa_remote_inject. Mint path still always uses false.
+_truthy() {
+  case "${1:-}" in 1|true|TRUE|yes|YES|on|ON) return 0 ;; *) return 1 ;; esac
+}
+BATCH_CPA_INJECT_INTENT=false
+if _truthy "${CPA_BATCH_END_INJECT:-}"; then
+  BATCH_CPA_INJECT_INTENT=true
+elif _truthy "${CPA_REMOTE_INJECT:-}"; then
+  BATCH_CPA_INJECT_INTENT=true
+elif [[ -f config.json ]] && .venv/bin/python - <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    c = json.loads(Path("config.json").read_text(encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+v = c.get("cpa_remote_inject")
+sys.exit(0 if v is True or str(v).lower() in {"1", "true", "yes", "on"} else 1)
+PY
+then
+  BATCH_CPA_INJECT_INTENT=true
+fi
+
 export EMAIL_PROVIDER=${EMAIL_PROVIDER:-cloudflare}
 export CPA_EXPORT_ENABLED=true
 export CPA_PROBE_CHAT=false
+# Always freeze per-account remote inject during bulk mint (disk-first).
 export CPA_REMOTE_INJECT=false
 export PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/personal/browsers/ms-playwright}
 # Ordinary mode preflights Clash leaves; residential sets SKIP=1 (1024proxy).
@@ -59,6 +92,53 @@ export SKIP_CLASH_PREFLIGHT=${SKIP_CLASH_PREFLIGHT:-0}
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy || true
 export NO_PROXY=127.0.0.1,localhost
 export no_proxy=127.0.0.1,localhost
+
+# Batch-end unified CPA import (healthy-only, batch-of-5). Never blocks mint.
+run_batch_end_cpa_import() {
+  local why="${1:-target_reached}"
+  local batch_size="${CPA_BATCH_IMPORT_SIZE:-5}"
+  local batch_pause="${CPA_BATCH_IMPORT_PAUSE:-3}"
+  local proxy="${CPA_BATCH_IMPORT_PROXY:-http://127.0.0.1:7897}"
+  local cfg="${CPA_BATCH_IMPORT_CONFIG:-}"
+  local import_py=scripts/import_cpa_auth_dir.py
+
+  if [[ ! -f "$import_py" ]]; then
+    echo "[supervisor] batch-end import SKIP: missing $import_py why=$why" | tee -a "$SUP_LOG"
+    return 1
+  fi
+
+  # Prefer explicit import config; else production config.json (import --remote forces inject).
+  if [[ -z "$cfg" ]]; then
+    if [[ -f output/import_all_product_config.json ]]; then
+      cfg=output/import_all_product_config.json
+    else
+      cfg=config.json
+    fi
+  fi
+
+  echo "[supervisor] batch-end CPA import START why=$why cfg=$cfg batch=$batch_size pause=${batch_pause}s proxy=$proxy log=$IMPORT_LOG" | tee -a "$SUP_LOG"
+  set +e
+  # --remote: force live/inventory inject even if production config keeps cpa_remote_inject=false
+  # (mint path must stay inject-off; import is the only place that pushes tebi).
+  .venv/bin/python -u "$import_py" \
+    --src cpa_auths \
+    --out-dir cpa_auths \
+    --config "$cfg" \
+    --proxy "$proxy" \
+    --remote \
+    --batch-size "$batch_size" \
+    --batch-pause "$batch_pause" \
+    >"$IMPORT_LOG" 2>&1
+  local ic=$?
+  set -e
+  if grep -q "=== STATE ===" "$IMPORT_LOG" 2>/dev/null; then
+    awk '/=== STATE ===/{p=1} p' "$IMPORT_LOG" | head -40 | tee -a "$SUP_LOG"
+  else
+    tail -20 "$IMPORT_LOG" | tee -a "$SUP_LOG"
+  fi
+  echo "[supervisor] batch-end CPA import DONE exit=$ic log=$IMPORT_LOG" | tee -a "$SUP_LOG"
+  return "$ic"
+}
 
 baseline_count() {
   .venv/bin/python - <<'PY'
@@ -163,17 +243,19 @@ GOAL_COMPLETE=$((BASE_COMPLETE + TARGET))
   echo "start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "pid=$$ mode=$MODE target_new=$TARGET threads=$THREADS"
   echo "baseline total=$BASE_TOTAL complete=$BASE_COMPLETE accounts=$BASE_ACC goal_complete=$GOAL_COMPLETE"
-  echo "CPA_PROBE_CHAT=false inject=false export=true (mint writes access+refresh before probe)"
+  echo "CPA_PROBE_CHAT=false per_account_inject=false export=true (mint writes access+refresh)"
+  echo "batch_end_cpa_inject_intent=$BATCH_CPA_INJECT_INTENT (unified import after TARGET only)"
   echo "success criterion: new complete xai-*.json with refresh_token (not chat_ok)"
   echo "lock=flock $LOCK (no inter-sub pkill)"
 } | tee "$SUP_LOG"
 
-echo "{\"baseline_complete\":$BASE_COMPLETE,\"target_new\":$TARGET,\"goal_complete\":$GOAL_COMPLETE,\"mode\":\"$MODE\",\"pid\":$$}" > "$STATE"
+echo "{\"baseline_complete\":$BASE_COMPLETE,\"target_new\":$TARGET,\"goal_complete\":$GOAL_COMPLETE,\"mode\":\"$MODE\",\"pid\":$$,\"batch_end_cpa_inject\":$BATCH_CPA_INJECT_INTENT}" > "$STATE"
 
 attempt=0
 max_attempts=200
 deadline=$(( $(date +%s) + 12*3600 ))
 consecutive_zero=0
+HIT_TARGET=0
 
 while true; do
   now=$(date +%s)
@@ -186,6 +268,7 @@ while true; do
   echo "[supervisor] $(date -u +%H:%M:%SZ) complete=$CUR_COMPLETE (+$NEW/$TARGET) accounts=$CUR_ACC attempt=$attempt" | tee -a "$SUP_LOG"
   if (( CUR_COMPLETE >= GOAL_COMPLETE )); then
     echo "[supervisor] TARGET REACHED +$NEW complete auths" | tee -a "$SUP_LOG"
+    HIT_TARGET=1
     break
   fi
   if (( attempt >= max_attempts )); then
@@ -299,7 +382,8 @@ read -r END_TOTAL END_COMPLETE END_ACC <<<"$(baseline_count)"
 NEW=$((END_COMPLETE - BASE_COMPLETE))
 {
   echo "=== supervisor done $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
-  echo "mode=$MODE new_complete=$NEW target=$TARGET final_complete=$END_COMPLETE accounts=$END_ACC"
+  echo "mode=$MODE new_complete=$NEW target=$TARGET final_complete=$END_COMPLETE accounts=$END_ACC hit_target=$HIT_TARGET"
+  echo "batch_end_cpa_inject_intent=$BATCH_CPA_INJECT_INTENT"
   echo "STATE=$STATE SUP_LOG=$SUP_LOG"
 } | tee -a "$SUP_LOG"
 
@@ -328,3 +412,19 @@ if bad[:5]:
 if new[:5]:
     print("new_sample", new[:5])
 PY
+
+# Unified CPA inject only after whole batch goal; never mid-mint / never if target missed.
+if [[ "$BATCH_CPA_INJECT_INTENT" == "true" ]]; then
+  if (( HIT_TARGET == 1 )); then
+    set +e
+    run_batch_end_cpa_import "target_reached"
+    IMPORT_EXIT=$?
+    set -e
+    # Soft: import failure must not rewrite disk-first success of the batch.
+    echo "[supervisor] batch-end import exit=$IMPORT_EXIT (soft; mint product already on disk)" | tee -a "$SUP_LOG"
+  else
+    echo "[supervisor] batch-end CPA import SKIP: target not reached (hit_target=0 intent=true)" | tee -a "$SUP_LOG"
+  fi
+else
+  echo "[supervisor] batch-end CPA import SKIP: intent=false (set CPA_BATCH_END_INJECT=true or config cpa_remote_inject)" | tee -a "$SUP_LOG"
+fi

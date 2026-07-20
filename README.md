@@ -468,7 +468,7 @@ PROXY_ROTATE_MODE=list PROXY_LIST="http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:80
 | `cpa_copy_to_hotload` | `false` | 是否复制到本机 CPA 热加载目录 |
 | `cpa_hotload_dir` | 空 | 本机 CPA `auth-dir` |
 | `cpa_auth_priority` | `1000` | 写入 `xai-*.json` 的 CPA 路由权重（mint/写盘/注入统一） |
-| `cpa_remote_inject` | `false` | mint 后是否 SSH 注入远端。**注册主链路保持 false**（只落盘）；注入走独立 healthy-only 链路 |
+| `cpa_remote_inject` | `false` | 单号 mint 后是否立即 SSH 注入（生产 bulk **务必 false**）。bulk supervisor 另读此值作「批末统一导入」意图：产号全程仍强制 inject off，**整批 target 达成后**再跑 `import_cpa_auth_dir.py`（batch5 + healthy-only）。显式 env：`CPA_BATCH_END_INJECT=true` |
 | `cpa_remote_live_dir` | `/root/.cli-proxy-api` | 一键成功门闩目录（live 池） |
 | `cpa_remote_live_required` | `true` | live 注入失败则整次 export 失败（inventory-only 不算一键成功） |
 | `cpa_remote_inject_required` | `false` | 所有远端目录都必须成功；比 live 门闩更严 |
@@ -478,7 +478,10 @@ PROXY_ROTATE_MODE=list PROXY_LIST="http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:80
 | `cpa_remote_credentials_file` | `~/.ssh/bohrium_credentials` | 可选密码文件；也可用环境变量 `CPA_REMOTE_SSHPASS` / `SSHPASS` |
 
 **产号主链路：** 注册成功 → mint → 本地 `cpa_auths` complete auth（含 refresh）即结束。  
-**CPA 注入（独立）：** 对落盘文件 chat probe → **仅 healthy** 导入 live/inventory；勿在 register 成功路径绑 `cpa_remote_inject=true`。存量 remint 工具仍可用：
+**CPA 注入（独立 / 批末）：** chat probe → **仅 healthy** 导入 live/inventory。勿在单号 mint 成功路径绑立即 inject。  
+- 手动：`python -u scripts/import_cpa_auth_dir.py --src cpa_auths --remote --batch-size 5 --batch-pause 3`  
+- bulk 自动：`CPA_BATCH_END_INJECT=true`（或 config `cpa_remote_inject=true` 作意图）→ supervisor 在 **TARGET 达成后** 统一 import 一次；未达目标不导入。  
+存量 remint 工具仍可用：
 
 ```bash
 uv run python -u scripts/remint_expired_and_sync_authdir.py --limit 5

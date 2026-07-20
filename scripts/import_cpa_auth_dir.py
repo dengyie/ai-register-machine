@@ -658,6 +658,14 @@ def main() -> int:
     ap.add_argument("--proxy", default="", help="Override proxy; default from config/env")
     ap.add_argument("--no-remote", action="store_true", help="Skip tebi remote inject")
     ap.add_argument(
+        "--remote",
+        action="store_true",
+        help=(
+            "Force tebi remote inject even when config.json has cpa_remote_inject=false "
+            "(batch-end / ops path; mint still stays inject-off)"
+        ),
+    )
+    ap.add_argument(
         "--force-refresh",
         action="store_true",
         help="Always hit token endpoint (default: reuse valid access, no RT rotation)",
@@ -698,7 +706,16 @@ def main() -> int:
     cfg = _load_cfg(Path(args.config).expanduser() if args.config else None)
 
     proxy = (args.proxy or cfg.get("cpa_proxy") or cfg.get("proxy") or "").strip() or None
-    remote = (not args.no_remote) and _config_bool(cfg.get("cpa_remote_inject"), default=False)
+    # Remote inject gate:
+    #   --no-remote → always off
+    #   --remote    → force on (batch-end unified import; overrides prod disk-first config)
+    #   else        → follow config cpa_remote_inject
+    if args.no_remote:
+        remote = False
+    elif args.remote:
+        remote = True
+    else:
+        remote = _config_bool(cfg.get("cpa_remote_inject"), default=False)
     cfg["cpa_remote_inject"] = remote
     cfg["cpa_remote_inject_require_chat_ok"] = True
     cfg["cpa_probe_chat"] = True
