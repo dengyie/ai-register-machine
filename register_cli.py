@@ -31,7 +31,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import grok_register_ttk as reg  # noqa: E402
 from proxy_rotate import (  # noqa: E402
     configure_proxy_rotation,
+    current_egress_label,
     maybe_rotate_proxy,
+    note_egress_outcome,
     restore_proxy_rotation,
 )
 
@@ -369,6 +371,35 @@ def fatal_stop_reason() -> str:
         return _fatal_reason[0]
 
 
+def is_turnstile_stuck_error(msg: str) -> bool:
+    """Profile/final-page Turnstile hard-stuck markers (egress/node class).
+
+    These used to be process-fatal and killed the whole chunk after 0–1 gains.
+    Headed + DISPLAY ready: demote to AccountRetryNeeded + force rotate.
+    Still process-fatal when headless has no DISPLAY, or consecutive streak
+    exhausts (fail-fast, no empty spin).
+    """
+    text = str(msg or "")
+    if not text:
+        return False
+    if "Turnstile 卡住 fail-fast" in text:
+        return True
+    if "Turnstile 获取 token 失败" in text:
+        return True
+    if "最终页 Turnstile" in text:
+        return True
+    if "Turnstile retries exhausted" in text:
+        return True
+    if "Turnstile" in text and (
+        "token_len=0" in text
+        or "token_len = 0" in text
+        or "retries exhausted" in text
+        or "pre-submit retries exhausted" in text
+    ):
+        return True
+    return False
+
+
 def is_turnstile_headless_upgradeable(msg: str) -> bool:
     """Turnstile stuck with empty token while headless — may recover once headed.
 
@@ -376,7 +407,7 @@ def is_turnstile_headless_upgradeable(msg: str) -> bool:
     passes. Upgrade is allowed once per process, never loops.
     """
     text = str(msg or "")
-    if "Turnstile 卡住 fail-fast" not in text and "Turnstile 获取 token 失败" not in text:
+    if not is_turnstile_stuck_error(text):
         return False
     if "token_len=0" in text or "token_len = 0" in text:
         return True
@@ -398,6 +429,46 @@ def headed_display_ready() -> bool:
         if sys.platform == "darwin" or sys.platform.startswith("win"):
             return True
         return bool((os.environ.get("DISPLAY") or "").strip())
+
+
+# Process-wide consecutive Turnstile fails without reg_ok — fail-fast gate.
+_turnstile_fail_streak_lock = threading.Lock()
+_turnstile_fail_streak = 0
+
+
+def _turnstile_fatal_streak_limit(config: dict | None = None) -> int:
+    """How many consecutive Turnstile stuck outcomes before process-fatal.
+
+    Default 6: with chunk=3 + account_slot_retry=2 allows ~one full sub of
+    pure Turnstile rotates before stop; not infinite spin on dead pool.
+    Env TURNSTILE_FATAL_STREAK overrides config.
+    """
+    env = (os.environ.get("TURNSTILE_FATAL_STREAK") or "").strip()
+    if env:
+        try:
+            return max(1, min(50, int(env)))
+        except Exception:
+            pass
+    cfg = config if isinstance(config, dict) else (getattr(reg, "config", {}) or {})
+    raw = cfg.get("turnstile_fatal_streak", 6)
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return 6
+    try:
+        n = int(raw)
+    except Exception:
+        return 6
+    return max(1, min(50, n))
+
+
+def note_turnstile_streak(*, ok: bool) -> int:
+    """Update consecutive Turnstile-fail counter. ok=True resets. Returns streak."""
+    global _turnstile_fail_streak
+    with _turnstile_fail_streak_lock:
+        if ok:
+            _turnstile_fail_streak = 0
+            return 0
+        _turnstile_fail_streak += 1
+        return _turnstile_fail_streak
 
 
 
@@ -473,12 +544,14 @@ def is_fatal_register_error(msg: str) -> bool:
         "Gmail IMAP 认证失败",
         "AUTHENTICATIONFAILED",
         "Invalid credentials",
-        # Xvfb/datacenter 上 Turnstile 恒 0 时，整批空转无意义；单号失败后停止本批
-        # (after optional one-shot headless→headed upgrade)
-        "Turnstile 卡住 fail-fast",
+        # Turnstile 卡住 itself is NOT process-fatal when headed+DISPLAY ready:
+        # demoted to AccountRetryNeeded + force rotate (slot budget). Still fatal:
+        # headless without DISPLAY, or consecutive streak (see note_turnstile_streak).
         # Bare --headless on Linux without DISPLAY: refuse headed upgrade and stop batch
         "Turnstile headless 失败且无可用 DISPLAY",
         "headed 需要 DISPLAY/xvfb-run",
+        # Streak-exhaust message (raised after demote budget / process streak)
+        "Turnstile 连续失败 fail-fast",
     )
     return any(m in text for m in markers)
 
@@ -708,6 +781,34 @@ def _force_rotate_path(worker_id: int, reason: str) -> dict:
     Used on browser_boot / connection-closed. force=True bypasses rotate_every.
     Safe no-op when mode=off. Failures are logged; never raise into register loop.
     """
+    # Attribute penalty to the node we are leaving (before rotate advances).
+    try:
+        prev_label = current_egress_label()
+        rsn = str(reason or "").lower()
+        if "turnstile" in rsn or "token_len" in rsn:
+            kind = "turnstile"
+        elif any(
+            k in rsn
+            for k in (
+                "browser_boot",
+                "connection",
+                "err_connection",
+                "chrome-error",
+                "boot",
+            )
+        ):
+            kind = "browser_boot"
+        else:
+            kind = "other_fail"
+        if prev_label:
+            note_egress_outcome(
+                kind,
+                node=prev_label,
+                log=lambda m: log(worker_id, m),
+                config=getattr(reg, "config", None),
+            )
+    except Exception:
+        pass
     try:
         result = maybe_rotate_proxy(
             force=True,
@@ -1047,15 +1148,69 @@ def register_one(
                         if slot_retry <= max(max_slot_retry, 1):
                             reg.sleep_with_cancel(1.0, cancel)
                             continue
-                        # slot budget exhausted after upgrade — fall through fatal
-                # Turnstile/datacenter hard stuck: stop whole batch, do not slot-retry spin
+                        # slot budget exhausted after upgrade — fall through demote/fatal below
+                # Profile Turnstile stuck: demote to slot-retry+rotate when headed/DISPLAY
+                # ready. Process-fatal only for true unrecoverable or consecutive streak.
+                if is_turnstile_stuck_error(msg):
+                    # Headless without DISPLAY already fatal in upgrade path above.
+                    # With DISPLAY (or non-Linux): demote to AccountRetryNeeded;
+                    # streak counted once in ARN handler (also final-page from ttk).
+                    # Scoring: ARN → _force_rotate_path(reason contains turnstile).
+                    if headed_display_ready():
+                        log(
+                            worker_id,
+                            f"[!] Turnstile 卡住，换路 slot 重试: {msg[:120]}",
+                        )
+                        raise AccountRetryNeeded(
+                            f"turnstile: {msg[:200]}"
+                        ) from profile_exc
+                    try:
+                        note_egress_outcome(
+                            "turnstile",
+                            log=lambda m: log(worker_id, m),
+                            config=getattr(reg, "config", None),
+                        )
+                    except Exception:
+                        pass
+                    fatal_msg = (
+                        "Turnstile 卡住且无可用 DISPLAY/xvfb-run（无法换路重试）: "
+                        f"{msg[:200]}"
+                    )
+                    log(
+                        worker_id,
+                        f"! 致命错误，停止整批（不空转）: {fatal_msg}",
+                    )
+                    _inc("reg_fail")
+                    request_fatal_stop(fatal_msg)
+                    raise FatalRegisterError(fatal_msg) from profile_exc
                 if is_fatal_register_error(msg):
                     log(worker_id, f"! 致命错误，停止整批（不空转）: {profile_exc}")
                     _inc("reg_fail")
+                    try:
+                        note_egress_outcome(
+                            "other_fail",
+                            log=lambda m: log(worker_id, m),
+                            config=getattr(reg, "config", None),
+                        )
+                    except Exception:
+                        pass
                     request_fatal_stop(msg)
                     raise FatalRegisterError(msg) from profile_exc
                 raise
             log(worker_id, f"资料已填: {profile.get('given_name')} {profile.get('family_name')}")
+            # Profile submit implies Turnstile passed on this egress.
+            try:
+                note_egress_outcome(
+                    "reg_ok",
+                    log=lambda m: log(worker_id, m),
+                    config=getattr(reg, "config", None),
+                )
+            except Exception:
+                pass
+            try:
+                note_turnstile_streak(ok=True)
+            except Exception:
+                pass
             log(worker_id, "5. 等待 sso cookie")
             sso = reg.wait_for_sso_cookie(
                 log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
@@ -1146,6 +1301,30 @@ def register_one(
                 except Exception:
                     _mark_email_stage_error(email, str(exc))
                 last_slot_email = email
+            # Final-page Turnstile already raises AccountRetryNeeded from ttk;
+            # profile path also raises ARN after demote. Count process streak
+            # so dead pools still fail-fast after consecutive Turnstile, not spin.
+            exc_text = str(exc)
+            if is_turnstile_stuck_error(exc_text) or exc_text.startswith("turnstile:"):
+                streak = note_turnstile_streak(ok=False)
+                limit = _turnstile_fatal_streak_limit(getattr(reg, "config", None))
+                if streak >= limit:
+                    fatal_msg = (
+                        f"Turnstile 连续失败 fail-fast streak={streak}/{limit}: "
+                        f"{exc_text[:200]}"
+                    )
+                    log(worker_id, f"! 致命错误，停止整批（不空转）: {fatal_msg}")
+                    _inc("reg_fail")
+                    try:
+                        note_egress_outcome(
+                            "turnstile",
+                            log=lambda m: log(worker_id, m),
+                            config=getattr(reg, "config", None),
+                        )
+                    except Exception:
+                        pass
+                    request_fatal_stop(fatal_msg)
+                    raise FatalRegisterError(fatal_msg) from exc
             slot_retry += 1
             # Always switch path on stuck (even when slot budget is 0) so the *next*
             # account / next process does not inherit a dead Clash node.
@@ -1244,6 +1423,15 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
         if result.get("ok"):
             log(worker_id, f"+ CPA auth (product ok): {result.get('path')}")
             _inc("mint_success")
+            # Disk product success: boost current egress weight (NODE_SCORE).
+            try:
+                note_egress_outcome(
+                    "mint_ok",
+                    log=lambda m: log(worker_id, m),
+                    config=config,
+                )
+            except Exception:
+                pass
             # Inject counters only when remote inject is part of this run.
             # inject=false (disk-first) must not inflate skip/fail from export payload.
             if inject_on and not result.get("remote_inject_disabled"):

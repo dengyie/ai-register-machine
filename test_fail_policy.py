@@ -284,6 +284,105 @@ def test_run_register_preserves_product_exit() -> None:
     print("PASS run-register preserves product exit (PIPESTATUS)")
 
 
+def _load_turnstile_helpers():
+    """Load Turnstile demote helpers without importing ttk side effects."""
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    wanted = {
+        "is_turnstile_stuck_error",
+        "is_turnstile_headless_upgradeable",
+        "is_fatal_register_error",
+        "note_turnstile_streak",
+        "_turnstile_fatal_streak_limit",
+    }
+    nodes = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
+            nodes.append(node)
+    names = {n.name for n in nodes}
+    missing = wanted - names
+    if missing:
+        raise RuntimeError(f"missing turnstile helpers: {sorted(missing)}")
+    # Minimal globals used by helpers
+    ns: dict = {
+        "os": __import__("os"),
+        "sys": sys,
+        "threading": __import__("threading"),
+        "reg": type("R", (), {"config": {}})(),
+        "_turnstile_fail_streak_lock": __import__("threading").Lock(),
+        "_turnstile_fail_streak": 0,
+    }
+    # Exec order: stuck → upgradeable → fatal → streak_limit → note_streak
+    order = {
+        "is_turnstile_stuck_error": 0,
+        "is_turnstile_headless_upgradeable": 1,
+        "is_fatal_register_error": 2,
+        "_turnstile_fatal_streak_limit": 3,
+        "note_turnstile_streak": 4,
+    }
+    nodes.sort(key=lambda n: order.get(n.name, 9))
+    mod = ast.Module(body=nodes, type_ignores=[])
+    exec(compile(mod, "register_cli.py", "exec"), ns)
+    return ns
+
+
+def test_turnstile_demote_not_unconditional_fatal() -> None:
+    """Profile Turnstile stuck is slot-retry class; not bare process-fatal."""
+    ns = _load_turnstile_helpers()
+    is_stuck = ns["is_turnstile_stuck_error"]
+    is_fatal = ns["is_fatal_register_error"]
+    is_upgradeable = ns["is_turnstile_headless_upgradeable"]
+
+    profile_msg = (
+        "Turnstile 卡住 fail-fast: token_len=0 "
+        "stuck_timeout=60.0s retries=3/3 snap={}"
+    )
+    assert is_stuck(profile_msg) is True
+    # Demoted: plain Turnstile stuck must NOT be unconditional process-fatal
+    assert is_fatal(profile_msg) is False
+    assert is_upgradeable(profile_msg) is True
+
+    final_msg = (
+        "最终页 Turnstile 卡住 fail-fast: wait 45s token_len=0 "
+        "stuck_timeout=60s retries=2/3"
+    )
+    assert is_stuck(final_msg) is True
+    assert is_fatal(final_msg) is False
+
+    # Real unrecoverable markers still fatal
+    assert is_fatal("Hotmail plus-alias 已禁用（mode=off）") is True
+    assert is_fatal("Turnstile headless 失败且无可用 DISPLAY/xvfb-run") is True
+    assert is_fatal("Turnstile 连续失败 fail-fast streak=6/6: x") is True
+    assert is_fatal("headed 需要 DISPLAY/xvfb-run") is True
+
+    # Source wiring: demote path must raise AccountRetryNeeded for turnstile
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    assert "def is_turnstile_stuck_error" in src
+    assert "note_turnstile_streak" in src
+    assert 'raise AccountRetryNeeded(\n                            f"turnstile:' in src or (
+        'raise AccountRetryNeeded(\n                            f"turnstile: {msg' in src
+    ) or 'f"turnstile: {msg' in src
+    assert "Turnstile 卡住，换路 slot 重试" in src
+    # Must not list bare "Turnstile 卡住 fail-fast" as unconditional fatal marker
+    # (marker tuple should prefer streak / headless-no-DISPLAY fatals)
+    assert '"Turnstile 连续失败 fail-fast"' in src
+    print("PASS turnstile demote policy (not unconditional fatal)")
+
+
+def test_turnstile_streak_fail_fast() -> None:
+    ns = _load_turnstile_helpers()
+    note = ns["note_turnstile_streak"]
+    # Reset via ok=True
+    assert note(ok=True) == 0
+    assert note(ok=False) == 1
+    assert note(ok=False) == 2
+    assert note(ok=True) == 0
+    assert note(ok=False) == 1
+    limit = ns["_turnstile_fatal_streak_limit"]({})
+    assert 1 <= limit <= 50
+    print(f"PASS turnstile streak counter (default limit={limit})")
+
+
 def main() -> int:
     test_classify()
     test_open_signup_hardens_release()
@@ -296,6 +395,8 @@ def main() -> int:
     test_cli_mint_token_ok_honesty()
     test_desktop_gui_removed_cli_keeps_product_counters()
     test_run_register_preserves_product_exit()
+    test_turnstile_demote_not_unconditional_fatal()
+    test_turnstile_streak_fail_fast()
     print("\nALL PASS")
     return 0
 
