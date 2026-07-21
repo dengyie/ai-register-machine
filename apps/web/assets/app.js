@@ -749,11 +749,24 @@
       const data = await api(`/api/accounts?${accountsQuery()}`, { headers: headers() });
       accountsCache = data;
       if (sum) {
-        sum.textContent =
-          `path=${data.path} · 本页筛选 total=${data.total} complete=${data.complete}` +
-          (data.disk_complete != null ? ` · disk_complete=${data.disk_complete}` : "") +
-          ` · 第 ${data.page}/${data.pages || 1} 页`;
-        sum.className = "card " + (data.complete > 0 ? "ok" : "muted");
+        const t = data.total || 0;
+        const c = data.complete || 0;
+        const inc = Math.max(0, t - c);
+        const dc = data.disk_complete != null ? data.disk_complete : null;
+        sum.innerHTML = [
+          kpiCard("total (本页)", String(t), `path=${data.path || ""}`, ""),
+          kpiCard(
+            "complete",
+            String(c),
+            `第 ${data.page}/${data.pages || 1} 页`,
+            c > 0 ? "ok" : "",
+          ),
+          kpiCard("incomplete", String(inc), "", inc > 0 ? "warn" : ""),
+          dc != null ? kpiCard("disk complete", String(dc), "全盘", "ok") : "",
+        ]
+          .filter(Boolean)
+          .join("");
+        sum.className = "kpi-grid compact";
       }
       if (pageInfo) pageInfo.textContent = `page ${data.page}/${data.pages || 1}`;
       const rows = data.items || [];

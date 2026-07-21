@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Grok 注册机 · Control Plane</title>
+  <title>AI 注册机 · Control Plane</title>
   <link rel="stylesheet" href="/assets/app.css?v=console5" />
 </head>
 <body>
@@ -29,8 +29,8 @@
       <div class="side-brand">
         <div class="logo-dot" aria-hidden="true"></div>
         <div>
-          <div class="side-title">Grok 注册机</div>
-          <a class="side-link" href="https://github.com/dengyie/ai-register-machine" target="_blank" rel="noopener noreferrer">开源仓库</a>
+          <div class="side-title">AI 注册机</div>
+          <a class="side-link" href="https://github.com/dengyie/ai-register-machine" target="_blank" rel="noopener noreferrer">grok / mimo / chatgpt</a>
         </div>
       </div>
       <nav id="nav" class="side-nav">
@@ -266,7 +266,7 @@
           <button type="button" id="acc-next" class="small">下一页</button>
           <span id="acc-page-info" class="hint"></span>
         </div>
-        <div id="acc-summary" class="card muted">—</div>
+        <div id="acc-summary" class="kpi-grid compact">—</div>
         <div class="card table-wrap">
           <table class="data" id="acc-table">
             <thead>
@@ -456,32 +456,34 @@
             <p class="hint">节点文件 / 邮件凭证 / auth 包 / config pack。默认 auth 导入不远程 tebi。</p>
           </div>
         </header>
-        <div class="card">
-          <h2>Nodes / proxies 文件</h2>
-          <input type="file" id="nodes-file" />
-          <label class="check"><input type="checkbox" id="nodes-dry" checked /> dry-run</label>
-          <label class="check"><input type="checkbox" id="nodes-replace" /> replace</label>
-          <button type="button" id="nodes-go" class="ghost">Import nodes</button>
-        </div>
-        <div class="card">
-          <h2>Mail credentials</h2>
-          <textarea id="mail-text" rows="5" placeholder="email----password----clientId----refresh_token"></textarea>
-          <label class="inline">mode
-            <select id="mail-mode"><option value="append">append</option><option value="replace">replace</option></select>
-          </label>
-          <button type="button" id="mail-go" class="ghost">Import mail</button>
-        </div>
-        <div class="card">
-          <h2>Account / token dumps</h2>
-          <input type="file" id="auths-file" />
-          <label class="check"><input type="checkbox" id="auths-remote" /> allow remote CPA inject</label>
-          <button type="button" id="auths-go" class="ghost">Import auths</button>
-        </div>
-        <div class="card">
-          <h2>Config pack (zip)</h2>
-          <input type="file" id="pack-file" />
-          <label class="check"><input type="checkbox" id="pack-apply" /> apply</label>
-          <button type="button" id="pack-go" class="ghost">Import pack</button>
+        <div class="import-grid">
+          <div class="card">
+            <h2>Nodes / proxies 文件</h2>
+            <input type="file" id="nodes-file" />
+            <label class="check"><input type="checkbox" id="nodes-dry" checked /> dry-run</label>
+            <label class="check"><input type="checkbox" id="nodes-replace" /> replace</label>
+            <button type="button" id="nodes-go" class="ghost">Import nodes</button>
+          </div>
+          <div class="card">
+            <h2>Mail credentials</h2>
+            <textarea id="mail-text" rows="5" placeholder="email----password----clientId----refresh_token"></textarea>
+            <label class="inline">mode
+              <select id="mail-mode"><option value="append">append</option><option value="replace">replace</option></select>
+            </label>
+            <button type="button" id="mail-go" class="ghost">Import mail</button>
+          </div>
+          <div class="card">
+            <h2>Account / token dumps</h2>
+            <input type="file" id="auths-file" />
+            <label class="check"><input type="checkbox" id="auths-remote" /> allow remote CPA inject</label>
+            <button type="button" id="auths-go" class="ghost">Import auths</button>
+          </div>
+          <div class="card">
+            <h2>Config pack (zip)</h2>
+            <input type="file" id="pack-file" />
+            <label class="check"><input type="checkbox" id="pack-apply" /> apply</label>
+            <button type="button" id="pack-go" class="ghost">Import pack</button>
+          </div>
         </div>
         <pre id="import-result" class="log"></pre>
       </section>

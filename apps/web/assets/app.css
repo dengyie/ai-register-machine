@@ -717,3 +717,23 @@ table.data td.ops {
 }
 
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ── Compact KPI skin (Task E: accounts summary) ─────── */
+.kpi-grid.compact {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.5rem;
+}
+.kpi-grid.compact .kpi { min-height: 3.25rem; padding: 0.4rem 0.55rem; }
+.kpi-grid.compact .kpi .value { font-size: 1.05rem; }
+
+/* ── Run history (Task F) ────────────────────────────── */
+.run-history-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.78rem;
+}
+.run-history-list li { color: var(--muted); }
