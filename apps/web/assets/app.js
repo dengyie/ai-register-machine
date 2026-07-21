@@ -575,6 +575,36 @@
     }
   }
 
+  /** Load GET /api/runs history on demand (details open only; not on 4s poll). */
+  async function refreshRunHistory() {
+    const box = $("#run-history");
+    if (!box) return;
+    try {
+      const data = await api("/api/runs", { headers: headers() });
+      const runs = Array.isArray(data.runs) ? data.runs : [];
+      if (!runs.length) {
+        box.innerHTML = `<span class="hint">暂无历史 supervisor 日志。</span>`;
+        return;
+      }
+      box.innerHTML =
+        `<ul class="run-history-list">` +
+        runs
+          .slice(0, 12)
+          .map((r) => {
+            const d = new Date((r.mtime || 0) * 1000);
+            const iso = isNaN(d.getTime())
+              ? "—"
+              : d.toISOString().replace("T", " ").slice(0, 19);
+            return `<li><span class="mono hint">${escapeHtml(iso)}</span> · <span class="mono">${escapeHtml(r.name || "")}</span></li>`;
+          })
+          .join("") +
+        `</ul>`;
+    } catch (e) {
+      if (e.status === 401) return showGate(true);
+      box.innerHTML = `<span class="hint">加载失败: ${escapeHtml(String(e.message || e))}</span>`;
+    }
+  }
+
   function applyKindVisibility() {
     const kind = $("#reg-kind")?.value || "grok_supervisor";
     const isSupervisor = kind === "grok_supervisor";
@@ -1311,6 +1341,10 @@
   // Advanced start: toggle supervisor vs register_sh field visibility
   $("#reg-kind")?.addEventListener("change", applyKindVisibility);
   applyKindVisibility();
+  // History: fetch only when details opens (no 4s poll)
+  $("#run-history-wrap")?.addEventListener("toggle", (e) => {
+    if (e.target && e.target.open) refreshRunHistory();
+  });
 
   // accounts
   $("#acc-refresh")?.addEventListener("click", refreshAccounts);
