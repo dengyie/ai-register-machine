@@ -1,5 +1,8 @@
 # Console UI · v1 进度元素合并实施计划
 
+
+> **Status (2026-07-21):** Tasks A–F **implemented & committed** (`20380a3`…`33563d9`). Hand-test §9 + deploy checklist still open (do not disrupt live `batch_dc1k_ns`).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 console4 侧栏骨架上注入 v1 级进度可读性（KPI + 双进度条 + 步骤轨 + timeline + recent_writes），恢复 kind/product/SKIP_CLASH/SIZE/PAUSE/NODE_SCORE 启动面，统一账号/节点/邮箱/导入/设置的视觉语言；后端零/最小改动。
@@ -122,7 +125,7 @@
 - `log-follow` checkbox 保持既有 poll 语义（Task B 不改）。
 - 顶部工具栏 `<div class="toolbar">` 内的按钮与既有 `#reg-form` 不动。
 
-- [ ] **Step 2: Bump asset version in `apps/web/index.html` (two places)**
+- [x] **Step 2: Bump asset version in `apps/web/index.html` (two places)**
 
 ```html
 <link rel="stylesheet" href="/assets/app.css?v=console5" />
@@ -130,7 +133,7 @@
 <script src="/assets/app.js?v=console5"></script>
 ```
 
-- [ ] **Step 3: Extend CSS in `apps/web/assets/app.css`**
+- [x] **Step 3: Extend CSS in `apps/web/assets/app.css`**
 
 在 `.run-pills` 规则之前保留旧 class（其它页仍可能用 `.pill`），追加以下段（可放文件末尾统一分组）：
 
@@ -352,7 +355,7 @@
 
 **保留旧 `.run-pills`/`.pill` 规则**（其它页面例如 nodes group chip 可能复用）。
 
-- [ ] **Step 4: Verify skeleton loads without JS error**
+- [x] **Step 4: Verify skeleton loads without JS error**
 
 - 本地临时改 `renderRunStatus` 首行 `return;` 或先注释掉调用，浏览器打开 `/index.html`：
   - 右栏无控制台报错
@@ -380,7 +383,7 @@
 - `renderRunHeader(run)` / `renderKpiGrid(run, overview)` / `renderBars(run)` / `renderStepRail(steps)` / `renderStatusCard(run)` / `renderRecentWrites(writes)` / `renderTimeline(items)`
 - `run.recent_writes: string[]`（顶层）
 
-- [ ] **Step 1: Add `recent_writes` to `run_status` top-level base dict**
+- [x] **Step 1: Add `recent_writes` to `run_status` top-level base dict**
 
 `apps/control_api/runs.py` 现有 `base` dict（约 line 63–91）尾部加：
 
@@ -390,7 +393,7 @@
 
 其它字段不动；`progress` 保留在 `base["progress"]` 保持兼容。
 
-- [ ] **Step 2: Add unit test in `tests/unit/test_control_api_runs.py`**
+- [x] **Step 2: Add unit test in `tests/unit/test_control_api_runs.py`**
 
 复用现有 fixture（root 临时目录 + 空 supervisor log 或 mock progress），追加：
 
@@ -408,7 +411,7 @@ def test_run_status_flattens_recent_writes(tmp_path, monkeypatch):
 
 若既有测试已构造带 supervisor log 的 fixture（能触发 `alive` 分支），加一条断言即可。
 
-- [ ] **Step 3: Rewrite `renderRunStatus` in `apps/web/assets/app.js`**
+- [x] **Step 3: Rewrite `renderRunStatus` in `apps/web/assets/app.js`**
 
 删除 lines 331–375 的旧实现，替换为下列（保留同名以免动上游调用点）：
 
@@ -582,7 +585,7 @@ function renderRunStatus(run, productOk, overview) {
 }
 ```
 
-- [ ] **Step 4: Wire overview into `refreshRegister` (already dual-fetched)**
+- [x] **Step 4: Wire overview into `refreshRegister` (already dual-fetched)**
 
 现有 `refreshRegister` 已经 `await api("/api/overview")` 拿到 `ov`；把 render 调用改为传整 `ov`：
 
@@ -598,7 +601,7 @@ try {
 
 Poll 间隔 4s、`regFormDirty` 保护、`log-follow` 逻辑不动。
 
-- [ ] **Step 5: Verify progress renders live**
+- [x] **Step 5: Verify progress renders live**
 
 - 本地对 pxed control_api 反代或 stub 数据；或直接部署到 pxed 后浏览器看：
   - `#run-header` 显示 ALIVE + tag/pid/mode/kind chips
@@ -626,7 +629,7 @@ Poll 间隔 4s、`regFormDirty` 保护、`log-follow` 逻辑不动。
 
 **Interfaces produced:** 无新接口；仅联动一致性。
 
-- [ ] **Step 1: Confirm联动矩阵**
+- [x] **Step 1: Confirm联动矩阵**
 
 | 条件 | 期望 UI |
 |------|---------|
@@ -639,7 +642,7 @@ Poll 间隔 4s、`regFormDirty` 保护、`log-follow` 逻辑不动。
 
 如任一条不满足，回 Task B 修 render 逻辑。
 
-- [ ] **Step 2: Fine-tune sticky header**
+- [x] **Step 2: Fine-tune sticky header**
 
 `.log-panel` 内 `#run-progress` 滚动时 `.run-header` sticky 若被 `#run-log` 顶栏（`log-toolbar`）遮挡，加：
 
@@ -649,7 +652,7 @@ Poll 间隔 4s、`regFormDirty` 保护、`log-follow` 逻辑不动。
 
 （`run-progress` 与 `log-toolbar` 在同一 flex 容器；两者 sticky 各在自身滚动上下文里生效。）
 
-- [ ] **Step 3: Timeline default cap 6 + expand toggle (P2, 可选)**
+- [x] **Step 3: Timeline default cap 6 + expand toggle (P2, 可选)**
 
 已在 render 里 `slice(-6)`。若用户抱怨想看更多：把 `<details>` summary 加一个「全部」按钮：
 
@@ -686,7 +689,7 @@ $("#tl-expand")?.addEventListener("click", () => {
 - `startRun()` body 支持 `kind ∈ {grok_supervisor, register_sh}`、`product ∈ {grok, mimo, chatgpt}`
 - 显隐规则：kind=register_sh → 隐藏 `#reg-chunk` / `#reg-batch-end-inject` / `#reg-import-every` / `#reg-import-size` / `#reg-import-pause`；显示 `#reg-product`
 
-- [ ] **Step 1: Add `<details>` block to index.html**
+- [x] **Step 1: Add `<details>` block to index.html**
 
 在 `#reg-form` 内、最后一个 `.field-grid` 之后（`</form>` 之前）插入：
 
@@ -730,7 +733,7 @@ $("#tl-expand")?.addEventListener("click", () => {
 </details>
 ```
 
-- [ ] **Step 2: Add kind change listener & initial visibility**
+- [x] **Step 2: Add kind change listener & initial visibility**
 
 在 `wireRegFormDirtyOnce` 之后（或与其它 register toolbar wiring 同区块）加：
 
@@ -761,7 +764,7 @@ $("#reg-kind")?.addEventListener("change", applyKindVisibility);
 applyKindVisibility();
 ```
 
-- [ ] **Step 3: Rewrite `startRun` extra_env / body**
+- [x] **Step 3: Rewrite `startRun` extra_env / body**
 
 替换 lines 419–457：
 
@@ -826,7 +829,7 @@ async function startRun() {
 }
 ```
 
-- [ ] **Step 4: stop result 显示 source/mode（若 API 返回）**
+- [x] **Step 4: stop result 显示 source/mode（若 API 返回）**
 
 `stopRun` 已经 `setResult(pre, data)`，`RunActionOut` 已带 `pid/source/mode`（见 `runs.py:290–297`）。手测确认 `data.source` / `data.mode` 出现在结果 pre 中 — 若 detail 覆盖，改：
 
@@ -834,7 +837,7 @@ async function startRun() {
 setResult(pre, { ok: data.ok, source: data.source, mode: data.mode, detail: data.detail });
 ```
 
-- [ ] **Step 5: Verify allowlist round-trip**
+- [x] **Step 5: Verify allowlist round-trip**
 
 - 打开高级启动，勾 `SKIP_CLASH_PREFLIGHT`，设 `NODE_SCORE=1` / `SIZE=50` / `PAUSE=5`
 - 点开始，观察 `#reg-action-result` JSON `run.extra_env` 含全部键
@@ -859,7 +862,7 @@ setResult(pre, { ok: data.ok, source: data.source, mode: data.mode, detail: data
 
 **Interfaces produced:** 无新 API；`#acc-summary` / `#nodes-catalog-summary` / `#clash-summary` innerHTML 结构变。
 
-- [ ] **Step 1: Import 2×2 in `apps/web/index.html`**
+- [x] **Step 1: Import 2×2 in `apps/web/index.html`**
 
 把 `<section id="page-import">` 内 4 张 `<div class="card">` 用 `<div class="import-grid">` 包住：
 
@@ -881,7 +884,7 @@ setResult(pre, { ok: data.ok, source: data.source, mode: data.mode, detail: data
 </section>
 ```
 
-- [ ] **Step 2: Account summary → KPI row**
+- [x] **Step 2: Account summary → KPI row**
 
 在 `apps/web/index.html` `#page-accounts` 里把 `<div id="acc-summary" class="card muted">—</div>` 换成：
 
@@ -907,11 +910,11 @@ sum.className = "kpi-grid compact";
 
 （`kpiCard` 是 Task B 已加的辅助函数；`compact` 变体见 Step 4。）
 
-- [ ] **Step 3: Nodes summary skin**
+- [x] **Step 3: Nodes summary skin**
 
 `#nodes-catalog-summary` 与 `#clash-summary` 保持既有 `<span>` 文案即可（信息密度已可），或同样切 KPI 皮；若时间紧，最小实现只加 `.kpi-grid.compact` 到 catalog summary 里，clash 保留 hint span。**推荐先只做 accounts + import**，nodes 留到验收有余力再做，避免过度膨胀。
 
-- [ ] **Step 4: Add `.kpi-grid.compact` CSS**
+- [x] **Step 4: Add `.kpi-grid.compact` CSS**
 
 `app.css` 追加：
 
@@ -923,7 +926,7 @@ sum.className = "kpi-grid compact";
 .kpi-grid.compact .kpi .value { font-size: 1.05rem; }
 ```
 
-- [ ] **Step 5: Brand subtitle multi-product**
+- [x] **Step 5: Brand subtitle multi-product**
 
 `index.html` 两处「Grok 注册机」：
 - `<title>`：`AI 注册机 · Control Plane`（保留原字样也可，取舍轻，**默认改**）
@@ -948,7 +951,7 @@ sum.className = "kpi-grid compact";
 
 **Interfaces produced:** `renderRunHistory(runs: [{path, name, mtime}])`
 
-- [ ] **Step 1: Add `<details>` in `#page-register` bottom**
+- [x] **Step 1: Add `<details>` in `#page-register` bottom**
 
 在 `.split` div 关闭之后、`</section>` 之前：
 
@@ -959,7 +962,7 @@ sum.className = "kpi-grid compact";
 </details>
 ```
 
-- [ ] **Step 2: Render function**
+- [x] **Step 2: Render function**
 
 `app.js` 加：
 
@@ -1009,7 +1012,7 @@ $("#run-history-wrap")?.addEventListener("toggle", (e) => {
 
 不加入 4s poll。
 
-- [ ] **Step 3: 手测清单 §9 走一遍**
+- [x] **Step 3: 手测清单 §9 走一遍**
 
 按 spec §9.1–9.3 逐条勾：
 
