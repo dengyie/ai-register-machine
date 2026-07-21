@@ -255,7 +255,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   flex-direction: column;
   gap: 0.65rem;
   max-height: calc(100vh - 7.5rem);
-  min-height: 28rem;
+  min-height: 0;
+  overflow: hidden; /* children scroll; don't let log paint over progress */
 }
 
 .stack-form { display: flex; flex-direction: column; gap: 0.85rem; }
@@ -398,9 +399,11 @@ textarea { resize: vertical; min-height: 4rem; }
 
 .log.compact { max-height: 8rem; }
 .log.tall {
-  flex: 1;
-  min-height: 16rem;
-  max-height: none;
+  /* grow into leftover space only — never crush .run-progress above */
+  flex: 1 1 auto;
+  min-height: 8rem;
+  max-height: min(36vh, 18rem);
+  overflow: auto;
 }
 
 .mono, .log.mono {
@@ -503,18 +506,31 @@ table.data td.ops {
   .main-wrap { padding: 0.75rem; }
 }
 
-/* ── Run progress stack (console5) ─────────────────────── */
+/* ── Run progress stack (console5/6) ───────────────────── */
 .run-progress {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  max-height: min(52vh, 28rem);
+  /* Progress (KPI/bars) wins layout; never shrink under the log */
+  flex: 0 0 auto;
+  max-height: min(58vh, 34rem);
   overflow: auto;
   padding-right: 0.15rem;
+  min-height: 0;
 }
 
-.log-panel { display: flex; flex-direction: column; min-height: 0; }
-.log-panel #run-log { flex: 1; min-height: 12rem; }
+.log-panel #run-log {
+  flex: 1 1 auto;
+  min-height: 8rem;
+  max-height: min(36vh, 18rem);
+  overflow: auto;
+}
+
+/* log toolbar is not sticky over progress — only pins inside log region */
+.log-panel > .log-toolbar {
+  position: static;
+  flex: 0 0 auto;
+}
 
 .run-header {
   position: sticky;
