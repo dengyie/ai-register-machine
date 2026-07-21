@@ -369,6 +369,11 @@ textarea { resize: vertical; min-height: 4rem; }
   flex-wrap: wrap;
   gap: 0.5rem 0.75rem;
   align-items: center;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 1;
+  padding: 0.35rem 0;
 }
 
 .log-toolbar h2 {
