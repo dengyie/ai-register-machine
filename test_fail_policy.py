@@ -295,6 +295,9 @@ def _load_turnstile_helpers():
         "note_turnstile_streak",
         "_turnstile_fatal_streak_limit",
         "turnstile_slot_exhausted",
+        "_turnstile_streak_state_path",
+        "_read_turnstile_streak_disk",
+        "_write_turnstile_streak_disk",
     }
     nodes = []
     for node in tree.body:
@@ -313,14 +316,17 @@ def _load_turnstile_helpers():
         "_turnstile_fail_streak_lock": __import__("threading").Lock(),
         "_turnstile_fail_streak": 0,
     }
-    # Exec order: stuck → upgradeable → fatal → streak_limit → note_streak → slot helper
+    # Exec order: stuck → upgradeable → fatal → path/disk helpers → limit → note → slot
     order = {
         "is_turnstile_stuck_error": 0,
         "is_turnstile_headless_upgradeable": 1,
         "is_fatal_register_error": 2,
-        "_turnstile_fatal_streak_limit": 3,
-        "note_turnstile_streak": 4,
-        "turnstile_slot_exhausted": 5,
+        "_turnstile_streak_state_path": 3,
+        "_read_turnstile_streak_disk": 4,
+        "_write_turnstile_streak_disk": 5,
+        "_turnstile_fatal_streak_limit": 6,
+        "note_turnstile_streak": 7,
+        "turnstile_slot_exhausted": 8,
     }
     nodes.sort(key=lambda n: order.get(n.name, 9))
     mod = ast.Module(body=nodes, type_ignores=[])
@@ -355,6 +361,8 @@ def test_turnstile_demote_not_unconditional_fatal() -> None:
     arn_msg = f"turnstile: {profile_msg}"
     assert is_stuck(arn_msg) is True
     assert is_fatal(arn_msg) is False
+    # Non-stuck turnstile: prefix alone must NOT be stuck (avoids streak noise)
+    assert is_stuck("turnstile: unrelated noise") is False
 
     # Real unrecoverable markers still fatal
     assert is_fatal("Hotmail plus-alias 已禁用（mode=off）") is True
@@ -382,25 +390,40 @@ def test_turnstile_demote_not_unconditional_fatal() -> None:
     reg_ok_i = src.find('note_egress_outcome(\n                    "reg_ok"')
     if reg_ok_i < 0:
         reg_ok_i = src.find('"reg_ok"')
-    streak_ok_i = src.find("note_turnstile_streak(ok=True)")
+    streak_ok_i = src.find("note_turnstile_streak(\n                    ok=True")
+    if streak_ok_i < 0:
+        streak_ok_i = src.find("note_turnstile_streak(\n                ok=True")
     assert sso_i > 0 and reg_ok_i > sso_i, "reg_ok must be after wait_for_sso_cookie"
-    assert streak_ok_i > sso_i, "streak reset must be after wait_for_sso_cookie"
+    assert streak_ok_i > sso_i, "streak reset (ok=True) must be after wait_for_sso_cookie"
     # Streak only on slot exhaust, not every mid-slot ARN
     assert "Turnstile slot 耗尽计 streak=" in src
     assert "per-account, not mid-slot" in src
+    # P1: streak-fatal must NOT re-note turnstile after rotate (would cool new node)
+    assert "No second" in src or "would be wrongly cool" in src
+    # P1: headless upgrade rotates egress
+    assert "turnstile-headed-upgrade:" in src
+    # P2: cross-sub streak disk
+    assert "def _turnstile_streak_state_path" in src
+    assert "cross-sub disk" in src
     print("PASS turnstile demote policy (not unconditional fatal)")
 
 
 def test_turnstile_streak_fail_fast() -> None:
+    import tempfile
+    from pathlib import Path
+
     ns = _load_turnstile_helpers()
     note = ns["note_turnstile_streak"]
     slot_ex = ns["turnstile_slot_exhausted"]
-    # Reset via ok=True
-    assert note(ok=True) == 0
-    assert note(ok=False) == 1
-    assert note(ok=False) == 2
-    assert note(ok=True) == 0
-    assert note(ok=False) == 1
+    with tempfile.TemporaryDirectory() as td:
+        path = str(Path(td) / "streak")
+        cfg = {"turnstile_streak_file": path}
+        # Reset via ok=True
+        assert note(ok=True, config=cfg) == 0
+        assert note(ok=False, config=cfg) == 1
+        assert note(ok=False, config=cfg) == 2
+        assert note(ok=True, config=cfg) == 0
+        assert note(ok=False, config=cfg) == 1
     limit = ns["_turnstile_fatal_streak_limit"]({})
     assert 1 <= limit <= 50
     # Slot-exhaust helper: mid-slot retries must NOT count as exhausted
@@ -414,6 +437,9 @@ def test_turnstile_streak_fail_fast() -> None:
 
 def test_turnstile_streak_per_account_not_per_attempt() -> None:
     """Simulate ARN chain: only slot-exhausted accounts bump process streak."""
+    import tempfile
+    from pathlib import Path
+
     ns = _load_turnstile_helpers()
     note = ns["note_turnstile_streak"]
     is_stuck = ns["is_turnstile_stuck_error"]
@@ -421,57 +447,110 @@ def test_turnstile_streak_per_account_not_per_attempt() -> None:
     slot_ex = ns["turnstile_slot_exhausted"]
     limit_fn = ns["_turnstile_fatal_streak_limit"]
 
-    note(ok=True)
-    max_slot_retry = 2
-    # One account, 3 Turnstile ARNs (initial + 2 retries) → 1 streak only
-    slot_retry = 0
-    turnstile_arn = "turnstile: Turnstile 卡住 fail-fast: token_len=0"
-    assert is_stuck(turnstile_arn) is True
-    for _ in range(3):
-        slot_retry += 1
-        if slot_retry <= max_slot_retry:
-            continue  # mid-slot: no note_turnstile_streak(ok=False)
-        streak = note(ok=False)
-        assert streak == 1
-        assert slot_ex(slot_retry=slot_retry, max_slot_retry=max_slot_retry) is True
-    # Second exhausted account → streak 2
-    slot_retry = 0
-    for _ in range(3):
-        slot_retry += 1
-        if slot_retry <= max_slot_retry:
-            continue
-        streak = note(ok=False)
-        assert streak == 2
-    # reg_ok resets
-    assert note(ok=True) == 0
-    # Reach fatal at limit without mid-slot inflation
-    limit = limit_fn({"turnstile_fatal_streak": 3})
-    assert limit == 3
-    for i in range(3):
-        streak = note(ok=False)
-        if streak >= limit:
-            fatal_msg = (
-                f"Turnstile 连续失败 fail-fast streak={streak}/{limit}: "
-                f"{turnstile_arn}"
-            )
-            assert is_fatal(fatal_msg) is True
-            assert streak == 3
-            break
-    else:
-        raise AssertionError("expected streak to hit fatal limit")
+    with tempfile.TemporaryDirectory() as td:
+        path = str(Path(td) / "streak")
+        cfg = {"turnstile_streak_file": path, "turnstile_fatal_streak": 3}
+        note(ok=True, config=cfg)
+        max_slot_retry = 2
+        # One account, 3 Turnstile ARNs (initial + 2 retries) → 1 streak only
+        slot_retry = 0
+        turnstile_arn = "turnstile: Turnstile 卡住 fail-fast: token_len=0"
+        assert is_stuck(turnstile_arn) is True
+        for _ in range(3):
+            slot_retry += 1
+            if slot_retry <= max_slot_retry:
+                continue  # mid-slot: no note_turnstile_streak(ok=False)
+            streak = note(ok=False, config=cfg)
+            assert streak == 1
+            assert slot_ex(slot_retry=slot_retry, max_slot_retry=max_slot_retry) is True
+        # Second exhausted account → streak 2
+        slot_retry = 0
+        for _ in range(3):
+            slot_retry += 1
+            if slot_retry <= max_slot_retry:
+                continue
+            streak = note(ok=False, config=cfg)
+            assert streak == 2
+        # reg_ok resets
+        assert note(ok=True, config=cfg) == 0
+        # Reach fatal at limit without mid-slot inflation
+        limit = limit_fn(cfg)
+        assert limit == 3
+        for i in range(3):
+            streak = note(ok=False, config=cfg)
+            if streak >= limit:
+                fatal_msg = (
+                    f"Turnstile 连续失败 fail-fast streak={streak}/{limit}: "
+                    f"{turnstile_arn}"
+                )
+                assert is_fatal(fatal_msg) is True
+                assert streak == 3
+                break
+        else:
+            raise AssertionError("expected streak to hit fatal limit")
     print("PASS turnstile streak per-account (not per mid-slot ARN)")
 
 
 def test_turnstile_force_headed_on_demote_wiring() -> None:
     """Still-headless demote must force headed before ARN when DISPLAY ready."""
     src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
-    # demote block: if browser_headless and headed_display_ready → force False + recycle
-    assert "Turnstile demote: force headed + recycle before slot retry" in src
+    # demote: force headed config only; hard recycle owned by ARN handler
+    assert "Turnstile demote: force headed before slot retry" in src
     assert 'reg.config["browser_headless"] = False' in src
+    # demote block must NOT hard-recycle before raise ARN (double recycle fix)
+    # (upgrade path still recycles after rotate — different branch)
+    assert "Hard recycle is owned by the AccountRetryNeeded handler" in src
     # no-DISPLAY demote string is both raised and in is_fatal markers
     assert "Turnstile 卡住且无可用 DISPLAY/xvfb-run（无法换路重试）" in src
     assert '"Turnstile 卡住且无可用 DISPLAY"' in src
+    # headless upgrade must rotate
+    assert 'reason=f"turnstile-headed-upgrade:' in src or "turnstile-headed-upgrade:" in src
     print("PASS turnstile force-headed demote wiring")
+
+
+def test_turnstile_streak_cross_sub_disk() -> None:
+    """New process memory=0 must resume streak from disk (batch-level fail-fast)."""
+    import tempfile
+    from pathlib import Path
+
+    ns = _load_turnstile_helpers()
+    note = ns["note_turnstile_streak"]
+    read_disk = ns["_read_turnstile_streak_disk"]
+    with tempfile.TemporaryDirectory() as td:
+        path = str(Path(td) / "batch.streak")
+        cfg = {"turnstile_streak_file": path}
+        note(ok=True, config=cfg)
+        assert note(ok=False, config=cfg) == 1
+        assert note(ok=False, config=cfg) == 2
+        assert read_disk(path) == 2
+        # Simulate new register_cli process: memory counter zeroed
+        ns["_turnstile_fail_streak"] = 0
+        # Next fail must resume from disk → 3, not 1
+        assert note(ok=False, config=cfg) == 3
+        assert read_disk(path) == 3
+        # reg_ok clears disk
+        assert note(ok=True, config=cfg) == 0
+        assert read_disk(path) == 0
+        ns["_turnstile_fail_streak"] = 0
+        assert note(ok=False, config=cfg) == 1
+    print("PASS turnstile streak cross-sub disk")
+
+
+def test_turnstile_streak_fatal_no_second_egress_note() -> None:
+    """Streak-fatal path must not call note_egress after _force_rotate_path."""
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    # Locate streak-fatal block
+    marker = "Turnstile 连续失败 fail-fast streak="
+    i = src.find(marker)
+    assert i > 0
+    # Within ~800 chars after marker: request_fatal_stop, no note_egress_outcome("turnstile")
+    window = src[i : i + 900]
+    assert "request_fatal_stop" in window
+    assert 'note_egress_outcome(\n                        "turnstile"' not in window
+    assert 'note_egress_outcome(\n                            "turnstile"' not in window
+    # Comment documents the P1 fix
+    assert "wrongly cool" in src or "No second" in src
+    print("PASS turnstile streak-fatal no second egress note")
 
 
 def main() -> int:
@@ -490,6 +569,8 @@ def main() -> int:
     test_turnstile_streak_fail_fast()
     test_turnstile_streak_per_account_not_per_attempt()
     test_turnstile_force_headed_on_demote_wiring()
+    test_turnstile_streak_cross_sub_disk()
+    test_turnstile_streak_fatal_no_second_egress_note()
     print("\nALL PASS")
     return 0
 
