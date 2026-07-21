@@ -153,9 +153,14 @@
     if (btn) btn.classList.add("active");
 
     if (name === "register") {
-      // Enter page: load form once (unless dirty), always refresh status/logs.
+      // Home: form + progress summary only (no log fetch).
       loadRegisterForm({ force: false });
-      refreshRegister({ reloadForm: false });
+      refreshRegister({ reloadForm: false, withLogs: false });
+    }
+    if (name === "runs") {
+      // Professional runs module: status + full log + timeline + history.
+      refreshRegister({ reloadForm: false, withLogs: true });
+      refreshRunHistory();
     }
     if (name === "accounts") refreshAccounts();
     if (name === "mail") loadMailForm();
@@ -346,13 +351,10 @@
   }
 
   function renderRunHeader(run) {
-    const el = $("#run-header");
-    if (!el) return;
     const alive = !!(run && run.alive);
     const stuck = !!(run && run.stuck);
-    el.dataset.state = stuck ? "stuck" : alive ? "alive" : "idle";
-    const word = el.querySelector(".status-word");
-    if (word) word.textContent = alive ? "ALIVE" : run ? "idle" : "无任务";
+    const state = stuck ? "stuck" : alive ? "alive" : "idle";
+    const wordText = alive ? "ALIVE" : run ? "idle" : "无任务";
     const chips = [];
     const meta = (run && run.meta) || {};
     const tag = (run && run.tag) || meta.tag;
@@ -360,12 +362,31 @@
     if (run && run.pid != null) chips.push(`<span class="chip mini">pid=${escapeHtml(run.pid)}</span>`);
     if (run && run.mode) chips.push(`<span class="chip mini">${escapeHtml(run.mode)}</span>`);
     if (run && run.kind) chips.push(`<span class="chip mini">${escapeHtml(run.kind)}</span>`);
+    if (run && run.complete != null) {
+      const goal = run.goal_complete != null ? ` / ${run.goal_complete}` : "";
+      chips.push(`<span class="chip mini">complete=${escapeHtml(run.complete)}${goal}</span>`);
+    }
     if (stuck) {
       const reason = (run && (run.stuck_reason || (run.summary && run.summary.fatal_reason))) || "";
       chips.push(`<span class="chip mini danger" title="${escapeHtml(reason)}">stuck</span>`);
     }
-    const chipsEl = $("#run-header-chips");
-    if (chipsEl) chipsEl.innerHTML = chips.join("");
+    const chipsHtml = chips.join("");
+
+    const el = $("#run-header");
+    if (el) {
+      el.dataset.state = state;
+      const word = el.querySelector(".status-word");
+      if (word) word.textContent = wordText;
+      const chipsEl = $("#run-header-chips");
+      if (chipsEl) chipsEl.innerHTML = chipsHtml;
+    }
+    // Runs page summary bar (same live data)
+    const runsEl = $("#runs-summary");
+    if (runsEl) {
+      runsEl.dataset.state = state;
+      if ($("#runs-status-word")) $("#runs-status-word").textContent = wordText;
+      if ($("#runs-header-chips")) $("#runs-header-chips").innerHTML = chipsHtml;
+    }
   }
 
   function renderKpiGrid(run, overview) {
@@ -552,11 +573,15 @@
   }
 
   /**
-   * Refresh run status + logs. Never reloads form on poll.
-   * @param {{reloadForm?: boolean}} opts reloadForm only for explicit 刷新 button.
+   * Refresh run status (+ optional logs). Never reloads form on poll.
+   * @param {{reloadForm?: boolean, withLogs?: boolean}} opts
+   *   reloadForm — only for explicit 刷新 on register.
+   *   withLogs — true on runs page; false on home (no log paint / no log fetch).
    */
   async function refreshRegister(opts = {}) {
     const reloadForm = !!(opts && opts.reloadForm);
+    const onRuns = !!$("#page-runs")?.classList.contains("active");
+    const withLogs = opts.withLogs != null ? !!opts.withLogs : onRuns;
     try {
       if (reloadForm) await loadRegisterForm({ force: true });
       const cur = await api("/api/runs/current", { headers: headers() });
@@ -568,7 +593,7 @@
       } catch {
         renderRunStatus(run, lastProductOk, null);
       }
-      await refreshLogsOnly();
+      if (withLogs) await refreshLogsOnly();
     } catch (e) {
       if (e.status === 401) return showGate(true);
       setResult($("#reg-action-result"), String(e.message || e));
@@ -1333,15 +1358,25 @@
   $("#btn-test-proxy")?.addEventListener("click", testProxy);
   $("#btn-start")?.addEventListener("click", startRun);
   $("#btn-stop")?.addEventListener("click", stopRun);
-  // Explicit 刷新: force form reload + status/logs
-  $("#btn-refresh")?.addEventListener("click", () => refreshRegister({ reloadForm: true }));
+  // Explicit 刷新: form + progress summary (no log on home)
+  $("#btn-refresh")?.addEventListener("click", () =>
+    refreshRegister({ reloadForm: true, withLogs: false }),
+  );
+  $("#btn-goto-runs")?.addEventListener("click", () => showPage("runs"));
+  document.querySelectorAll("[data-goto]").forEach((b) => {
+    b.addEventListener("click", () => showPage(b.dataset.goto));
+  });
+  $("#btn-runs-to-register")?.addEventListener("click", () => showPage("register"));
+  $("#btn-runs-refresh")?.addEventListener("click", () =>
+    refreshRegister({ reloadForm: false, withLogs: true }),
+  );
   $("#log-which")?.addEventListener("change", refreshLogsOnly);
   $("#log-tail")?.addEventListener("change", refreshLogsOnly);
   wireRegFormDirtyOnce();
   // Advanced start: toggle supervisor vs register_sh field visibility
   $("#reg-kind")?.addEventListener("change", applyKindVisibility);
   applyKindVisibility();
-  // History: fetch only when details opens (no 4s poll)
+  // History: re-fetch when details opens
   $("#run-history-wrap")?.addEventListener("toggle", (e) => {
     if (e.target && e.target.open) refreshRunHistory();
   });
@@ -1439,11 +1474,15 @@
     }
   });
 
-  // auto-refresh register status/logs only — never re-fill form (avoids wipe)
+  // auto-refresh: home = progress only; runs page = progress + logs (if follow)
   logTimer = setInterval(() => {
     if ($("#app-shell")?.classList.contains("hidden")) return;
     if ($("#page-register")?.classList.contains("active")) {
-      if ($("#log-follow")?.checked !== false) refreshRegister({ reloadForm: false });
+      refreshRegister({ reloadForm: false, withLogs: false });
+    } else if ($("#page-runs")?.classList.contains("active")) {
+      if ($("#log-follow")?.checked !== false) {
+        refreshRegister({ reloadForm: false, withLogs: true });
+      }
     }
   }, 4000);
 

@@ -506,31 +506,84 @@ table.data td.ops {
   .main-wrap { padding: 0.75rem; }
 }
 
-/* ── Run progress stack (console5/6) ───────────────────── */
+/* ── Run progress stack (console7: home summary, no log) ─ */
 .run-progress {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  /* Progress (KPI/bars) wins layout; never shrink under the log */
   flex: 0 0 auto;
-  max-height: min(58vh, 34rem);
-  overflow: auto;
-  padding-right: 0.15rem;
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
   min-height: 0;
 }
 
-.log-panel #run-log {
-  flex: 1 1 auto;
-  min-height: 8rem;
-  max-height: min(36vh, 18rem);
+/* Register home: progress on top, form below — never dual-column fight */
+.home-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.home-progress {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.75rem 0.85rem;
+}
+.home-form {
+  max-height: none;
+  overflow: visible;
+}
+.home-runs-hint { margin: 0.15rem 0 0; }
+.compact-status .status-body {
+  max-height: 4.5rem;
   overflow: auto;
+  font-size: 0.8rem;
 }
 
-/* log toolbar is not sticky over progress — only pins inside log region */
-.log-panel > .log-toolbar {
+button.linkish {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+button.linkish:hover { color: var(--accent-2, var(--accent)); }
+
+/* Runs professional module */
+.runs-log-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  min-height: 0;
+}
+.runs-log {
+  min-height: 22rem;
+  max-height: calc(100vh - 18rem);
+  flex: 1 1 auto;
+  overflow: auto;
+}
+.runs-side-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+@media (max-width: 900px) {
+  .runs-side-grid { grid-template-columns: 1fr; }
+}
+#runs-summary {
+  margin-top: 0.25rem;
+}
+#page-runs .log-toolbar {
   position: static;
   flex: 0 0 auto;
 }
+.toolbar.wrap { flex-wrap: wrap; gap: 0.5rem; }
 
 .run-header {
   position: sticky;

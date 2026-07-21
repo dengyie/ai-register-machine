@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI 注册机 · Control Plane</title>
-  <link rel="stylesheet" href="/assets/app.css?v=console6" />
+  <link rel="stylesheet" href="/assets/app.css?v=console7" />
 </head>
 <body>
   <div id="login-gate" class="login-gate hidden">
@@ -35,6 +35,7 @@
       </div>
       <nav id="nav" class="side-nav">
         <button type="button" data-page="register" class="active"><span class="nav-dot"></span>注册</button>
+        <button type="button" data-page="runs"><span class="nav-dot"></span>运行</button>
         <button type="button" data-page="accounts"><span class="nav-dot"></span>账号池</button>
         <button type="button" data-page="mail"><span class="nav-dot"></span>邮箱接码</button>
         <button type="button" data-page="nodes"><span class="nav-dot"></span>节点池</button>
@@ -48,27 +49,47 @@
     </aside>
 
     <div class="main-wrap">
-      <!-- 注册 -->
+      <!-- 注册：启动参数 + 进度摘要（日志在「运行」页） -->
       <section id="page-register" class="page active">
         <header class="page-head">
           <div>
             <h1>协议注册</h1>
-            <p class="hint">邮箱、过盾、代理与批量参数。右侧为运行日志与任务状态。</p>
+            <p class="hint">启动参数与进度摘要。完整日志 / 时间线 / 历史 → 侧栏「运行」。</p>
           </div>
           <div class="toolbar">
             <button type="button" id="btn-save-cfg" class="ghost">保存</button>
             <button type="button" id="btn-selfcheck" class="ghost">自检</button>
-            <button type="button" id="btn-start-turnstile" class="ghost" title="WIP：过盾浏览器池未接入 control plane" disabled>启动过盾 (WIP)</button>
-            <button type="button" id="btn-cleanup" class="ghost">清理过盾残留</button>
             <button type="button" id="btn-test-proxy" class="ghost">测代理</button>
             <button type="button" id="btn-start" class="primary">开始</button>
             <button type="button" id="btn-stop" class="danger">停止</button>
             <button type="button" id="btn-refresh" class="ghost">刷新</button>
+            <button type="button" id="btn-goto-runs" class="ghost">运行详情 →</button>
           </div>
         </header>
 
-        <div class="split">
-          <div class="panel form-panel">
+        <div class="home-stack">
+          <div id="run-progress" class="run-progress home-progress">
+            <div id="run-header" class="run-header" data-state="idle">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span class="status-word">idle</span>
+              <span class="meta-chips" id="run-header-chips"></span>
+            </div>
+            <div id="run-kpi" class="kpi-grid"></div>
+            <div id="run-bars" class="bars"></div>
+            <div id="run-steps" class="step-rail"></div>
+            <div id="run-status-card" class="status-card compact-status">
+              <div class="status-title" id="run-status-title">任务状态: —</div>
+              <div class="status-body" id="run-status-body">尚未加载任务。</div>
+            </div>
+            <div id="run-writes" class="run-writes hidden"></div>
+            <p class="hint home-runs-hint">
+              时间线 · 完整日志 · 历史运行已迁至
+              <button type="button" class="linkish" data-goto="runs">运行</button>
+              页，避免挡住进度。
+            </p>
+          </div>
+
+          <div class="panel form-panel home-form">
             <form id="reg-form" class="stack-form">
               <div class="field-grid">
                 <label>邮箱服务
@@ -106,51 +127,57 @@
               </div>
 
               <div class="info-box" id="reg-concurrency-hint">
-                强力模式：线程 / 过盾 / 节点由设置页与 NODE_SCORE 控制。本页保存只写协议相关配置。
+                默认 disk-first：中途不 tebi 注入。日志与时间线在「运行」页。
               </div>
 
-              <div class="field-grid">
-                <label>Turnstile 卡住超时 (秒)
-                  <input name="turnstile_stuck_timeout" id="reg-turnstile" type="number" value="150" min="5" />
-                </label>
-                <label>SUPERVISOR_CHUNK
-                  <input name="SUPERVISOR_CHUNK" id="reg-chunk" type="number" value="3" min="1" max="20" />
-                </label>
-                <label class="check muted" title="Supervisor 硬编码 CPA_PROBE_CHAT=false；勾选仅对非 supervisor 单次路径有意义">
-                  <input type="checkbox" id="reg-probe-chat" disabled /> 注册后 chat 探针（supervisor 路径强制关）
-                </label>
-                <label class="check" title="中途 mint 不 tebi 注入；与批边界导入无关">
-                  <input type="checkbox" id="reg-sso-only" checked /> 只产落盘 auth（默认，不中途 tebi 注入）
-                </label>
-              </div>
+              <details class="advanced" id="reg-batch-opts" open>
+                <summary>批参数 · chunk / 批边界导入</summary>
+                <div class="field-grid">
+                  <label>SUPERVISOR_CHUNK
+                    <input name="SUPERVISOR_CHUNK" id="reg-chunk" type="number" value="3" min="1" max="20" />
+                  </label>
+                  <label>Turnstile 卡住超时 (秒)
+                    <input name="turnstile_stuck_timeout" id="reg-turnstile" type="number" value="150" min="5" />
+                  </label>
+                  <label class="check muted" title="Supervisor 硬编码 CPA_PROBE_CHAT=false">
+                    <input type="checkbox" id="reg-probe-chat" disabled /> 注册后 chat 探针（强制关）
+                  </label>
+                  <label class="check" title="中途 mint 不 tebi 注入">
+                    <input type="checkbox" id="reg-sso-only" checked /> 只产落盘 auth（默认）
+                  </label>
+                  <label class="check" title="仅批边界 CPA_BATCH_END_INJECT">
+                    <input type="checkbox" id="reg-batch-end-inject" /> 批边界自动导入 CPA
+                  </label>
+                  <label>批边界账号数
+                    <input name="CPA_BATCH_IMPORT_EVERY" id="reg-import-every" type="number" value="100" min="1" />
+                  </label>
+                </div>
+              </details>
 
-              <div class="field-grid">
-                <label>代理策略 proxy_rotate_mode
-                  <select name="proxy_rotate_mode" id="reg-proxy-mode">
-                    <option value="clash">clash · 内置节点池轮换</option>
-                    <option value="list">list · PROXY_LIST / proxy_list</option>
-                    <option value="off">off · 固定出口</option>
-                  </select>
-                </label>
-                <label>固定 proxy URL
-                  <input name="proxy" id="reg-proxy" placeholder="http://127.0.0.1:7897" />
-                </label>
-                <label class="span2">代理池 proxy_list / PROXY_LIST
-                  <textarea name="proxy_list" id="reg-proxy-list" rows="5" placeholder="每行一个代理，支持超过 15 个；可留空走 Clash"></textarea>
-                </label>
-                <label class="check span2 muted" title="WIP：过盾池尚未接入 control plane；mint 仍由 register_cli/tab_pool 自管">
-                  <input type="checkbox" id="reg-turnstile-same-proxy" checked disabled /> 过盾走代理池（WIP · 未接线）
-                </label>
-                <label class="check" title="仅批边界 CPA_BATCH_END_INJECT；不写 config cpa_remote_inject">
-                  <input type="checkbox" id="reg-batch-end-inject" /> 批边界自动导入 CPA (CPA_BATCH_END_INJECT)
-                </label>
-                <label>批边界账号数
-                  <input name="CPA_BATCH_IMPORT_EVERY" id="reg-import-every" type="number" value="100" min="1" />
-                </label>
-              </div>
+              <details class="advanced" id="reg-proxy-opts">
+                <summary>代理 · proxy_rotate / PROXY_LIST</summary>
+                <div class="field-grid">
+                  <label>代理策略 proxy_rotate_mode
+                    <select name="proxy_rotate_mode" id="reg-proxy-mode">
+                      <option value="clash">clash · 内置节点池轮换</option>
+                      <option value="list">list · PROXY_LIST / proxy_list</option>
+                      <option value="off">off · 固定出口</option>
+                    </select>
+                  </label>
+                  <label>固定 proxy URL
+                    <input name="proxy" id="reg-proxy" placeholder="http://127.0.0.1:7897" />
+                  </label>
+                  <label class="span2">代理池 proxy_list / PROXY_LIST
+                    <textarea name="proxy_list" id="reg-proxy-list" rows="4" placeholder="每行一个代理；可留空走 Clash"></textarea>
+                  </label>
+                  <label class="check span2 muted" title="WIP">
+                    <input type="checkbox" id="reg-turnstile-same-proxy" checked disabled /> 过盾走代理池（WIP · 未接线）
+                  </label>
+                </div>
+              </details>
 
               <details class="advanced" id="reg-advanced">
-                <summary>高级启动 · kind / product / SKIP_CLASH / NODE_SCORE / batch-end 波次</summary>
+                <summary>高级启动 · kind / product / SKIP_CLASH / NODE_SCORE</summary>
                 <div class="field-grid">
                   <label>kind
                     <select id="reg-kind" name="kind">
@@ -166,7 +193,7 @@
                     </select>
                   </label>
                   <label class="check" title="SKIP_CLASH_PREFLIGHT=1 会跳过 Clash 批前测活；默认关">
-                    <input type="checkbox" id="reg-skip-preflight" /> 跳过 Clash 批前测活 (SKIP_CLASH_PREFLIGHT)
+                    <input type="checkbox" id="reg-skip-preflight" /> 跳过 Clash 批前测活
                   </label>
                   <label>NODE_SCORE
                     <select id="reg-node-score">
@@ -181,62 +208,78 @@
                   <label>CPA_BATCH_IMPORT_PAUSE
                     <input type="number" id="reg-import-pause" min="0" placeholder="3" />
                   </label>
-                  <label class="check span2" title="启动时把当前邮箱表单同步进 extra_env，避免 register_sh 不读 config">
+                  <label class="check span2" title="启动时把当前邮箱表单同步进 extra_env">
                     <input type="checkbox" id="reg-sync-mail-env" checked /> 同步 EMAIL_PROVIDER / DEFAULT_DOMAINS 到 extra_env
                   </label>
+                </div>
+              </details>
+
+              <details class="advanced" id="reg-ops-misc">
+                <summary>运维 · 过盾池 / 清理（低频）</summary>
+                <div class="toolbar wrap">
+                  <button type="button" id="btn-start-turnstile" class="ghost" title="WIP：过盾浏览器池未接入 control plane" disabled>启动过盾 (WIP)</button>
+                  <button type="button" id="btn-cleanup" class="ghost">清理过盾残留</button>
                 </div>
               </details>
             </form>
             <pre id="reg-action-result" class="log compact"></pre>
           </div>
-
-          <div class="panel log-panel">
-            <div id="run-progress" class="run-progress">
-              <div id="run-header" class="run-header" data-state="idle">
-                <span class="status-dot" aria-hidden="true"></span>
-                <span class="status-word">idle</span>
-                <span class="meta-chips" id="run-header-chips"></span>
-              </div>
-              <div id="run-kpi" class="kpi-grid"></div>
-              <div id="run-bars" class="bars"></div>
-              <div id="run-steps" class="step-rail"></div>
-              <div id="run-status-card" class="status-card">
-                <div class="status-title" id="run-status-title">任务状态: —</div>
-                <div class="status-body" id="run-status-body">尚未加载任务。</div>
-              </div>
-              <div id="run-writes" class="run-writes hidden"></div>
-              <details id="run-timeline-wrap" class="timeline-wrap" open>
-                <summary>时间线</summary>
-                <ol id="run-timeline" class="timeline"></ol>
-              </details>
-            </div>
-            <div class="log-toolbar">
-              <h2>运行日志</h2>
-              <label class="inline">来源
-                <select id="log-which">
-                  <option value="auto">auto</option>
-                  <option value="worker">worker</option>
-                  <option value="supervisor">supervisor</option>
-                  <option value="both">both</option>
-                </select>
-              </label>
-              <label class="inline">行数
-                <select id="log-tail">
-                  <option value="100">100</option>
-                  <option value="200" selected>200</option>
-                  <option value="500">500</option>
-                </select>
-              </label>
-              <label class="inline"><input type="checkbox" id="log-follow" checked /> 自动刷新</label>
-            </div>
-            <p id="log-path" class="hint mono"></p>
-            <pre id="run-log" class="log tall mono"></pre>
-          </div>
         </div>
-        <details id="run-history-wrap" class="card">
-          <summary>最近运行（supervisor logs）</summary>
-          <div id="run-history" class="hint">展开后加载…</div>
-        </details>
+      </section>
+
+      <!-- 运行：日志 / 时间线 / 历史（专业模块，不挤注册首页） -->
+      <section id="page-runs" class="page">
+        <header class="page-head">
+          <div>
+            <h1>运行</h1>
+            <p class="hint">完整日志、时间线与历史 supervisor。状态摘要与启动在「注册」页。</p>
+          </div>
+          <div class="toolbar">
+            <button type="button" id="btn-runs-refresh" class="ghost">刷新</button>
+            <button type="button" id="btn-runs-to-register" class="ghost">← 注册</button>
+            <label class="inline"><input type="checkbox" id="log-follow" checked /> 自动刷新</label>
+          </div>
+        </header>
+
+        <div id="runs-summary" class="run-header" data-state="idle">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="status-word" id="runs-status-word">idle</span>
+          <span class="meta-chips" id="runs-header-chips"></span>
+        </div>
+
+        <div class="panel runs-log-panel">
+          <div class="log-toolbar">
+            <h2>运行日志</h2>
+            <label class="inline">来源
+              <select id="log-which">
+                <option value="auto">auto</option>
+                <option value="worker">worker</option>
+                <option value="supervisor">supervisor</option>
+                <option value="both">both</option>
+              </select>
+            </label>
+            <label class="inline">行数
+              <select id="log-tail">
+                <option value="100">100</option>
+                <option value="200" selected>200</option>
+                <option value="500">500</option>
+              </select>
+            </label>
+            <span id="log-path" class="hint mono"></span>
+          </div>
+          <pre id="run-log" class="log runs-log mono"></pre>
+        </div>
+
+        <div class="runs-side-grid">
+          <details id="run-timeline-wrap" class="card timeline-wrap" open>
+            <summary>时间线</summary>
+            <ol id="run-timeline" class="timeline"></ol>
+          </details>
+          <details id="run-history-wrap" class="card" open>
+            <summary>最近运行（supervisor logs）</summary>
+            <div id="run-history" class="hint">加载中…</div>
+          </details>
+        </div>
       </section>
 
       <!-- 账号池 -->
@@ -543,6 +586,6 @@
       </section>
     </div>
   </div>
-  <script src="/assets/app.js?v=console6"></script>
+  <script src="/assets/app.js?v=console7"></script>
 </body>
 </html>
