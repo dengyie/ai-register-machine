@@ -1818,6 +1818,12 @@ def main() -> int:
         help="浏览器回收策略 soft|hybrid|hard（默认 config / soft）",
     )
     parser.add_argument(
+        "--browser-fingerprint-mode",
+        choices=("off", "light"),
+        default="",
+        help="浏览器轻量指纹 off|light（默认 config/env=off；light=每次 hard boot 从 UA/viewport/lang 池抽取）",
+    )
+    parser.add_argument(
         "--account-slot-retry",
         type=int,
         default=-1,
@@ -1918,9 +1924,20 @@ def main() -> int:
         reg.config["account_slot_retry"] = max(0, min(10, int(args.account_slot_retry)))
     reg.config["browser_recycle_mode"] = recycle_mode
     reg.config["browser_recycle_every"] = recycle_every
+    # fingerprint mode: CLI > config > env (resolve_browser_fingerprint_mode)
+    fp_mode = (args.browser_fingerprint_mode or "").strip().lower()
+    if not fp_mode:
+        try:
+            fp_mode = reg.resolve_browser_fingerprint_mode()
+        except Exception:
+            fp_mode = str(cfg0.get("browser_fingerprint_mode") or "off").strip().lower() or "off"
+    if fp_mode not in ("off", "light"):
+        fp_mode = "off"
+    reg.config["browser_fingerprint_mode"] = fp_mode
     print(
         f"[*] browser_recycle_mode={recycle_mode} every={recycle_every} "
-        f"account_slot_retry={reg.config.get('account_slot_retry', 3)}",
+        f"account_slot_retry={reg.config.get('account_slot_retry', 3)} "
+        f"browser_fingerprint_mode={fp_mode}",
         flush=True,
     )
 
@@ -1947,6 +1964,7 @@ def main() -> int:
         browser_reuse=(recycle_mode != "hard"),
         browser_recycle_every=recycle_every,
         browser_recycle_mode=recycle_mode,
+        browser_fingerprint_mode=fp_mode,
     )
 
     # 断点续跑

@@ -130,14 +130,22 @@ PY
     echo "[smoke] preflight skipped SKIP_CLASH_PREFLIGHT=$SKIP_CLASH_PREFLIGHT"
   fi
 
+  # Optional: BROWSER_FINGERPRINT_MODE=off|light or SMOKE_BROWSER_FINGERPRINT_MODE
+  FP_MODE=${SMOKE_BROWSER_FINGERPRINT_MODE:-${BROWSER_FINGERPRINT_MODE:-}}
+  FP_ARGS=()
+  if [[ -n "$FP_MODE" ]]; then
+    FP_ARGS=(--browser-fingerprint-mode "$FP_MODE")
+    echo "[smoke] browser_fingerprint_mode=$FP_MODE"
+  fi
+
   set +e
   if command -v xvfb-run >/dev/null 2>&1 && [[ -z "${DISPLAY:-}" || "${FORCE_XVFB:-0}" == "1" ]]; then
     timeout "$SMOKE_TIMEOUT" xvfb-run -a -s "-screen 0 1280x900x24 -ac +extension GLX +render -noreset -nolisten tcp" \
-      "$PY" -u register_cli.py --extra 1 --threads 1 --no-headless --fast
+      "$PY" -u register_cli.py --extra 1 --threads 1 --no-headless --fast "${FP_ARGS[@]}"
     code=$?
   else
     timeout "$SMOKE_TIMEOUT" \
-      "$PY" -u register_cli.py --extra 1 --threads 1 --no-headless --fast
+      "$PY" -u register_cli.py --extra 1 --threads 1 --no-headless --fast "${FP_ARGS[@]}"
     code=$?
   fi
   set -e

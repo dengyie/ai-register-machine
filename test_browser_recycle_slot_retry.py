@@ -43,6 +43,8 @@ def test_register_cli_slot_retry() -> None:
     assert "slot 重试" in src or "slot重试" in src
     assert "browser_recycle_mode" in src
     assert "--browser-recycle-mode" in src
+    assert "--browser-fingerprint-mode" in src
+    assert "browser_fingerprint_mode" in src
     assert "--account-slot-retry" in src
     assert "FatalRegisterError" in src
     assert "AccountRetryNeeded" in src
@@ -72,6 +74,7 @@ def test_config_example_keys() -> None:
     for key in (
         "browser_recycle_mode",
         "browser_recycle_every",
+        "browser_fingerprint_mode",
         "account_slot_retry",
         "final_page_no_submit_timeout",
         "LocalAuthProxyBridge",

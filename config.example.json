@@ -114,6 +114,8 @@
   "browser_recycle_mode": "hybrid",
   "// browser_recycle_every": "仅 hybrid 生效：复用 N 次后完整回收；soft 忽略此值；CLI --browser-recycle-every。",
   "browser_recycle_every": 15,
+  "// browser_fingerprint_mode": "off=固定 UA/viewport（生产默认）；light=每次 Chromium hard boot 从 UA/viewport/lang 小池随机。CLI --browser-fingerprint-mode / env BROWSER_FINGERPRINT_MODE。A/B 用，默认勿开。",
+  "browser_fingerprint_mode": "off",
   "// account_slot_retry": "最终页/SSO 卡住(AccountRetryNeeded)时同号软重试次数，不覆盖 FatalRegisterError。0=不重试。CLI --account-slot-retry。",
   "account_slot_retry": 3,
   "// final_page_no_submit_timeout": "最终注册页找不到提交按钮且状态不变时触发 AccountRetryNeeded 的秒数。",

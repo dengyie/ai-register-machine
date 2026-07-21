@@ -56,6 +56,9 @@ DEFAULT_CONFIG = {
     "enable_nsfw": True,
     "register_count": 1,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+    # off | light — light = small UA/viewport/lang pool on each Chromium boot (A/B).
+    # Default off: production batch keeps fixed fingerprint until experiment wins.
+    "browser_fingerprint_mode": "off",
     "grok2api_auto_add_local": True,
     "grok2api_local_token_file": "",
     "grok2api_pool_name": "ssoBasic",
@@ -248,6 +251,8 @@ PERF_FLAGS = {
     "browser_recycle_every": 15,  # full quit+recreate after N successful reuses (hybrid)
     # soft | hybrid | hard — hybrid = soft until recycle_every then hard (prod default)
     "browser_recycle_mode": "hybrid",
+    # off | light — applied in create_browser_options on each hard boot
+    "browser_fingerprint_mode": "off",
 }
 
 _side_effect_pool = None
@@ -921,6 +926,111 @@ CHROMIUM_SLIM_FLAGS = [
 ]
 
 
+# Light fingerprint pools (A/B arm). Keep majors near default Chrome/138;
+# prefer Win + Linux UA (pxed runs Linux Chromium — avoid exotic OS spoof).
+_LIGHT_UA_POOL = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+)
+_LIGHT_VIEWPORTS = (
+    (1280, 900),
+    (1366, 768),
+    (1440, 900),
+    (1536, 864),
+    (1600, 900),
+    (1920, 1080),
+)
+_LIGHT_LANGS = (
+    "en-US,en;q=0.9",
+    "en-GB,en;q=0.9",
+    "en-US,en;q=0.9,zh-CN;q=0.8",
+    "en-US,en;q=0.8",
+)
+
+# Last fingerprint applied by create_browser_options (for logs / tests).
+_LAST_BROWSER_FINGERPRINT: dict | None = None
+
+
+def resolve_browser_fingerprint_mode(explicit: str | None = None) -> str:
+    """Resolve off|light from explicit arg, PERF_FLAGS, config, env (in that order of override)."""
+    candidates = [
+        explicit,
+        (PERF_FLAGS or {}).get("browser_fingerprint_mode"),
+        (config or {}).get("browser_fingerprint_mode"),
+        os.environ.get("BROWSER_FINGERPRINT_MODE"),
+    ]
+    for raw in candidates:
+        mode = str(raw or "").strip().lower()
+        if mode in ("off", "light"):
+            return mode
+        if mode in ("0", "false", "no", "none", ""):
+            continue
+        if mode in ("1", "true", "yes", "on", "random", "anon", "anonymous"):
+            return "light"
+    return "off"
+
+
+def pick_light_fingerprint(*, rng: random.Random | None = None) -> dict:
+    """Pick one light fingerprint profile (UA + viewport + accept-language)."""
+    r = rng if rng is not None else random.Random()
+    ua = r.choice(_LIGHT_UA_POOL)
+    w, h = r.choice(_LIGHT_VIEWPORTS)
+    lang = r.choice(_LIGHT_LANGS)
+    # --lang takes primary tag only
+    lang_primary = (lang.split(",", 1)[0] or "en-US").split(";", 1)[0].strip() or "en-US"
+    return {
+        "mode": "light",
+        "user_agent": ua,
+        "width": int(w),
+        "height": int(h),
+        "lang": lang_primary,
+        "accept_lang": lang,
+    }
+
+
+def apply_light_fingerprint(options, fp: dict | None = None, *, rng: random.Random | None = None) -> dict:
+    """Apply light fingerprint onto ChromiumOptions. Returns the profile used."""
+    global _LAST_BROWSER_FINGERPRINT
+    profile = dict(fp or pick_light_fingerprint(rng=rng))
+    ua = str(profile.get("user_agent") or "").strip()
+    w = int(profile.get("width") or 1280)
+    h = int(profile.get("height") or 900)
+    lang = str(profile.get("lang") or "en-US").strip() or "en-US"
+    accept_lang = str(profile.get("accept_lang") or lang).strip() or lang
+    if ua:
+        try:
+            options.set_user_agent(ua)
+        except Exception:
+            try:
+                options.set_argument(f"--user-agent={ua}")
+            except Exception:
+                pass
+    try:
+        options.set_argument(f"--window-size={w},{h}")
+    except Exception:
+        pass
+    try:
+        options.set_argument(f"--lang={lang}")
+    except Exception:
+        pass
+    # Chromium reads --accept-lang in some builds; harmless if ignored.
+    try:
+        options.set_argument(f"--accept-lang={accept_lang}")
+    except Exception:
+        pass
+    profile["mode"] = "light"
+    profile["user_agent"] = ua
+    profile["width"] = w
+    profile["height"] = h
+    profile["lang"] = lang
+    profile["accept_lang"] = accept_lang
+    _LAST_BROWSER_FINGERPRINT = profile
+    return profile
+
+
 def create_browser_options(
     browser_proxy: str | None = None,
     *,
@@ -933,6 +1043,7 @@ def create_browser_options(
       - "" : force no proxy (mint path must set its own proxy once)
     apply_config_proxy: when False, never read config.proxy / thread-local; only browser_proxy.
     """
+    global _LAST_BROWSER_FINGERPRINT
     options = ChromiumOptions()
     options.auto_port()
     options.set_timeouts(base=1)
@@ -948,17 +1059,18 @@ def create_browser_options(
                 options.set_argument("--headless=new")
             except Exception:
                 options.set_argument("--headless")
-        # 无头下仍尽量伪装桌面 UA，降低被拦概率
-        ua = (config.get("user_agent") or "").strip()
-        if ua:
+        # Fixed UA/viewport when fingerprint mode is off (legacy headless path).
+        if resolve_browser_fingerprint_mode() != "light":
+            ua = (config.get("user_agent") or "").strip()
+            if ua:
+                try:
+                    options.set_user_agent(ua)
+                except Exception:
+                    pass
             try:
-                options.set_user_agent(ua)
+                options.set_argument("--window-size=1280,900")
             except Exception:
                 pass
-        try:
-            options.set_argument("--window-size=1280,900")
-        except Exception:
-            pass
     else:
         # Headed without X display on Linux always fails Chromium connect;
         # refuse early so callers fail-fast instead of 4× "browser connection fails".
@@ -979,6 +1091,27 @@ def create_browser_options(
                 "headed 需要 DISPLAY/xvfb-run（当前 Linux DISPLAY 为空；"
                 "请用默认 --no-headless + xvfb-run，或 HEADLESS_FLAG 不要用 bare --headless）"
             )
+    # Light fingerprint: apply on every hard Chromium boot (register + mint factory).
+    fp_mode = resolve_browser_fingerprint_mode()
+    if fp_mode == "light":
+        seed_raw = (os.environ.get("BROWSER_FINGERPRINT_SEED") or "").strip()
+        rng = None
+        if seed_raw:
+            try:
+                rng = random.Random(int(seed_raw))
+            except Exception:
+                rng = random.Random(seed_raw)
+        fp = apply_light_fingerprint(options, rng=rng)
+        try:
+            print(
+                f"[*] browser_fingerprint=light ua={fp.get('user_agent', '')[:48]}… "
+                f"viewport={fp.get('width')}x{fp.get('height')} lang={fp.get('lang')}",
+                flush=True,
+            )
+        except Exception:
+            pass
+    else:
+        _LAST_BROWSER_FINGERPRINT = {"mode": "off"}
     if os.path.exists(EXTENSION_PATH):
         # 传统 headless 不支持扩展；headless=new 下尽量加载 turnstilePatch
         try:
