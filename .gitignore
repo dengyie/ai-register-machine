@@ -67,3 +67,6 @@ nodes.json.bak.*
 # underscore-prefixed one-off probe scripts (local ops, not for repo)
 scripts/_*
 output/
+
+# console10 (Vite + Preact) local deps
+apps/web/node_modules/

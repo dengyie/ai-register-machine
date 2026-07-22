@@ -1,0 +1,4 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); }
+.hidden { display: none !important; }
+.hint { color: var(--muted); font-size: 0.9rem; }
