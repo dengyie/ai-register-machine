@@ -2,3 +2,170 @@
 html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); }
 .hidden { display: none !important; }
 .hint { color: var(--muted); font-size: 0.9rem; }
+.muted { color: var(--muted); }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── App shell ─────────────────────────────────────────── */
+.app-shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  min-height: 100vh;
+}
+.sidebar {
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-4) var(--space-3);
+}
+.side-brand {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  padding: 0.35rem 0.5rem var(--space-4);
+}
+.logo-dot {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #5b9fd4, #3d7eb0 55%, #5bd49a);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 20px rgba(91, 159, 212, 0.25);
+}
+.side-title {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-size: 0.98rem;
+}
+.side-link {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.side-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  flex: 1;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: none;
+}
+.nav-item:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  text-decoration: none;
+}
+.nav-item.active {
+  color: var(--text);
+  background: rgba(91, 159, 212, 0.12);
+  border-color: rgba(91, 159, 212, 0.35);
+}
+.nav-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+  flex: 0 0 auto;
+}
+.nav-item.active .nav-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(91, 159, 212, 0.2);
+}
+.side-foot {
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.main-wrap {
+  min-width: 0;
+  padding: var(--space-4) 1.15rem var(--space-6);
+}
+.nav-toggle { display: none; }
+
+/* ── Login gate ────────────────────────────────────────── */
+.login-gate {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+  background:
+    radial-gradient(ellipse at 20% 10%, rgba(91, 159, 212, 0.12), transparent 50%),
+    radial-gradient(ellipse at 80% 90%, rgba(91, 212, 154, 0.06), transparent 45%),
+    var(--bg);
+}
+.login-card {
+  width: min(420px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5) 1.4rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  box-shadow: var(--shadow-card);
+}
+.login-card h1 { margin: 0; font-size: 1.25rem; }
+.login-card .actions { display: flex; gap: 0.5rem; }
+.login-card .error {
+  color: var(--danger);
+  min-height: 1.2em;
+  margin: 0;
+  font-size: 0.9rem;
+}
+.brand-line a { color: var(--accent); }
+
+/* ── Page chrome ───────────────────────────────────────── */
+.page { display: block; }
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 0.9rem;
+}
+.page-head h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.3rem;
+}
+
+/* ── Responsive ────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns: 1fr; }
+  .nav-toggle {
+    display: inline-flex;
+    position: fixed;
+    top: var(--space-3);
+    left: var(--space-3);
+    z-index: 30;
+  }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(280px, 86vw);
+    transform: translateX(-105%);
+    transition: transform 0.18s ease;
+    z-index: 40;
+    height: 100vh;
+  }
+  .app-shell.nav-open .sidebar { transform: translateX(0); }
+  .main-wrap { padding: calc(var(--space-6) + var(--space-4)) var(--space-3) var(--space-5); }
+}
