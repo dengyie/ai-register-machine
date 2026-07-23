@@ -4,7 +4,7 @@ import * as api from "./api/client.js";
 import { ToastHost } from "./ui/ToastHost.jsx";
 import { LoginGate } from "./pages/LoginGate.jsx";
 import { RegisterPage } from "./pages/Register/RegisterPage.jsx";
-import { LogsPage } from "./pages/Logs/LogsPage.jsx";
+import { LogsPage } from "./pages/RunLogs/LogsPage.jsx";
 import { AccountsPage } from "./pages/Accounts/AccountsPage.jsx";
 import { ResourcesPage } from "./pages/Resources/ResourcesPage.jsx";
 import { SettingsPage } from "./pages/Settings/SettingsPage.jsx";

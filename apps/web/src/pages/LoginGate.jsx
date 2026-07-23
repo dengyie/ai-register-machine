@@ -15,8 +15,7 @@ export function LoginGate() {
     setBusy(true);
     setError("");
     try {
-      const r = await api.login(username.trim(), password);
-      if (r && r.token) api.setToken(r.token);
+      await api.login(username.trim(), password);
       const m = await api.me();
       session.value = {
         ...session.value,
