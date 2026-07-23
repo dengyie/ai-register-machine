@@ -99,6 +99,7 @@ a:hover { text-decoration: underline; }
   padding: var(--space-4) 1.15rem var(--space-6);
 }
 .nav-toggle { display: none; }
+.nav-backdrop { display: none; }
 
 /* ── Login gate ────────────────────────────────────────── */
 .login-gate {
@@ -147,6 +148,15 @@ a:hover { text-decoration: underline; }
   font-size: 1.3rem;
 }
 
+/* ── Toolbar helpers ───────────────────────────────────── */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+.toolbar.wrap { flex-wrap: wrap; }
+
 /* ── Responsive ────────────────────────────────────────── */
 @media (max-width: 900px) {
   .app-shell { grid-template-columns: 1fr; }
@@ -165,7 +175,29 @@ a:hover { text-decoration: underline; }
     transition: transform 0.18s ease;
     z-index: 40;
     height: 100vh;
+    box-shadow: none;
   }
-  .app-shell.nav-open .sidebar { transform: translateX(0); }
+  .app-shell.nav-open .sidebar {
+    transform: translateX(0);
+    box-shadow: 12px 0 40px rgba(0, 0, 0, 0.45);
+  }
+  .nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: rgba(4, 8, 14, 0.45);
+    z-index: 35;
+    cursor: pointer;
+  }
   .main-wrap { padding: calc(var(--space-6) + var(--space-4)) var(--space-3) var(--space-5); }
+  .page-head { gap: 0.55rem; }
+  .kpi-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 480px) {
+  .kpi-grid { grid-template-columns: 1fr; }
+  .page-head h1 { font-size: 1.15rem; }
 }

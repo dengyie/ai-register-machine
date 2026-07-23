@@ -68,6 +68,14 @@ export function App() {
         >
           菜单
         </button>
+        {sidebarOpen ? (
+          <button
+            type="button"
+            class="nav-backdrop"
+            aria-label="关闭菜单"
+            onClick={() => setSidebarOpen(false)}
+          />
+        ) : null}
         <aside class="sidebar">
           <div class="side-brand">
             <div class="logo-dot" aria-hidden="true" />

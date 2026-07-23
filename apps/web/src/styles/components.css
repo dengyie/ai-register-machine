@@ -197,12 +197,23 @@ input:focus, select:focus, textarea:focus, .select:focus {
   position: fixed;
   top: 0.85rem;
   right: 0.85rem;
+  left: auto;
   z-index: 9999;
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
   max-width: min(28rem, calc(100vw - 1.5rem));
+  width: min(28rem, calc(100vw - 1.5rem));
   pointer-events: none;
+}
+@media (max-width: 480px) {
+  .ops-toast-host {
+    top: 0.55rem;
+    right: 0.55rem;
+    left: 0.55rem;
+    max-width: none;
+    width: auto;
+  }
 }
 .ops-toast {
   pointer-events: auto;

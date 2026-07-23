@@ -56,6 +56,17 @@ table.data th {
   position: sticky;
   top: 0;
   background: var(--panel);
+  z-index: 1;
+}
+
+table.data tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+table.data td.mono,
+table.data .mono {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-variant-numeric: tabular-nums;
 }
 
 table.data td.ops {
