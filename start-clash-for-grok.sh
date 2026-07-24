@@ -54,7 +54,12 @@ fi
 pkill -x mihomo 2>/dev/null && sleep 1
 cp -f "$CFG" "$DIR/config.yaml"
 echo "===== $(date '+%F %T') start-clash cfg=$(basename "$CFG") node=$NODE =====" >>"$LOG"
-setsid "$BIN" -d "$DIR" -f "$DIR/config.yaml" >>"$LOG" 2>&1 </dev/null &
+# Drop inherited supervisor flock (fd 9 is the repo convention) before exec so
+# long-lived mihomo never holds /tmp/grok_batch_supervisor.lock after preflight.
+(
+  exec 9>&- 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 10>&- 11>&- 12>&-
+  exec setsid "$BIN" -d "$DIR" -f "$DIR/config.yaml"
+) >>"$LOG" 2>&1 </dev/null &
 for i in $(seq 1 20); do
   sleep 1
   if netstat -tlnp 2>/dev/null | grep -q '127.0.0.1:7897.*mihomo' || ss -tlnp 2>/dev/null | grep -q '127.0.0.1:7897'; then

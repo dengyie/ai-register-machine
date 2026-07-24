@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,57 @@ class ParseError(ValueError):
         super().__init__(message)
         self.format = format
         self.source = source
+
+
+_URI_SCHEMES = (
+    "ss://",
+    "vmess://",
+    "vless://",
+    "trojan://",
+    "hysteria2://",
+    "hy2://",
+    "socks5://",
+    "socks5h://",
+    "socks4://",
+    "socks://",
+    "http://",
+    "https://",
+)
+
+
+def _b64_try_decode(text: str) -> str | None:
+    """Decode whole-body base64 subscription payloads (common airport format)."""
+    s = (text or "").strip().replace("\n", "").replace("\r", "").replace(" ", "")
+    if len(s) < 16:
+        return None
+    # reject if looks like plain YAML/JSON already handled elsewhere
+    if re.fullmatch(r"[A-Za-z0-9+/_\-=]+", s) is None:
+        return None
+    try:
+        pad = (-len(s)) % 4
+        raw = base64.b64decode(s + ("=" * pad), validate=False)
+        out = raw.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return None
+    if not out:
+        return None
+    return out
+
+
+def decode_subscription_text(text: str) -> tuple[str, bool]:
+    """Return (decoded_text, was_base64). Leaves plain text unchanged."""
+    stripped = (text or "").lstrip("﻿").strip()
+    if not stripped:
+        return "", False
+    if detect_format(stripped) != "unknown":
+        return stripped, False
+    decoded = _b64_try_decode(stripped)
+    if decoded and detect_format(decoded) != "unknown":
+        return decoded, True
+    # some providers wrap base64 of URI list even when detect fails on partial
+    if decoded and any(tok in decoded.lower() for tok in ("vless://", "ss://", "vmess://", "trojan://", "hysteria2://", "hy2://", "proxies:")):
+        return decoded, True
+    return stripped, False
 
 
 def detect_format(text: str, *, filename: str = "") -> str:
@@ -45,13 +98,20 @@ def detect_format(text: str, *, filename: str = "") -> str:
     # content sniff
     first_lines = stripped.splitlines()[:8]
     joined = "\n".join(first_lines).lower()
+    # full-body lower for deep Clash profiles (mixed-port/rules before proxies:)
+    body_l = stripped[:200_000].lower()
     if any(
-        line.strip().lower().startswith(("ss://", "vmess://", "vless://", "trojan://", "socks", "http://", "https://"))
+        line.strip().lower().startswith(_URI_SCHEMES)
         for line in first_lines
         if line.strip() and not line.strip().startswith("#")
     ):
         return "uri_list"
-    if "proxies:" in joined or "proxy-groups:" in joined:
+    # also accept URI list when schemes appear past the first few lines
+    if any(tok in body_l for tok in ("\nvless://", "\nss://", "\nvmess://", "\ntrojan://", "\nhysteria2://", "\nhy2://")):
+        # but prefer clash if proxies: present
+        if "proxies:" not in body_l and "proxy-groups:" not in body_l:
+            return "uri_list"
+    if "proxies:" in joined or "proxy-groups:" in joined or "proxies:" in body_l or "proxy-groups:" in body_l:
         return "clash_yaml"
     if stripped[0] in "{[":
         try:
@@ -66,26 +126,31 @@ def detect_format(text: str, *, filename: str = "") -> str:
 
 
 def parse_text(text: str, *, source: str = "", format_hint: str = "") -> tuple[str, list[dict[str, Any]]]:
-    """Parse text → (format, proxies). Raises ParseError if empty/unusable."""
-    fmt = (format_hint or detect_format(text, filename=source)).lower()
+    """Parse text → (format, proxies). Raises ParseError if empty/unusable.
+
+    Accepts plain Clash/V2Ray/URI payloads and whole-body base64 URI subscriptions.
+    """
+    decoded, _was_b64 = decode_subscription_text(text)
+    work = decoded if decoded else (text or "")
+    fmt = (format_hint or detect_format(work, filename=source)).lower()
     if fmt in ("auto", "", "unknown"):
-        fmt = detect_format(text, filename=source)
+        fmt = detect_format(work, filename=source)
     if fmt == "clash_yaml":
-        return fmt, _parse_clash(text, source=source)
+        return fmt, _parse_clash(work, source=source)
     if fmt == "v2ray_json":
-        return fmt, _parse_v2ray(text, source=source)
+        return fmt, _parse_v2ray(work, source=source)
     if fmt == "uri_list":
-        proxies = parse_uri_lines(text)
+        proxies = parse_uri_lines(work)
         if not proxies:
             # try single line
-            one = parse_uri(text.strip())
+            one = parse_uri(work.strip())
             proxies = [one] if one else []
         if not proxies:
             raise ParseError("no valid share URIs found", format=fmt, source=source)
         return fmt, proxies
     raise ParseError(
         f"unsupported or unrecognized format (hint={format_hint!r}); "
-        "use Clash YAML, V2Ray JSON, or URI lines (ss/vmess/vless/trojan/http/socks)",
+        "use Clash YAML, V2Ray JSON, or URI lines (ss/vmess/vless/trojan/hysteria2/http/socks)",
         format=fmt,
         source=source,
     )

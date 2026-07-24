@@ -11,6 +11,9 @@ Usage:
   python3 scripts/probe_clash_nodes.py                 # probe + select
   python3 scripts/probe_clash_nodes.py --dry-run       # probe only
   python3 scripts/probe_clash_nodes.py --apply-config  # rewrite config groups
+  python3 scripts/probe_clash_nodes.py --rounds 3 --purge-proxies --apply-config
+      # 3× delay probe; only leaves that fail ALL rounds are dead;
+      # --purge-proxies also drops them from proxies: (not just group lists)
 
 Env:
   CLASH_DIR          default /personal/clash
@@ -198,20 +201,68 @@ def put_group_now(secret: str, group: str, node: str) -> None:
         print(f"  WARN set {group}: {e}")
 
 
+def _leaf_ok(r: dict[str, Any], max_latency_ms: int) -> bool:
+    d = r.get("delay_ms")
+    return bool(r.get("ok")) and isinstance(d, int) and d > 0 and d <= max_latency_ms
+
+
+def _require_yaml():
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise SystemExit(
+            "PyYAML required for --apply-config / --purge-proxies "
+            "(use repo .venv: .venv/bin/python scripts/probe_clash_nodes.py …)"
+        ) from exc
+    return yaml
+
+
+def _backup_and_dump(cfg_path: Path, text: str, data: dict, header_note: str) -> Path:
+    yaml = _require_yaml()
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    bak = cfg_path.with_suffix(cfg_path.suffix + f".pre-health-{ts}")
+    bak.write_text(text, encoding="utf-8")
+
+    class NoAliasDumper(yaml.SafeDumper):
+        def ignore_aliases(self, data):  # type: ignore[no-untyped-def]
+            return True
+
+    header = ""
+    if text.lstrip().startswith("#"):
+        lines = text.splitlines(keepends=True)
+        buf: list[str] = []
+        for ln in lines:
+            if ln.startswith("#") or ln.strip() == "":
+                buf.append(ln)
+                if len(buf) > 20:
+                    break
+            else:
+                break
+        header = "".join(buf)
+        if header and not header.endswith("\n"):
+            header += "\n"
+        header += f"# {header_note}\n"
+
+    body = yaml.dump(
+        data,
+        Dumper=NoAliasDumper,
+        allow_unicode=True,
+        sort_keys=False,
+        width=120,
+        default_flow_style=False,
+    )
+    cfg_path.write_text(header + body, encoding="utf-8")
+    print(f"  wrote {cfg_path} (bak {bak.name})")
+    return bak
+
+
 def rewrite_config_groups(
     cfg_path: Path,
     healthy: list[str],
     preferred_first: list[str],
 ) -> Path:
     """Rewrite proxy-groups leaf lists for register-related groups; backup first."""
-    try:
-        import yaml  # type: ignore
-    except ImportError as exc:
-        raise SystemExit(
-            "PyYAML required for --apply-config "
-            "(use repo .venv: .venv/bin/python scripts/probe_clash_nodes.py …)"
-        ) from exc
-
+    yaml = _require_yaml()
     text = cfg_path.read_text(encoding="utf-8")
     data = yaml.safe_load(text)
     ordered = list(preferred_first) + [
@@ -235,43 +286,72 @@ def rewrite_config_groups(
         print(f"  group {name}: {len(old)} -> {len(g['proxies'])}")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    bak = cfg_path.with_suffix(cfg_path.suffix + f".pre-health-{ts}")
-    bak.write_text(text, encoding="utf-8")
-
-    class NoAliasDumper(yaml.SafeDumper):
-        def ignore_aliases(self, data):  # type: ignore[no-untyped-def]
-            return True
-
-    header = ""
-    if text.lstrip().startswith("#"):
-        lines = text.splitlines(keepends=True)
-        buf: list[str] = []
-        for ln in lines:
-            if ln.startswith("#") or ln.strip() == "":
-                buf.append(ln)
-                if len(buf) > 20:
-                    break
-            else:
-                break
-        header = "".join(buf)
-        if header and not header.endswith("\n"):
-            header += "\n"
-        header += (
-            f"# health-filter {ts} healthy={len(healthy)} "
-            f"dead_stripped_from {','.join(REGISTER_GROUPS)}\n"
-        )
-
-    body = yaml.dump(
+    return _backup_and_dump(
+        cfg_path,
+        text,
         data,
-        Dumper=NoAliasDumper,
-        allow_unicode=True,
-        sort_keys=False,
-        width=120,
-        default_flow_style=False,
+        f"health-filter {ts} healthy={len(healthy)} "
+        f"dead_stripped_from {','.join(REGISTER_GROUPS)}",
     )
-    cfg_path.write_text(header + body, encoding="utf-8")
-    print(f"  wrote {cfg_path} (bak {bak.name})")
-    return bak
+
+
+def purge_dead_proxies(
+    cfg_path: Path,
+    dead: list[str],
+) -> Path:
+    """Delete all-fail leaves from proxies: and every group list. Backup first.
+
+    Safer than only rewriting REGISTER_GROUPS: dead leaves cannot re-enter via
+    other selectors after mihomo reload.
+    """
+    yaml = _require_yaml()
+    dead_set = {n for n in dead if n}
+    if not dead_set:
+        print(f"  purge {cfg_path}: nothing to delete")
+        return cfg_path
+
+    text = cfg_path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+    proxies = data.get("proxies") or []
+    before = len(proxies)
+    kept = []
+    removed_names: list[str] = []
+    for p in proxies:
+        if not isinstance(p, dict):
+            kept.append(p)
+            continue
+        name = str(p.get("name") or "")
+        if name in dead_set:
+            removed_names.append(name)
+            continue
+        kept.append(p)
+    data["proxies"] = kept
+
+    stripped_groups = 0
+    for g in data.get("proxy-groups") or []:
+        old = list(g.get("proxies") or [])
+        new = [n for n in old if n not in dead_set]
+        if len(new) != len(old):
+            stripped_groups += 1
+            g["proxies"] = new if new else ["DIRECT"]
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    print(
+        f"  purge {cfg_path.name}: proxies {before}->{len(kept)} "
+        f"removed={len(removed_names)} groups_touched={stripped_groups}"
+    )
+    if removed_names[:12]:
+        for n in removed_names[:12]:
+            print(f"    - {n}")
+        if len(removed_names) > 12:
+            print(f"    … +{len(removed_names) - 12} more")
+    return _backup_and_dump(
+        cfg_path,
+        text,
+        data,
+        f"purge-dead {ts} removed={len(removed_names)} "
+        f"proxies {before}->{len(kept)}",
+    )
 
 
 def main() -> int:
@@ -279,6 +359,13 @@ def main() -> int:
     ap.add_argument("--url", default=DEFAULT_URL)
     ap.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
     ap.add_argument("--workers", type=int, default=12)
+    ap.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help="probe each leaf this many times; dead = failed ALL rounds "
+        "(default 1; use 3 to only purge stable dead)",
+    )
     ap.add_argument(
         "--dry-run",
         action="store_true",
@@ -288,6 +375,12 @@ def main() -> int:
         "--apply-config",
         action="store_true",
         help="rewrite config.yaml + merged yaml groups to healthy leaves",
+    )
+    ap.add_argument(
+        "--purge-proxies",
+        action="store_true",
+        help="delete leaves that failed ALL rounds from proxies: + all groups "
+        "(stronger than group rewrite alone)",
     )
     ap.add_argument(
         "--select",
@@ -301,28 +394,63 @@ def main() -> int:
         help="treat delay above this as dead",
     )
     args = ap.parse_args()
+    rounds = max(1, int(args.rounds or 1))
 
     secret = load_secret()
     print(
         f"clash_dir={CLASH_DIR} api={API} secret_len={len(secret)} "
-        f"url={args.url} timeout_ms={args.timeout_ms}"
+        f"url={args.url} timeout_ms={args.timeout_ms} rounds={rounds}"
     )
     leaves = list_leaves(secret)
     print(f"leaves={len(leaves)}")
 
     t0 = time.time()
-    results = probe_all(leaves, secret, args.timeout_ms, args.url, args.workers)
+    round_results: list[dict[str, dict[str, Any]]] = []
+    for i in range(rounds):
+        print(f"\n=== probe round {i + 1}/{rounds} ===", flush=True)
+        rr = probe_all(leaves, secret, args.timeout_ms, args.url, args.workers)
+        round_results.append(rr)
+        ok_n = sum(
+            1 for n in leaves if _leaf_ok(rr.get(n) or {}, args.max_latency_ms)
+        )
+        print(f"  round {i + 1} ok={ok_n}/{len(leaves)}", flush=True)
     elapsed = time.time() - t0
 
+    # Aggregate: dead only if failed every round (3次不通才删).
     healthy: list[str] = []
     dead: list[str] = []
+    results: dict[str, dict[str, Any]] = {}
+    fail_counts: dict[str, int] = {}
     for name in leaves:
-        r = results[name]
-        d = r["delay_ms"]
-        if r["ok"] and isinstance(d, int) and d <= args.max_latency_ms:
-            healthy.append(name)
-        else:
+        fails = 0
+        best_delay: int | None = None
+        last_status = ""
+        for rr in round_results:
+            r = rr.get(name) or {"ok": False, "delay_ms": None, "status": "missing"}
+            last_status = str(r.get("status") or last_status)
+            if _leaf_ok(r, args.max_latency_ms):
+                d = int(r["delay_ms"])
+                if best_delay is None or d < best_delay:
+                    best_delay = d
+            else:
+                fails += 1
+        fail_counts[name] = fails
+        if fails >= rounds:
             dead.append(name)
+            results[name] = {
+                "delay_ms": None,
+                "status": f"fail_{fails}/{rounds}:{last_status}",
+                "ok": False,
+                "fail_rounds": fails,
+            }
+        else:
+            healthy.append(name)
+            results[name] = {
+                "delay_ms": best_delay,
+                "status": f"ok_best fail_{fails}/{rounds}",
+                "ok": True,
+                "fail_rounds": fails,
+            }
 
     healthy.sort(key=lambda n: results[n]["delay_ms"] or 99999)
     preferred_first = [n for n in PREFERRED if n in set(healthy)]
@@ -331,14 +459,16 @@ def main() -> int:
     by_cls_dead = Counter(classify(n) for n in dead)
 
     print("\n=== SUMMARY ===")
-    print(f"elapsed_s={elapsed:.1f}")
-    print(f"healthy={len(healthy)} dead={len(dead)}")
+    print(f"elapsed_s={elapsed:.1f} rounds={rounds}")
+    print(f"healthy={len(healthy)} dead_all_rounds={len(dead)}")
     print(f"healthy_by_class={dict(by_cls_ok)}")
     print(f"dead_by_class={dict(by_cls_dead)}")
-    print("\n--- HEALTHY (delay ms) ---")
+    print("\n--- HEALTHY (best delay ms) ---")
     for n in healthy:
-        print(f"  OK  {results[n]['delay_ms']:>5}  {n}")
-    print("\n--- DEAD / TIMEOUT ---")
+        print(
+            f"  OK  {results[n]['delay_ms']:>5}  fail={results[n]['fail_rounds']}/{rounds}  {n}"
+        )
+    print("\n--- DEAD ALL ROUNDS (purge candidates) ---")
     for n in dead:
         print(f"  DEAD {results[n]['status'][:80]}  {n}")
 
@@ -349,12 +479,14 @@ def main() -> int:
         "url": args.url,
         "timeout_ms": args.timeout_ms,
         "max_latency_ms": args.max_latency_ms,
+        "rounds": rounds,
         "healthy_count": len(healthy),
         "dead_count": len(dead),
         "healthy": [
             {
                 "name": n,
                 "delay_ms": results[n]["delay_ms"],
+                "fail_rounds": results[n]["fail_rounds"],
                 "class": classify(n),
             }
             for n in healthy
@@ -363,6 +495,7 @@ def main() -> int:
             {
                 "name": n,
                 "status": results[n]["status"],
+                "fail_rounds": results[n]["fail_rounds"],
                 "class": classify(n),
             }
             for n in dead
@@ -386,7 +519,7 @@ def main() -> int:
     print(f"\nreport={report_path}")
 
     if args.dry_run:
-        print("dry-run: skip group select / config rewrite")
+        print("dry-run: skip group select / config rewrite / purge")
         return 0 if healthy else 2
 
     pick = args.select.strip()
@@ -402,6 +535,18 @@ def main() -> int:
         print("ERROR: no healthy nodes — not changing selection")
         return 2
 
+    if args.purge_proxies and dead:
+        print("\n=== purge dead proxies (failed all rounds) ===")
+        for p in (CFG, MERGED):
+            if p.is_file():
+                purge_dead_proxies(p, dead)
+        # After full delete, register groups still need healthy-only rewrite.
+        if not args.apply_config:
+            print("\n=== rewrite config groups (post-purge) ===")
+            for p in (CFG, MERGED):
+                if p.is_file():
+                    rewrite_config_groups(p, healthy, preferred_first)
+
     if args.apply_config:
         print("\n=== rewrite config groups ===")
         for p in (CFG, MERGED):
@@ -412,7 +557,7 @@ def main() -> int:
             "  bash start-clash-for-grok.sh"
         )
 
-    print(f"\nREADY for register batch: select={pick} healthy={len(healthy)}")
+    print(f"\nREADY for register batch: select={pick} healthy={len(healthy)} dead={len(dead)}")
     return 0 if healthy else 2
 
 

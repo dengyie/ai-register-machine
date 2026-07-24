@@ -43,6 +43,8 @@ def parse_uri(uri: str) -> dict[str, Any] | None:
             return _parse_vless(text)
         if lower.startswith("trojan://"):
             return _parse_trojan(text)
+        if lower.startswith("hysteria2://") or lower.startswith("hy2://"):
+            return _parse_hysteria2(text)
     except Exception:
         return None
     return None
@@ -228,4 +230,33 @@ def _parse_trojan(uri: str) -> dict[str, Any] | None:
             "path": q.get("path") or "/",
             "headers": {"Host": q.get("host") or host},
         }
+    return d
+
+
+def _parse_hysteria2(uri: str) -> dict[str, Any] | None:
+    """hysteria2://password@host:port?sni=...&insecure=1#name (also hy2://)."""
+    u = urlparse(uri)
+    host = u.hostname
+    port = u.port
+    password = unquote(u.username or "")
+    if not host or not port or not password:
+        return None
+    q = {k: v[0] for k, v in parse_qs(u.query).items() if v}
+    name = unquote(u.fragment) if u.fragment else f"hysteria2-{host}-{port}"
+    d: dict[str, Any] = {
+        "name": name,
+        "type": "hysteria2",
+        "server": host,
+        "port": int(port),
+        "password": password,
+    }
+    if q.get("sni") or q.get("peer"):
+        d["sni"] = q.get("sni") or q.get("peer")
+    insecure = (q.get("insecure") or q.get("allowInsecure") or "").strip().lower()
+    if insecure in {"1", "true", "yes", "on"}:
+        d["skip-cert-verify"] = True
+    if q.get("obfs"):
+        d["obfs"] = q["obfs"]
+    if q.get("obfs-password") or q.get("obfsPassword"):
+        d["obfs-password"] = q.get("obfs-password") or q.get("obfsPassword")
     return d
