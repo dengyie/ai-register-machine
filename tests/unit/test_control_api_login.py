@@ -99,6 +99,127 @@ def test_bootstrap_creates_first_user(tmp_path, monkeypatch):
         assert r.status_code == 200
 
 
+def test_default_bootstrap_admin_admin123(tmp_path, monkeypatch):
+    """Empty store + no bootstrap env → admin / admin123 (project default)."""
+    monkeypatch.setenv("REGISTER_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CONTROL_API_SESSION_SECRET", "test-session-secret-32bytes-min!!")
+    monkeypatch.delenv("CONTROL_API_BOOTSTRAP_USER", raising=False)
+    monkeypatch.delenv("CONTROL_API_BOOTSTRAP_PASSWORD", raising=False)
+    monkeypatch.delenv("CONTROL_API_TOKEN", raising=False)
+    from apps.control_api.settings import clear_settings_cache, get_settings
+    from apps.control_api.app import create_app
+    from apps.control_api.users import has_any_user
+    from fastapi.testclient import TestClient
+
+    clear_settings_cache()
+    s = get_settings()
+    assert s.bootstrap_user == "admin"
+    assert s.bootstrap_password == "admin123"
+    with TestClient(create_app()) as client:
+        assert has_any_user(tmp_path)
+        r = client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin123"},
+        )
+        assert r.status_code == 200
+
+
+def test_session_secret_loads_from_file_when_env_missing(tmp_path, monkeypatch):
+    """Bare start without CONTROL_API_SESSION_SECRET still works via durable file."""
+    from apps.control_api.users import upsert_user
+    from apps.control_api.settings import clear_settings_cache, get_settings
+    from apps.control_api.app import create_app
+    from fastapi.testclient import TestClient
+
+    secret = "file-session-secret-for-unit-test-only!!"
+    (tmp_path / ".control_api_session_secret").write_text(secret + "\n", encoding="utf-8")
+    upsert_user(tmp_path, "mango", "pw-file-secret-9")
+
+    monkeypatch.setenv("REGISTER_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.delenv("CONTROL_API_SESSION_SECRET", raising=False)
+    monkeypatch.delenv("CONTROL_API_TOKEN", raising=False)
+    monkeypatch.delenv("CONTROL_API_DEV_SESSION_SECRET", raising=False)
+    monkeypatch.delenv("CONTROL_API_ALLOW_EPHEMERAL_SESSION", raising=False)
+    monkeypatch.setenv("CONTROL_API_PASSWORD_LOGIN", "1")
+    clear_settings_cache()
+    s = get_settings()
+    assert s.session_secret == secret
+    assert s.session_secret_source.startswith("file:")
+
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/api/auth/login",
+            json={"username": "mango", "password": "pw-file-secret-9"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+
+
+def test_token_file_fallback_and_source(tmp_path, monkeypatch):
+    from apps.control_api.settings import clear_settings_cache, get_settings
+
+    (tmp_path / ".control_api_token").write_text("bearer-from-file-token-xyz\n", encoding="utf-8")
+    monkeypatch.setenv("REGISTER_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.delenv("CONTROL_API_TOKEN", raising=False)
+    monkeypatch.delenv("CONTROL_API_SESSION_SECRET", raising=False)
+    monkeypatch.delenv("CONTROL_API_ALLOW_EPHEMERAL_SESSION", raising=False)
+    clear_settings_cache()
+    s = get_settings()
+    assert s.token == "bearer-from-file-token-xyz"
+    assert s.token_source.startswith("file:")
+    # session secret falls back to token when no dedicated secret
+    assert s.session_secret == "bearer-from-file-token-xyz"
+    assert s.session_secret_source == "token"
+
+
+def test_session_secret_loads_from_file_when_env_missing(tmp_path, monkeypatch):
+    """Bare start without CONTROL_API_SESSION_SECRET still works via durable file."""
+    from apps.control_api.users import upsert_user
+    from apps.control_api.settings import clear_settings_cache, get_settings
+    from apps.control_api.app import create_app
+    from fastapi.testclient import TestClient
+
+    secret = "file-session-secret-for-unit-test-only!!"
+    (tmp_path / ".control_api_session_secret").write_text(secret + "\n", encoding="utf-8")
+    upsert_user(tmp_path, "mango", "pw-file-secret-9")
+
+    monkeypatch.setenv("REGISTER_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.delenv("CONTROL_API_SESSION_SECRET", raising=False)
+    monkeypatch.delenv("CONTROL_API_TOKEN", raising=False)
+    monkeypatch.delenv("CONTROL_API_DEV_SESSION_SECRET", raising=False)
+    monkeypatch.delenv("CONTROL_API_ALLOW_EPHEMERAL_SESSION", raising=False)
+    monkeypatch.setenv("CONTROL_API_PASSWORD_LOGIN", "1")
+    clear_settings_cache()
+    s = get_settings()
+    assert s.session_secret == secret
+    assert s.session_secret_source.startswith("file:")
+
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/api/auth/login",
+            json={"username": "mango", "password": "pw-file-secret-9"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+
+
+def test_token_file_fallback_and_source(tmp_path, monkeypatch):
+    from apps.control_api.settings import clear_settings_cache, get_settings
+
+    (tmp_path / ".control_api_token").write_text("bearer-from-file-token-xyz\n", encoding="utf-8")
+    monkeypatch.setenv("REGISTER_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.delenv("CONTROL_API_TOKEN", raising=False)
+    monkeypatch.delenv("CONTROL_API_SESSION_SECRET", raising=False)
+    monkeypatch.delenv("CONTROL_API_ALLOW_EPHEMERAL_SESSION", raising=False)
+    clear_settings_cache()
+    s = get_settings()
+    assert s.token == "bearer-from-file-token-xyz"
+    assert s.token_source.startswith("file:")
+    # session secret falls back to token when no dedicated secret
+    assert s.session_secret == "bearer-from-file-token-xyz"
+    assert s.session_secret_source == "token"
+
+
 def test_login_rate_limit(tmp_path, monkeypatch):
     from apps.control_api.users import upsert_user
     from apps.control_api.rate_limit import login_limiter

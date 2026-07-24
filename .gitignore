@@ -16,6 +16,8 @@ config.local.json
 config.json.bak*
 .control_api_users.json
 .control_api_users.json.tmp
+.control_api_login.txt
+.control_api_session_secret
 .env
 # Project-owned egress catalog (may contain proxy credentials)
 nodes.json

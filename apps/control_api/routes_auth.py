@@ -43,9 +43,20 @@ def login(body: LoginIn, request: Request, response: Response) -> LoginOut:
     if not s.password_login_enabled:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="password login disabled")
     if not s.session_secret:
+        # Ops-facing: tell operator how to fix without leaking secrets.
+        print(
+            "[control_api] login blocked: session secret missing "
+            f"(source={s.session_secret_source}); "
+            "set CONTROL_API_SESSION_SECRET or .control_api_session_secret",
+            flush=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="session secret not configured",
+            detail=(
+                "session secret not configured — set CONTROL_API_SESSION_SECRET "
+                "or create .control_api_session_secret under project root "
+                "(or restart via scripts/run_control_api.sh)"
+            ),
         )
     if not has_any_user(s.project_root):
         raise HTTPException(
