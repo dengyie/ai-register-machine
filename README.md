@@ -755,7 +755,7 @@ Live Hotmail REST（**不要**在 CI 开）：
 GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 ```
 
-贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub Actions：`CI` 在 `main`/PR 跑 shell 语法 + py_compile + 离线 pytest + 密钥路径守卫，测试通过后打包 console10 并上传 artifact `console10-web`。部署用手动 workflow **Deploy console10**（`workflow_dispatch`，静态 scp 到 pxed，不碰 batch）；需仓库 secrets `PXED_SSH_PRIVATE_KEY` + `PXED_HOST` + `PXED_KNOWN_HOSTS`（Environment `pxed`）；`dry_run` 可不配密钥。
+贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub Actions：`CI` 在 `main`/PR 跑 shell 语法 + py_compile + 离线 pytest + 密钥路径守卫，测试通过后打包 console10 并上传 artifact `console10-web`。**Deploy console10** 在 main **push** 的成功 CI 后自动部署静态 SPA 到 pxed（Environment `pxed`，不碰 batch）；也可 `workflow_dispatch` 手动/`dry_run`。需 secrets `PXED_SSH_PRIVATE_KEY` + `PXED_HOST` + `PXED_KNOWN_HOSTS`。
 
 ---
 

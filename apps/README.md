@@ -32,9 +32,13 @@ Open `http://127.0.0.1:8787` → **login form**. Default credentials **`admin` /
 
 - API: `/api/health`, `/api/auth/*`, `/api/overview`, `/api/config`, `/api/import/*`, `/api/runs/*`, `/api/nodes/*`, `/api/accounts/*`, `/api/ops/*`
 - UI: **console10** Preact SPA — `cd apps/web && npm run build` (or `./scripts/build_web_console.sh`) writes `apps/web/dist`; FastAPI prefers `apps/web/dist` then falls back to flat `apps/web/`.
-  - **Packaging (preferred):** GitHub Actions `CI` job `package-console10` builds on every green test and uploads artifact `console10-web` (14d).
-  - **Deploy (preferred):** Actions → **Deploy console10** (`workflow_dispatch` only, Environment `pxed`). Needs secrets `PXED_SSH_PRIVATE_KEY` + `PXED_HOST` + `PXED_KNOWN_HOSTS` (optional `PXED_WEB`, `PXED_SSH_PORT`). Prefer direct host (not cloudflared alias). `remote_web` is sanitized under `/data/grok-register`. Static-only; does **not** stop batch/coinbot. `dry_run` builds/downloads without secrets.
-  - **Local fallback:** `./scripts/deploy_web_console10.sh` (manual scp; same remote layout). `SKIP_BUILD=1` / `CONSOLE10_TGZ=` / `DRY_RUN=1` supported.
+  - **Packaging:** GitHub Actions `CI` job `package-console10` builds on green tests and uploads artifact `console10-web` (14d).
+  - **Deploy (auto + manual):** workflow **Deploy console10** (Environment `pxed`).
+    - **Auto:** after successful `CI` on `main` **push** (`workflow_run`), deploys that run’s artifact.
+    - **Manual:** Actions → Deploy console10 (`workflow_dispatch`); `dry_run` / rebuild / artifact options.
+    - Secrets: `PXED_SSH_PRIVATE_KEY` + `PXED_HOST` + `PXED_KNOWN_HOSTS` (optional `PXED_WEB`, `PXED_SSH_PORT`). Prefer direct host (not cloudflared alias).
+    - Path sanitized under `/data/grok-register`; stale Vite `assets/*` pruned; **single script** `scripts/deploy_web_console10.sh`. Static-only; does **not** stop batch/coinbot.
+  - **Local fallback:** `./scripts/deploy_web_console10.sh`. `SKIP_BUILD=1` / `CONSOLE10_TGZ=` / `DRY_RUN=1` / `PRUNE_STALE_ASSETS=1` supported.
   - Dev: `cd apps/web && npm run dev` proxies `/api` → `:8787`. Legacy console9 under `apps/web/legacy/`.
 - Auth (either):
   - **Browser:** password login → signed cookie `control_session`
