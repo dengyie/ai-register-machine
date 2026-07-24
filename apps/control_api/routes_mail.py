@@ -1,0 +1,78 @@
+"""Mail pool stats / probe / quarantine routes."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from apps.control_api import mail_ops
+from apps.control_api.settings import get_settings
+
+router = APIRouter(tags=["mail"])
+
+
+class MailProbeIn(BaseModel):
+    domains: list[str] = Field(default_factory=list)
+    limit: int = Field(default=30, ge=1, le=200)
+    seed: int | None = None
+    concurrency: int = Field(default=4, ge=1, le=8)
+    wall_seconds: float = Field(default=90.0, ge=5.0, le=180.0)
+
+
+class MailQuarantineIn(BaseModel):
+    emails: list[str] = Field(min_length=1)
+    reason: str = Field(default="quarantine", max_length=128)
+
+
+def _http_from_exc(exc: Exception) -> HTTPException:
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, RuntimeError):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/api/mail/pool")
+def api_mail_pool() -> dict[str, Any]:
+    root = get_settings().project_root
+    try:
+        return mail_ops.get_pool_stats(root)
+    except FileNotFoundError as exc:
+        raise _http_from_exc(exc) from exc
+
+
+@router.post("/api/mail/probe")
+def api_mail_probe(body: MailProbeIn) -> dict[str, Any]:
+    root = get_settings().project_root
+    domains = [d for d in (body.domains or []) if str(d).strip()] or None
+    try:
+        return mail_ops.probe_mail(
+            root,
+            domains=domains,
+            limit=body.limit,
+            seed=body.seed,
+            concurrency=body.concurrency,
+            wall_seconds=body.wall_seconds,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        raise _http_from_exc(exc) from exc
+
+
+@router.post("/api/mail/quarantine")
+def api_mail_quarantine(body: MailQuarantineIn) -> dict[str, Any]:
+    root = get_settings().project_root
+    emails = [e.strip() for e in body.emails if e and str(e).strip()]
+    if not emails:
+        raise HTTPException(status_code=400, detail="emails must be a non-empty list")
+    try:
+        return mail_ops.quarantine_mail(
+            root,
+            emails,
+            reason=(body.reason or "quarantine").strip() or "quarantine",
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise _http_from_exc(exc) from exc

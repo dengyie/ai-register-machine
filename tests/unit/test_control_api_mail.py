@@ -1,0 +1,162 @@
+"""control_api mail pool routes/ops (mocked refresh, no network)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from apps.control_api import mail_ops
+
+
+def _write_pool(path: Path, n: int = 5, domain: str = "hotmail.com") -> None:
+    lines = [f"u{i}@{domain}----pw{i}----cid{i}----rt{i}\n" for i in range(n)]
+    path.write_text("".join(lines), encoding="utf-8")
+
+
+def test_get_pool_stats(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOTMAIL_ACCOUNTS_FILE", raising=False)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    pool = tmp_path / "mail_credentials.txt"
+    _write_pool(pool, 3)
+    with pool.open("a", encoding="utf-8") as f:
+        f.write("z@outlook.com----p----c----r\n")
+
+    st = mail_ops.get_pool_stats(tmp_path)
+    assert st["total"] == 4
+    assert st["by_domain"]["hotmail.com"] == 3
+    assert st["by_domain"]["outlook.com"] == 1
+    assert "known_domains" in st
+    assert "quarantinable_statuses" in st
+    blob = str(st)
+    assert "pw0" not in blob
+    assert "rt0" not in blob
+
+
+def test_live_path_rejects_escape(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOTMAIL_ACCOUNTS_FILE", raising=False)
+    # relative escape via config
+    (tmp_path / "config.json").write_text(
+        '{"hotmail_accounts_file": "../../../etc/passwd"}',
+        encoding="utf-8",
+    )
+    path = mail_ops._live_path(tmp_path)
+    assert path == (tmp_path.resolve() / "mail_credentials.txt")
+
+
+def test_probe_mail_uses_injectable_via_core(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOTMAIL_ACCOUNTS_FILE", raising=False)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    pool = tmp_path / "mail_credentials.txt"
+    _write_pool(pool, 6)
+
+    def fake_refresh(acc):
+        if acc.email.startswith("u0") or acc.email.startswith("u2"):
+            return True, "", None
+        if acc.email.startswith("u1"):
+            return False, "Connection timed out", None
+        return False, "AADSTS700082: grant is expired", None
+
+    import mail_pool_probe as core
+
+    monkeypatch.setattr(core, "_default_refresh", fake_refresh)
+
+    out = mail_ops.probe_mail(
+        tmp_path,
+        domains=["hotmail.com"],
+        limit=4,
+        seed=1,
+        concurrency=2,
+    )
+    assert out["probed"] == 4
+    assert out["ok"] + out["dead"] == 4
+    assert "quarantinable" in out
+    for row in out["results"]:
+        assert set(row.keys()) == {
+            "email",
+            "domain",
+            "status",
+            "reason",
+            "ms_error",
+            "quarantinable",
+        }
+        assert "pw" not in row["email"]
+        if row["status"] == "network_error":
+            assert row["quarantinable"] is False
+        if row["status"] == "grant_expired":
+            assert row["quarantinable"] is True
+
+
+def test_quarantine_mail(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOTMAIL_ACCOUNTS_FILE", raising=False)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    pool = tmp_path / "mail_credentials.txt"
+    _write_pool(pool, 4)
+
+    with pytest.raises(ValueError):
+        mail_ops.quarantine_mail(tmp_path, [])
+
+    out = mail_ops.quarantine_mail(
+        tmp_path,
+        ["u1@hotmail.com", "u3@hotmail.com"],
+        reason="probe:test",
+    )
+    assert out["removed"] == 2
+    assert out["live_total_after"] == 2
+    assert Path(out["backup_path"]).is_file()
+    remaining = pool.read_text(encoding="utf-8")
+    assert "u1@hotmail.com" not in remaining
+    assert "u0@hotmail.com" in remaining
+    dead = Path(out["dead_path"]).read_text(encoding="utf-8")
+    assert "u1@hotmail.com----pw1----cid1----rt1----probe:test----" in dead
+
+
+def test_routes_http_errors(tmp_path: Path, monkeypatch):
+    """Route layer maps missing pool → 404, empty emails → 400."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from apps.control_api.auth import require_auth
+    from apps.control_api.routes_mail import router
+    from apps.control_api import settings as settings_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOTMAIL_ACCOUNTS_FILE", raising=False)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+
+    class _S:
+        project_root = tmp_path
+
+    monkeypatch.setattr(settings_mod, "get_settings", lambda: _S())
+
+    app = FastAPI()
+
+    async def _ok():
+        return True
+
+    app.dependency_overrides[require_auth] = _ok
+    app.include_router(router, dependencies=[])
+    client = TestClient(app)
+
+    r = client.get("/api/mail/pool")
+    # empty/missing pool still returns stats with total=0
+    assert r.status_code == 200
+    assert r.json()["total"] == 0
+
+    r = client.post("/api/mail/probe", json={"limit": 5, "domains": ["hotmail.com"]})
+    assert r.status_code == 404
+
+    r = client.post("/api/mail/quarantine", json={"emails": []})
+    assert r.status_code == 422  # pydantic min_length
+
+    _write_pool(tmp_path / "mail_credentials.txt", 2)
+    r = client.post(
+        "/api/mail/quarantine",
+        json={"emails": ["   "], "reason": "x"},
+    )
+    # stripped empty → 400 from handler
+    assert r.status_code == 400
