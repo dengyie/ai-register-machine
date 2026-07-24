@@ -212,12 +212,79 @@ def test_register_cli_surface() -> None:
     print("PASS  register_cli + ttk + config.example surface")
 
 
+def test_email_fill_shares_ready_selectors() -> None:
+    """AB_N=10 light: ready saw the input, fill used a narrower CSS list → 20s timeout.
+
+    Ready + fill + submit must all inject the same _EMAIL_INPUT_CSS constant.
+    """
+    ttk = _load()
+    src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    assert "_EMAIL_INPUT_CSS" in src
+    assert "input[autocomplete=\"username\"]" in ttk._EMAIL_INPUT_CSS
+    assert "placeholder*=" in ttk._EMAIL_INPUT_CSS
+    # ready + both fill_email run_js sites must reference the shared constant
+    ready_idx = src.find("def _email_input_ready")
+    fill_idx = src.find("def fill_email_and_submit")
+    assert ready_idx >= 0 and fill_idx > ready_idx
+    ready_chunk = src[ready_idx:fill_idx]
+    fill_chunk = src[fill_idx : fill_idx + 9000]
+    assert "_EMAIL_INPUT_CSS" in ready_chunk
+    assert fill_chunk.count("_EMAIL_INPUT_CSS") >= 2
+    # Old narrow hard-coded list must not remain in fill path
+    assert (
+        "input[data-testid=\"email\"], input[name=\"email\"], input[type=\"email\"], "
+        "input[autocomplete=\"email\"]"
+    ) not in fill_chunk
+    print("PASS  email fill shares ready selectors")
+
+
+def test_submit_button_matches_en_sign_up_after_space_strip() -> None:
+    """EN 'Sign up' became 'signup' after whitespace strip; old matcher looked for 'sign up'."""
+    src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    fill_idx = src.find("def fill_email_and_submit")
+    fill_chunk = src[fill_idx : fill_idx + 9000]
+    assert "compact.includes('signup')" in fill_chunk
+    # Regression: must NOT require spaced phrase after stripping spaces
+    assert "lower.includes('sign up')" not in fill_chunk
+    # checkValidity gate removed (custom validators false-negative on EN form)
+    assert "input.checkValidity()" not in fill_chunk
+    print("PASS  EN Sign up submit matcher + no checkValidity gate")
+
+
+def test_signing_into_not_login_progress() -> None:
+    """Provider chooser header 'You are signing into …' must not trip login-progress."""
+    src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    fn = src.find("def _signup_login_in_progress")
+    assert fn >= 0
+    chunk = src[fn : fn + 2500]
+    assert "signingInto" in chunk or "signing\\\\s*into" in chunk or "signing\\s*into" in chunk
+    assert "signing into" in chunk.lower() or "signingInto" in chunk
+    print("PASS  signing-into excluded from login-progress")
+
+
+def test_light_lang_pool_includes_zh_cn() -> None:
+    ttk = _load()
+    joined = " | ".join(ttk._LIGHT_LANGS)
+    assert "zh-CN" in joined
+    # at least one primary zh-CN entry (not only secondary q=0.8)
+    primaries = [
+        (lang.split(",", 1)[0] or "").split(";", 1)[0].strip()
+        for lang in ttk._LIGHT_LANGS
+    ]
+    assert "zh-CN" in primaries
+    print("PASS  light lang pool includes zh-CN primary")
+
+
 def main() -> int:
     test_resolve_mode_defaults_off()
     test_pick_light_fingerprint_deterministic()
     test_apply_light_fingerprint_sets_options()
     test_create_browser_options_light_applies_pool()
     test_register_cli_surface()
+    test_email_fill_shares_ready_selectors()
+    test_submit_button_matches_en_sign_up_after_space_strip()
+    test_signing_into_not_login_progress()
+    test_light_lang_pool_includes_zh_cn()
     print("ALL PASS test_browser_fingerprint_light")
     return 0
 

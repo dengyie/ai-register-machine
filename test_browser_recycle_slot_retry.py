@@ -57,6 +57,10 @@ def test_register_cli_slot_retry() -> None:
     assert "skip-outer-retry" in src
     # patch must forward apply_config_proxy
     assert "apply_config_proxy" in src
+    # mail-stage ARN must not escape register_one: shared try wraps mail+profile
+    assert "Mail + profile share one try" in src
+    # mail try re-raises ARN into shared handler (not swallowed)
+    assert "except AccountRetryNeeded" in src
     print("PASS  register_cli slot retry + recycle CLI")
 
 

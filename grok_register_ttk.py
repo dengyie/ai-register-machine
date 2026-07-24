@@ -943,11 +943,33 @@ _LIGHT_VIEWPORTS = (
     (1600, 900),
     (1920, 1080),
 )
+# Prefer keeping zh-CN in the pool: pxed production locale is zh_CN, and the
+# accounts.x.ai email form DOM differs slightly between EN/CN. A light arm that
+# only forced en-* made A/B compare UI locales, not just UA/viewport.
 _LIGHT_LANGS = (
+    "zh-CN,zh;q=0.9,en;q=0.8",
+    "zh-CN,zh;q=0.9",
     "en-US,en;q=0.9",
     "en-GB,en;q=0.9",
     "en-US,en;q=0.9,zh-CN;q=0.8",
     "en-US,en;q=0.8",
+)
+
+# Shared email-input CSS list used by readiness + fill/submit JS.
+# Keep these in lockstep: AB_N=10 light failed when ready used a broader set
+# (username/placeholder/aria) than fill_email_and_submit.
+_EMAIL_INPUT_CSS = (
+    'input[data-testid="email"], '
+    'input[name="email"], '
+    'input[type="email"], '
+    'input[autocomplete="email"], '
+    'input[autocomplete="username"], '
+    'input[name="username"], '
+    'input[id*="email" i], '
+    'input[placeholder*="邮箱"], '
+    'input[placeholder*="email" i], '
+    'input[aria-label*="email" i], '
+    'input[aria-label*="邮箱"]'
 )
 
 # Last fingerprint applied by create_browser_options (for logs / tests).
@@ -4065,28 +4087,15 @@ def _email_input_ready(page):
     try:
         return bool(
             page.run_js(
-                r"""
-function isVisible(node) {
+                f"""
+function isVisible(node) {{
   if (!node) return false;
   const style = window.getComputedStyle(node);
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
   const rect = node.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
-}
-const sels = [
-  'input[data-testid="email"]',
-  'input[name="email"]',
-  'input[type="email"]',
-  'input[autocomplete="email"]',
-  'input[autocomplete="username"]',
-  'input[name="username"]',
-  'input[id*="email" i]',
-  'input[placeholder*="邮箱"]',
-  'input[placeholder*="email" i]',
-  'input[aria-label*="email" i]',
-  'input[aria-label*="邮箱"]',
-];
-const input = Array.from(document.querySelectorAll(sels.join(',')))
+}}
+const input = Array.from(document.querySelectorAll({_EMAIL_INPUT_CSS!r}))
   .find((node) => isVisible(node) && !node.disabled && !node.readOnly) || null;
 return !!input;
                 """
@@ -4097,33 +4106,41 @@ return !!input;
 
 
 def _signup_login_in_progress(page) -> bool:
-    """True when SPA shows a mid-auth spinner / 「您正在登录」 without email form."""
+    """True when SPA shows a mid-auth spinner / 「您正在登录」 without email form.
+
+    Do NOT treat the provider-chooser header 「You are signing into …」 as progress:
+    ``/signing\\s*in/i`` also matches "signing into", which made light/EN UI look
+    stuck after a no-op click and burned the slot as browser_boot.
+    """
     if page is None:
         return False
     try:
         return bool(
             page.run_js(
-                r"""
-try {
+                f"""
+try {{
   const t = ((document.body && (document.body.innerText || document.body.textContent)) || '')
-    .replace(/\s+/g, ' ').slice(0, 1200);
+    .replace(/\\s+/g, ' ').slice(0, 1200);
   if (!t) return false;
-  if (t.includes('您正在登录') || t.includes('正在登录') || /signing\s*in/i.test(t)
-      || /logging\s*you\s*in/i.test(t) || /please\s*wait/i.test(t)) {
-    // Only treat as login-progress when email form is still absent.
-    const hasEmail = Array.from(document.querySelectorAll(
-      'input[type="email"], input[name="email"], input[autocomplete="email"]'
-    )).some((n) => {
-      if (!n) return false;
-      const s = window.getComputedStyle(n);
-      if (s.display === 'none' || s.visibility === 'hidden') return false;
-      const r = n.getBoundingClientRect();
-      return r.width > 0 && r.height > 0 && !n.disabled;
-    });
-    return !hasEmail;
-  }
-  return false;
-} catch (e) { return false; }
+  // Provider chooser chrome (EN): "You are signing into Grok" — not mid-auth.
+  const signingInto = /signing\\s*into\\b/i.test(t);
+  const progress =
+    t.includes('您正在登录') ||
+    t.includes('正在登录') ||
+    /logging\\s*you\\s*in/i.test(t) ||
+    /please\\s*wait/i.test(t) ||
+    (!signingInto && /signing\\s*in\\b/i.test(t));
+  if (!progress) return false;
+  // Only treat as login-progress when email form is still absent.
+  const hasEmail = Array.from(document.querySelectorAll({_EMAIL_INPUT_CSS!r})).some((n) => {{
+    if (!n) return false;
+    const s = window.getComputedStyle(n);
+    if (s.display === 'none' || s.visibility === 'hidden') return false;
+    const r = n.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && !n.disabled;
+  }});
+  return !hasEmail;
+}} catch (e) {{ return false; }}
                 """
             )
         )
@@ -4847,19 +4864,20 @@ def fill_email_and_submit(timeout=15, log_callback=None, cancel_callback=None):
             if log_callback:
                 log_callback(f"[Debug] 二次点击邮箱注册失败: {reclick_exc}")
     deadline = time.time() + max(5.0, float(timeout or 15))
+    last_submit_debug = 0.0
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
         filled = page.run_js(
-            """
+            f"""
 const email = arguments[0];
-function isVisible(node) {
+function isVisible(node) {{
     if (!node) return false;
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
-}
-const input = Array.from(document.querySelectorAll('input[data-testid="email"], input[name="email"], input[type="email"], input[autocomplete="email"]')).find((node) => isVisible(node) && !node.disabled && !node.readOnly) || null;
+}}
+const input = Array.from(document.querySelectorAll({_EMAIL_INPUT_CSS!r})).find((node) => isVisible(node) && !node.disabled && !node.readOnly) || null;
 if (!input) return 'not-ready';
 input.focus(); input.click();
 // 清空并设置值
@@ -4868,24 +4886,24 @@ const tracker = input._valueTracker;
 if (tracker) tracker.setValue('');
 if (valueSetter) valueSetter.call(input, email); else input.value = email;
 // 完整事件序列，确保 React 受控组件同步
-input.dispatchEvent(new Event('focus', { bubbles: true }));
-input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: email, inputType: 'insertText' }));
-input.dispatchEvent(new InputEvent('input', { bubbles: true, data: email, inputType: 'insertText' }));
-input.dispatchEvent(new Event('change', { bubbles: true }));
-input.dispatchEvent(new Event('blur', { bubbles: true }));
+input.dispatchEvent(new Event('focus', {{ bubbles: true }}));
+input.dispatchEvent(new InputEvent('beforeinput', {{ bubbles: true, data: email, inputType: 'insertText' }}));
+input.dispatchEvent(new InputEvent('input', {{ bubbles: true, data: email, inputType: 'insertText' }}));
+input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+input.dispatchEvent(new Event('blur', {{ bubbles: true }}));
 // 验证：值已写入即可（不依赖 checkValidity，部分站点自定义校验会导致误判）
 const current = (input.value || '').trim();
 if (current === email) return 'filled';
 // 兜底：尝试逐字符输入
 input.value = '';
-input.dispatchEvent(new Event('input', { bubbles: true }));
-for (const ch of email) {
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
+input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+for (const ch of email) {{
+    input.dispatchEvent(new KeyboardEvent('keydown', {{ key: ch, bubbles: true }}));
     input.value += ch;
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: ch, inputType: 'insertText' }));
-    input.dispatchEvent(new KeyboardEvent('keyup', { key: ch, bubbles: true }));
-}
-input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new InputEvent('input', {{ bubbles: true, data: ch, inputType: 'insertText' }}));
+    input.dispatchEvent(new KeyboardEvent('keyup', {{ key: ch, bubbles: true }}));
+}}
+input.dispatchEvent(new Event('change', {{ bubbles: true }}));
 if ((input.value || '').trim() === email) return 'filled';
 return input.value;
             """,
@@ -4900,29 +4918,39 @@ return input.value;
             human_sleep(0.5, cancel_callback)
             continue
         human_sleep(0.8, cancel_callback)
+        # filled OK — if submit click keeps returning false, log once per few seconds
+        # so EN button-label mismatches are visible (was silent 20s timeout).
         clicked = page.run_js(
-            r"""
-function isVisible(node) {
+            f"""
+function isVisible(node) {{
     if (!node) return false;
     const style = window.getComputedStyle(node);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
-}
-const input = Array.from(document.querySelectorAll('input[data-testid="email"], input[name="email"], input[type="email"], input[autocomplete="email"]')).find((node) => isVisible(node) && !node.disabled && !node.readOnly) || null;
-if (!input || !input.checkValidity() || !(input.value || '').trim()) return false;
+}}
+const input = Array.from(document.querySelectorAll({_EMAIL_INPUT_CSS!r})).find((node) => isVisible(node) && !node.disabled && !node.readOnly) || null;
+// Prefer value presence over HTML5 checkValidity(): custom EN/CN validators and
+// some temp-mail TLDs can make checkValidity() false even when the field is fine.
+if (!input || !(input.value || '').trim()) return false;
 const buttons = Array.from(document.querySelectorAll('button[type="submit"], button')).filter((node) => isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true');
-const submitButton = buttons.find((node) => {
-    const text = (node.innerText || node.textContent || '').replace(/\s+/g, '');
-    const lower = text.toLowerCase();
+const submitButton = buttons.find((node) => {{
+    // Keep spaces for phrase match, also compact for "Sign up" → "signup".
+    // Old path stripped spaces then looked for "sign up" (with space) → never matched EN.
+    const raw = ((node.innerText || node.textContent || '') + '').replace(/\\s+/g, ' ').trim();
+    const lower = raw.toLowerCase();
+    const compact = lower.replace(/\\s+/g, '');
     return (
-        text === '注册' ||
-        text.includes('注册') ||
-        lower.includes('sign up') ||
+        raw === '注册' ||
+        raw.includes('注册') ||
+        compact.includes('signup') ||
+        compact.includes('createaccount') ||
         lower.includes('continue') ||
-        lower.includes('next')
+        lower.includes('next') ||
+        compact === 'next' ||
+        compact === 'continue'
     );
-});
+}});
 if (!submitButton || submitButton.disabled) return false;
 submitButton.click();
 return true;
@@ -4943,7 +4971,24 @@ return true;
                     "邮箱提交后未进入验证码页（服务端可能未发信 / SPA 卡住）"
                 )
             return email, dev_token
+        now = time.time()
+        if log_callback and now - last_submit_debug >= 3.0:
+            try:
+                snap = _page_form_snapshot(page)
+            except Exception:
+                snap = {}
+            log_callback(
+                f"[Debug] 邮箱已写入但未点到注册/Continue 按钮 filled={filled!r} snap={snap}"
+            )
+            last_submit_debug = now
         human_sleep(0.5, cancel_callback)
+    # Distinguish not-ready vs filled-but-no-submit for ops.
+    try:
+        snap = _page_form_snapshot(page)
+    except Exception:
+        snap = {}
+    if log_callback:
+        log_callback(f"[Debug] fill_email 超时最终快照: {snap}")
     raise Exception("未找到邮箱输入框或注册按钮")
 
 

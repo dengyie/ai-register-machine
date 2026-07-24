@@ -30,10 +30,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import grok_register_ttk as reg  # noqa: E402
 from proxy_rotate import (  # noqa: E402
+    acquire_mint_egress,
     configure_proxy_rotation,
     current_egress_label,
+    get_rotator,
     maybe_rotate_proxy,
     note_egress_outcome,
+    release_mint_egress,
     restore_proxy_rotation,
 )
 
@@ -780,8 +783,9 @@ def classify_email_stage_failure(msg: str) -> str:
       fatal         — resource/config exhausted; stop whole batch (no retry)
       progress_fail — code filled but profile not reached (do not swap mailbox as mail-miss)
       mail_miss     — verification code not received / IMAP path
-      browser_boot  — Chromium start / chrome-error interstitial / connection fails
-      other         — navigation/form/browser hard failure
+      browser_boot  — Chromium start / chrome-error / connection / transient form flake
+                      (slot-retry class via AccountRetryNeeded)
+      other         — remaining hard failures (still reg_fail, no slot retry)
     """
     text = str(msg or "")
     low = text.lower()
@@ -805,8 +809,9 @@ def classify_email_stage_failure(msg: str) -> str:
         )
     ):
         return "mail_miss"
-    # Chromium boot / interstitial / proxy path dead: recycle browser + force rotate.
-    # Do not burn mailbox quota as if signup UI logic failed.
+    # Chromium boot / interstitial / proxy path dead / transient signup UI flake:
+    # recycle browser + force rotate + slot retry. Do not burn mailbox quota as if
+    # signup UI logic permanently failed (pxed account_slot_retry>0 must apply).
     if (
         "browser_boot" in low
         or "chrome error page" in low
@@ -859,6 +864,22 @@ def classify_email_stage_failure(msg: str) -> str:
                 or "email input" in low
             )
         )
+        # Transient form mount / button race (was "other" → instant reg_fail burn).
+        # Slot-retry + hard recycle + rotate recovers simple SPA/DOM timing flakes.
+        or "未找到邮箱输入框或注册按钮" in text
+        or "未找到邮箱输入框" in text
+        or "未找到注册按钮" in text
+        or "邮箱输入框已出现，但写入失败" in text
+        or "打开注册页失败" in text
+        or "页面未就绪" in text
+        or "page is none" in low
+        or "page is disconnected" in low
+        or "tab closed" in low
+        or "target closed" in low
+        or "pagedisconnected" in low
+        # Post-email-submit SPA stall (ttk raises ARN; keep classify aligned if re-wrapped).
+        or "邮箱提交后未进入验证码页" in text
+        or "未进入验证码页" in text
     ):
         return "browser_boot"
     return "other"
@@ -869,8 +890,25 @@ def _force_rotate_path(worker_id: int, reason: str) -> dict:
     """Immediately switch Clash/list egress — do not spin on a dead node.
 
     Used on browser_boot / connection-closed. force=True bypasses rotate_every.
-    Safe no-op when mode=off. Failures are logged; never raise into register loop.
+    Truthful no-op when mode=off (residential single-egress): there is no
+    alternate node to switch to, so skip both the node-penalty attribution and
+    the rotate call — emitting neither would otherwise log a misleading
+    "换路 rotated=False" line and penalize an egress we cannot actually leave.
+    Failures are logged; never raise into register loop.
     """
+    try:
+        rotate_mode = get_rotator().mode
+    except Exception:
+        rotate_mode = "?"
+    if rotate_mode == "off":
+        # Single fixed egress (e.g. residential 1024proxy). Nothing to rotate to;
+        # caller still hard-recycles the browser, which is the only useful retry.
+        log(
+            worker_id,
+            f"[*] fail-fast reason={reason!r} rotate=off "
+            f"(单一出口，无可切换节点，仅回收浏览器)",
+        )
+        return {"rotated": False, "mode": "off"}
     # Attribute penalty to the node we are leaving (before rotate advances).
     try:
         prev_label = current_egress_label()
@@ -1059,120 +1097,120 @@ def register_one(
             _force_rotate_path(worker_id, reason=f"browser_start:{msg[:80]}")
             return {"ok": False, "error": f"browser start: {exc}", "idx": idx}
 
-        mail_ok = False
+        # Mail + profile share one try so AccountRetryNeeded from email-stage
+        # (SPA stuck / form flake / progress_fail / ttk ARN) hits the slot-retry
+        # handler below. Previously mail ARN escaped register_one without budget.
+        try:
+            mail_ok = False
 
-        def _clear_mail_provider_bind() -> None:
-            try:
-                if hasattr(reg, "clear_email_provider_bind"):
-                    reg.clear_email_provider_bind()
-            except Exception:
-                pass
-
-        def _reset_mail_provider_attempt_state() -> None:
-            # New account (or fresh mail stage): failover index must not leak
-            # from a previous account that already advanced through the pool.
-            try:
-                if hasattr(reg, "reset_email_provider_failover"):
-                    reg.reset_email_provider_failover()
-            except Exception:
-                pass
-            _clear_mail_provider_bind()
-
-        def _advance_mail_provider_on_miss() -> None:
-            # Multi-select: release bind so next try picks next channel
-            # (RR/random) or next failover member.
-            try:
-                if hasattr(reg, "advance_email_provider_failover"):
-                    reg.advance_email_provider_failover()
-            except Exception:
-                pass
-            _clear_mail_provider_bind()
-
-        _reset_mail_provider_attempt_state()
-        for mail_try in range(1, max_mail_retry + 1):
-            email = ""
-            dev_token = ""
-            try:
-                log(
-                    worker_id,
-                    f"--- 第 {idx}/{total} 个账号, 邮箱尝试 {mail_try}/{max_mail_retry}"
-                    f"{f', slot重试 {slot_retry}/{max_slot_retry}' if slot_retry else ''} ---",
-                )
-                log(worker_id, "1. 打开注册页")
-                reg.open_signup_page(log_callback=lambda m: log(worker_id, m), cancel_callback=cancel)
-                log(worker_id, "2. 创建邮箱并提交")
-                email, dev_token = reg.fill_email_and_submit(
-                    log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
-                )
+            def _clear_mail_provider_bind() -> None:
                 try:
-                    provider_now = reg.get_email_provider()
+                    if hasattr(reg, "clear_email_provider_bind"):
+                        reg.clear_email_provider_bind()
                 except Exception:
-                    provider_now = "?"
-                log(worker_id, f"邮箱: {email} (provider={provider_now})")
-                log(worker_id, "3. 拉取验证码")
-                code = reg.fill_code_and_submit(
-                    email,
-                    dev_token,
-                    log_callback=lambda m: log(worker_id, m),
-                    cancel_callback=cancel,
-                )
-                log(worker_id, f"验证码: {code}")
-                mail_ok = True
-                break
-            except AccountRetryNeeded:
+                    pass
+
+            def _reset_mail_provider_attempt_state() -> None:
+                # New account (or fresh mail stage): failover index must not leak
+                # from a previous account that already advanced through the pool.
+                try:
+                    if hasattr(reg, "reset_email_provider_failover"):
+                        reg.reset_email_provider_failover()
+                except Exception:
+                    pass
                 _clear_mail_provider_bind()
-                raise
-            except Exception as exc:
-                msg = str(exc)
-                kind = classify_email_stage_failure(msg)
-                if kind == "fatal":
-                    log(worker_id, f"! 致命错误，停止整批（不空转）: {msg}")
-                    _inc("reg_fail")
-                    _clear_mail_provider_bind()
-                    request_fatal_stop(msg)
-                    raise FatalRegisterError(msg) from exc
-                if kind == "mail_miss" and mail_try < max_mail_retry:
-                    log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
-                    _mark_email_stage_error(email, msg)
-                    _advance_mail_provider_on_miss()
-                    # 收码失败通常不是浏览器崩溃；优先软回收避免进程爆炸
-                    _soft_recycle_browser(worker_id)
-                    reg.sleep_with_cancel(1, cancel)
-                    continue
-                if kind == "progress_fail":
+
+            def _advance_mail_provider_on_miss() -> None:
+                # Multi-select: release bind so next try picks next channel
+                # (RR/random) or next failover member.
+                try:
+                    if hasattr(reg, "advance_email_provider_failover"):
+                        reg.advance_email_provider_failover()
+                except Exception:
+                    pass
+                _clear_mail_provider_bind()
+
+            _reset_mail_provider_attempt_state()
+            for mail_try in range(1, max_mail_retry + 1):
+                email = ""
+                dev_token = ""
+                try:
                     log(
                         worker_id,
-                        f"! 验证码阶段推进失败(不换邮箱当 mail-miss): {msg}",
+                        f"--- 第 {idx}/{total} 个账号, 邮箱尝试 {mail_try}/{max_mail_retry}"
+                        f"{f', slot重试 {slot_retry}/{max_slot_retry}' if slot_retry else ''} ---",
                     )
+                    log(worker_id, "1. 打开注册页")
+                    reg.open_signup_page(log_callback=lambda m: log(worker_id, m), cancel_callback=cancel)
+                    log(worker_id, "2. 创建邮箱并提交")
+                    email, dev_token = reg.fill_email_and_submit(
+                        log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
+                    )
+                    try:
+                        provider_now = reg.get_email_provider()
+                    except Exception:
+                        provider_now = "?"
+                    log(worker_id, f"邮箱: {email} (provider={provider_now})")
+                    log(worker_id, "3. 拉取验证码")
+                    code = reg.fill_code_and_submit(
+                        email,
+                        dev_token,
+                        log_callback=lambda m: log(worker_id, m),
+                        cancel_callback=cancel,
+                    )
+                    log(worker_id, f"验证码: {code}")
+                    mail_ok = True
+                    break
+                except AccountRetryNeeded:
+                    _clear_mail_provider_bind()
+                    raise
+                except Exception as exc:
+                    msg = str(exc)
+                    kind = classify_email_stage_failure(msg)
+                    if kind == "fatal":
+                        log(worker_id, f"! 致命错误，停止整批（不空转）: {msg}")
+                        _inc("reg_fail")
+                        _clear_mail_provider_bind()
+                        request_fatal_stop(msg)
+                        raise FatalRegisterError(msg) from exc
+                    if kind == "mail_miss" and mail_try < max_mail_retry:
+                        log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
+                        _mark_email_stage_error(email, msg)
+                        _advance_mail_provider_on_miss()
+                        # 收码失败通常不是浏览器崩溃；优先软回收避免进程爆炸
+                        _soft_recycle_browser(worker_id)
+                        reg.sleep_with_cancel(1, cancel)
+                        continue
+                    if kind == "progress_fail":
+                        # Code filled but profile not reached — CF mid-state / SPA lag.
+                        # Raise ARN only; outer slot handler rotates once + hard-recycles.
+                        # Do NOT force_rotate here (would double-rotate with ARN handler).
+                        log(
+                            worker_id,
+                            f"! 验证码阶段推进失败(slot 重试, 不换邮箱): {msg}",
+                        )
+                        _mark_email_stage_error(email, msg)
+                        _clear_mail_provider_bind()
+                        raise AccountRetryNeeded(f"progress_fail: {msg}") from exc
+                    if kind == "browser_boot":
+                        # Chromium / chrome-error / dead Clash / transient form mount.
+                        # Raise ARN only; outer slot handler owns rotate + hard recycle.
+                        log(worker_id, f"! 浏览器/表单瞬态失败({kind}): {msg}")
+                        _mark_email_stage_error(email, msg)
+                        _clear_mail_provider_bind()
+                        raise AccountRetryNeeded(f"browser_boot: {msg}") from exc
+                    log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
                     _mark_email_stage_error(email, msg)
                     traceback.print_exc()
                     _inc("reg_fail")
                     _clear_mail_provider_bind()
-                    # 页面可能卡在中间态，强制完整回收
                     _hard_recycle_browser(worker_id)
-                    return {"ok": False, "error": msg, "idx": idx, "kind": "progress_fail"}
-                if kind == "browser_boot":
-                    # Chromium connection / chrome-error interstitial / dead Clash path:
-                    # force-rotate egress immediately, then slot retry (do not burn mailbox
-                    # quota as if signup UI logic failed; do not spin on same dead node).
-                    log(worker_id, f"! 浏览器启动/错误页/连接断开({kind}): {msg}")
-                    _mark_email_stage_error(email, msg)
-                    _clear_mail_provider_bind()
-                    _force_rotate_path(worker_id, reason=f"browser_boot:{msg[:80]}")
-                    raise AccountRetryNeeded(f"browser_boot: {msg}") from exc
-                log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
-                _mark_email_stage_error(email, msg)
-                traceback.print_exc()
-                _inc("reg_fail")
-                _clear_mail_provider_bind()
-                _hard_recycle_browser(worker_id)
-                return {"ok": False, "error": msg, "idx": idx, "kind": kind}
+                    return {"ok": False, "error": msg, "idx": idx, "kind": kind}
 
-        _clear_mail_provider_bind()
-        if not mail_ok:
-            return {"ok": False, "error": "mail stage failed", "idx": idx}
+            _clear_mail_provider_bind()
+            if not mail_ok:
+                return {"ok": False, "error": "mail stage failed", "idx": idx}
 
-        try:
             log(worker_id, "4. 填写资料")
             try:
                 profile_timeout = int(reg.config.get("profile_timeout", 120) or 120)
@@ -1383,6 +1421,15 @@ def register_one(
                 except Exception:
                     pass
 
+            # Capture the clash leaf / list proxy used for THIS registration so
+            # mint can pin the same egress IP (shared mixed-port otherwise drifts
+            # when W1 fail-fast rotates while WM1 is still minting).
+            reg_egress = ""
+            try:
+                reg_egress = current_egress_label() or ""
+            except Exception:
+                reg_egress = ""
+
             job = {
                 "ok": True,
                 "email": email,
@@ -1391,7 +1438,10 @@ def register_one(
                 "profile": profile,
                 "idx": idx,
                 "cookies": cookies,
+                "reg_egress": reg_egress,
             }
+            if reg_egress:
+                log(worker_id, f"[*] reg_egress for mint pin: {reg_egress}")
 
             if do_mint_inline:
                 _run_mint_job(f"R{worker_id}", job, getattr(reg, "config", {}) or {})
@@ -1435,11 +1485,13 @@ def register_one(
                 else f"slot_retry:{exc_text[:80]}"
             )
             slot_retry += 1
-            _force_rotate_path(worker_id, reason=rotate_reason)
+            _rotate_result = _force_rotate_path(worker_id, reason=rotate_reason)
             if slot_retry <= max_slot_retry:
+                _switched = bool((_rotate_result or {}).get("rotated"))
+                _action = "已换路" if _switched else "回收浏览器(出口单一)"
                 log(
                     worker_id,
-                    f"[!] 当前账号流程卡住，已换路，slot 重试 {slot_retry}/{max_slot_retry}: {exc}",
+                    f"[!] 当前账号流程卡住，{_action}，slot 重试 {slot_retry}/{max_slot_retry}: {exc}",
                 )
                 _hard_recycle_browser(worker_id)
                 reg.sleep_with_cancel(1.0, cancel)
@@ -1501,6 +1553,29 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
         _inc("mint_skip")
         log(worker_id, f"[cpa] export disabled, skip {email}")
         return {"ok": False, "skipped": True, "email": email}
+
+    # Prefer the leaf captured at reg success so mint shares registration egress IP.
+    reg_egress = str(job.get("reg_egress") or "").strip()
+    held_node = ""
+    if reg_egress:
+        try:
+            hold = acquire_mint_egress(
+                reg_egress, log=lambda m: log(worker_id, m)
+            )
+            if hold.get("ok") or hold.get("reason") == "node_not_in_pool":
+                held_node = reg_egress
+            elif hold.get("mode") == "clash" and not hold.get("ok"):
+                log(
+                    worker_id,
+                    f"[!] mint_hold pin failed for {reg_egress}: "
+                    f"{hold.get('error') or hold.get('reason') or hold}",
+                )
+            else:
+                # list/off: no shared leaf; still attribute mint to reg_egress
+                held_node = ""
+        except Exception as exc:  # noqa: BLE001
+            log(worker_id, f"[!] mint_hold acquire error: {exc}")
+
     try:
         import cpa_export
 
@@ -1553,10 +1628,11 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
         if result.get("ok"):
             log(worker_id, f"+ CPA auth (product ok): {result.get('path')}")
             _inc("mint_success")
-            # Disk product success: boost current egress weight (NODE_SCORE).
+            # Disk product success: boost the reg leaf (not whatever rotated later).
             try:
                 note_egress_outcome(
                     "mint_ok",
+                    node=reg_egress or None,
                     log=lambda m: log(worker_id, m),
                     config=config,
                 )
@@ -1687,6 +1763,14 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
             "email": email,
             "mint_fail_reason": "mint_exception",
         }
+    finally:
+        if held_node:
+            try:
+                release_mint_egress(
+                    held_node, log=lambda m: log(worker_id, m)
+                )
+            except Exception as _re:  # noqa: BLE001
+                log(worker_id, f"[!] mint_hold release error: {_re}")
 
 
 def _register_worker(

@@ -50,13 +50,20 @@ def test_classify() -> None:
         ("验证码已获取，但自动填写/提交失败: code=1", "mail_miss"),
         ("验证码 IMAP 连接失败", "mail_miss"),
         ("IMAP SSL EOF", "other"),
-        ("未找到邮箱输入框或注册按钮", "other"),
+        # Transient form/DOM race: slot-retry class (was "other" → instant burn)
+        ("未找到邮箱输入框或注册按钮", "browser_boot"),
+        ("未找到邮箱输入框", "browser_boot"),
+        ("打开注册页失败: page is None", "browser_boot"),
+        ("页面未就绪", "browser_boot"),
+        (
+            "邮箱提交后未进入验证码页（服务端可能未发信 / SPA 卡住）",
+            "browser_boot",
+        ),
         ("浏览器启动失败", "browser_boot"),
         ("net::ERR_CONNECTION_CLOSED", "browser_boot"),
         ("ERR_CONNECTION_RESET at accounts.x.ai", "browser_boot"),
         ("ERR_PROXY_CONNECTION_FAILED", "browser_boot"),
         ("ERR_TUNNEL_CONNECTION_FAILED", "browser_boot"),
-        ("打开注册页失败: page is None", "other"),
         (
             "Hotmail/Outlook 可用别名已耗尽：请增加 hotmail_max_aliases_per_account、"
             "补充 mail_credentials.txt，或清理 emails_used.txt / emails_error.txt",
@@ -128,9 +135,20 @@ def test_soft_hard_helpers() -> None:
     assert "def _hard_recycle_browser" in src
     assert "clear_session" in src
     assert "classify_email_stage_failure" in src
-    # mail_miss uses soft; progress_fail uses hard
+    # mail_miss uses soft; browser_boot/progress_fail raise ARN → hard recycle in ARN handler
     assert "_soft_recycle_browser(worker_id)" in src
     assert "_hard_recycle_browser(worker_id)" in src
+    # progress_fail must NOT instant-return reg_fail; must slot-retry via ARN
+    assert 'raise AccountRetryNeeded(f"progress_fail:' in src
+    assert 'raise AccountRetryNeeded(f"browser_boot:' in src
+    assert 'kind": "progress_fail"' not in src  # old hard-fail return removed
+    # form flake classified as browser_boot (slot retry class)
+    assert '"未找到邮箱输入框或注册按钮" in text' in src or "未找到邮箱输入框或注册按钮" in src
+    # Deep fix: mail+profile share one try so mail ARN hits slot budget
+    assert "Mail + profile share one try" in src
+    # No double-rotate before raise ARN (outer handler owns rotate)
+    assert 'reason=f"progress_fail:' not in src
+    assert 'reason=f"browser_boot:' not in src
     print("PASS  soft/hard recycle helpers present")
 
 

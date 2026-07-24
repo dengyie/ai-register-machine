@@ -31,6 +31,13 @@ class TestBulkSupervisorDiskFirst(unittest.TestCase):
         self.assertIn("complete", self.src.lower())
         self.assertIn("refresh", self.src.lower())
 
+    def test_ordinary_node_score_env_default_on(self) -> None:
+        # Dynamic weight is env-gated; ordinary bulk defaults NODE_SCORE=1.
+        self.assertIn("NODE_SCORE=${NODE_SCORE:-1}", self.src)
+        self.assertIn("node_score", self.src)
+        # Off must remain possible without code change.
+        self.assertIn("NODE_SCORE=0", self.src)
+
     def test_calls_register_cli_not_register_core(self) -> None:
         # Concurrent bulk authority: direct register_cli with --extra chunk.
         self.assertIn("register_cli.py", self.src)
