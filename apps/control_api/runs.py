@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -261,6 +262,33 @@ def start_run(root: Path, req: StartRunRequest) -> dict[str, Any]:
         "pgid": int(proc.pid),
     }
     reg.register(run_id, proc.pid, req.kind, meta)
+
+    # Fail-fast: launch_batch_supervisor exits immediately when flock is held
+    # (or script missing). Without this poll the registry sticks on a zombie
+    # bash and the UI shows ALIVE + stale progress forever.
+    for _ in range(10):
+        ret = proc.poll()
+        if ret is not None:
+            reg.clear()
+            try:
+                proc.wait(timeout=0.2)
+            except Exception:
+                pass
+            tail = ""
+            try:
+                lines = Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
+                tail = "\n".join(lines[-20:]).strip()
+            except Exception:
+                pass
+            detail = f"process exited immediately code={ret}"
+            if tail:
+                detail = f"{detail}: {tail[:500]}"
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=detail,
+            )
+        time.sleep(0.1)
+
     return {"ok": True, "run": reg.current(), "detail": "started"}
 
 
