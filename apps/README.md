@@ -32,12 +32,14 @@ Open `http://127.0.0.1:8787` → **login form**. Default credentials **`admin` /
 
 - API: `/api/health`, `/api/auth/*`, `/api/overview`, `/api/config`, `/api/import/*`, `/api/runs/*`, `/api/nodes/*`, `/api/accounts/*`, `/api/ops/*`
 - UI: **console10** Preact SPA — `cd apps/web && npm run build` (or `./scripts/build_web_console.sh`) writes `apps/web/dist`; FastAPI prefers `apps/web/dist` then falls back to flat `apps/web/`.
-  - **Packaging:** GitHub Actions `CI` job `package-console10` builds on green tests and uploads artifact `console10-web` (14d).
+  - **Packaging:** GitHub Actions `CI` job `package-console10` runs on **main push** only (after green tests) → artifact `console10-web` (14d). PR CI tests without packaging.
   - **Deploy (auto + manual):** workflow **Deploy console10** (Environment `pxed`).
     - **Auto:** after successful `CI` on `main` **push** (`workflow_run`), deploys that run’s artifact.
     - **Manual:** Actions → Deploy console10 (`workflow_dispatch`); `dry_run` / rebuild / artifact options.
     - Secrets: `PXED_SSH_PRIVATE_KEY` + `PXED_HOST` + `PXED_KNOWN_HOSTS` (optional `PXED_WEB`, `PXED_SSH_PORT`). Prefer direct host (not cloudflared alias).
-    - Path sanitized under `/data/grok-register`; stale Vite `assets/*` pruned; **single script** `scripts/deploy_web_console10.sh`. Static-only; does **not** stop batch/coinbot.
+    - Path sanitized under `/data/grok-register`; stale Vite `assets/*` pruned; **single script** `scripts/deploy_web_console10.sh`.
+    - **Boundary (I5):** **static SPA only** under `PXED_WEB` (default `/data/grok-register/apps/web`). Does **not** deploy `control_api` / register core / supervisor, does **not** stop batch/coinbot. API code changes need a separate host update + careful control_api restart.
+    - Deploy key: scope write to `/data/grok-register/` (or web subdir) only when possible.
   - **Local fallback:** `./scripts/deploy_web_console10.sh`. `SKIP_BUILD=1` / `CONSOLE10_TGZ=` / `DRY_RUN=1` / `PRUNE_STALE_ASSETS=1` supported.
   - Dev: `cd apps/web && npm run dev` proxies `/api` → `:8787`. Legacy console9 under `apps/web/legacy/`.
 - Auth (either):

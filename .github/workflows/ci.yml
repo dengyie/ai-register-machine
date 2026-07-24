@@ -10,11 +10,17 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   test:
     name: offline-tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -44,9 +50,10 @@ jobs:
 
       - name: Syntax check
         run: |
-          # Compile listed modules when present (allows staged features without breaking CI).
+          # I4: required paths must exist (fail CI if deleted);
+          # optional paths may be staged features and are skipped when absent.
           set -euo pipefail
-          files=(
+          required=(
             register_cli.py
             grok_register_ttk.py
             cpa_export.py
@@ -55,6 +62,7 @@ jobs:
             proxy_bridge.py
             proxy_rotate.py
             mail_pool_probe.py
+            node_score.py
             optimization_checks.py
             cf_mail_debug.py
             cpa_xai/__init__.py
@@ -85,6 +93,9 @@ jobs:
             register_core/verify/grok_chat.py
             apps/control_api/app.py
             apps/control_api/mail_ops.py
+            apps/control_api/nodes_ops.py
+            apps/control_api/accounts_ops.py
+            apps/control_api/system_ops.py
             apps/control_api/process_registry.py
             providers/mimo/inject_cpa_openai.py
             scripts/backfill_cpa_xai_from_accounts.py
@@ -95,12 +106,28 @@ jobs:
             scripts/quality_sample_accounts.py
             scripts/probe_mail_pool.py
           )
+          optional=(
+            # Keep empty or list experimental modules not yet always shipped.
+          )
+          missing=0
           present=()
-          for f in "${files[@]}"; do
+          for f in "${required[@]}"; do
             if [[ -f "$f" ]]; then
               present+=("$f")
             else
-              echo "skip missing: $f"
+              echo "ERROR: required file missing: $f" >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+          for f in "${optional[@]:-}"; do
+            [[ -z "$f" ]] && continue
+            if [[ -f "$f" ]]; then
+              present+=("$f")
+            else
+              echo "skip optional missing: $f"
             fi
           done
           uv run python -m py_compile "${present[@]}"
@@ -127,7 +154,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [test]
-    # Always package on main; on PR still package so reviewers can download the SPA
+    # M1: only package on main (PR CI still runs tests; deploy uses main artifacts)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4

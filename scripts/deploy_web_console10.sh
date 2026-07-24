@@ -63,7 +63,11 @@ if [[ -n "${PXED_SSH_PRIVATE_KEY:-}" ]]; then
   KEY_FILE="$(mktemp "${TMPDIR:-/tmp}/pxed_deploy_key.XXXXXX")"
   CLEANUPS+=("$KEY_FILE")
   umask 077
-  printf '%s\n' "$PXED_SSH_PRIVATE_KEY" > "$KEY_FILE"
+  # M2: always end PEM with a newline (OpenSSH rejects some keys without it).
+  # Strip one trailing newline first so we never double-pad multi-line secrets oddly.
+  _pem="${PXED_SSH_PRIVATE_KEY%$'\n'}"
+  printf '%s\n' "$_pem" > "$KEY_FILE"
+  unset _pem
   chmod 600 "$KEY_FILE"
 fi
 
@@ -73,7 +77,9 @@ if [[ -n "${PXED_KNOWN_HOSTS_FILE:-}" && -f "${PXED_KNOWN_HOSTS_FILE}" ]]; then
 elif [[ -n "${PXED_KNOWN_HOSTS:-}" ]]; then
   KNOWN_FILE="$(mktemp "${TMPDIR:-/tmp}/pxed_known_hosts.XXXXXX")"
   CLEANUPS+=("$KNOWN_FILE")
-  printf '%s\n' "$PXED_KNOWN_HOSTS" > "$KNOWN_FILE"
+  _kh="${PXED_KNOWN_HOSTS%$'\n'}"
+  printf '%s\n' "$_kh" > "$KNOWN_FILE"
+  unset _kh
   chmod 600 "$KNOWN_FILE"
 fi
 

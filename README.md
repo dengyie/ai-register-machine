@@ -755,7 +755,13 @@ Live Hotmail REST（**不要**在 CI 开）：
 GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 ```
 
-贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub Actions：`CI` 在 `main`/PR 跑 shell 语法 + py_compile + 离线 pytest + 密钥路径守卫，测试通过后打包 console10 并上传 artifact `console10-web`。**Deploy console10** 在 main **push** 的成功 CI 后自动部署静态 SPA 到 pxed（Environment `pxed`，不碰 batch）；也可 `workflow_dispatch` 手动/`dry_run`。需 secrets `PXED_SSH_PRIVATE_KEY` + `PXED_HOST` + `PXED_KNOWN_HOSTS`。
+贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub Actions：
+
+- **`CI`**（`main` + PR）：shell 语法 + **required** `py_compile` + 离线 pytest + 密钥路径守卫。
+- **package-console10**：仅 **main push** 在测试通过后打包 SPA → artifact `console10-web`（PR 不打包，省 Node 时间）。
+- **Deploy console10**：main push 成功 CI 后 **自动**部署**静态 SPA only** 到 pxed（Environment `pxed`）；也可 `workflow_dispatch` / `dry_run`。Secrets：`PXED_SSH_PRIVATE_KEY` + `PXED_HOST` + `PXED_KNOWN_HOSTS`。
+
+**部署边界（I5）：** CI auto-deploy **只覆盖** `apps/web` 静态资源。`control_api`、`register_cli`、supervisor、Clash 配置 **不**经此 workflow 发布；API/注册核心变更需另行 rsync/scp 到 `/data/grok-register/` 并**谨慎** `scripts/run_control_api.sh` 重启（勿在 batch/coinbot 运行中无授权 kill）。Deploy key 权限应尽量收窄到该路径写权限。
 
 ---
 

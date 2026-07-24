@@ -48,6 +48,11 @@ concurrency:
   group: deploy-console10
   cancel-in-progress: false
 
+# I6: explicit least privilege (repo default may be read; workflow_run needs actions:read)
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   deploy:
     name: deploy-to-pxed
@@ -55,6 +60,9 @@ jobs:
     timeout-minutes: 20
     # C1: Environment gate
     environment: pxed
+    permissions:
+      contents: read
+      actions: read
     # Auto path: only on successful CI that was a push to main (not PR CI)
     if: >
       github.event_name == 'workflow_dispatch' ||
