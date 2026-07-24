@@ -118,7 +118,10 @@ jobs:
             find /tmp/console10-ci -maxdepth 4 -type f >&2 || true
             exit 1
           fi
-          cp -f "$TGZ" /tmp/console10-ci/console10-webroot.tgz
+          # artifact may already extract to the canonical path — avoid same-file cp
+          if [[ "$TGZ" != /tmp/console10-ci/console10-webroot.tgz ]]; then
+            cp -f "$TGZ" /tmp/console10-ci/console10-webroot.tgz
+          fi
           ls -la /tmp/console10-ci/console10-webroot.tgz
 
       - name: Sanitize remote web root
