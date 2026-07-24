@@ -36,8 +36,22 @@ def build_overview(root: Path, run_summary: dict[str, Any] | None = None) -> dic
             run = run_status(root)
         except Exception:
             run = None
+    nodes_summary: dict[str, Any] | None = None
+    try:
+        from apps.control_api.nodes_ops import list_catalog
+
+        cat = list_catalog(root)
+        nodes_summary = {
+            "total": cat.get("total"),
+            "enabled": cat.get("enabled"),
+            "healthy": cat.get("healthy"),
+            "path": cat.get("path"),
+        }
+    except Exception:
+        nodes_summary = None
     return {
         "project_root": str(root),
         "product_ok": count_product_ok(root),
         "run": run,
+        "nodes": nodes_summary,
     }

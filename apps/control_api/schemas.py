@@ -20,6 +20,7 @@ class OverviewOut(BaseModel):
     project_root: str
     product_ok: int
     run: dict[str, Any] | None = None
+    nodes: dict[str, Any] | None = None
 
 
 class ConfigOut(BaseModel):
