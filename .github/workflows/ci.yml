@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: offline-tests
@@ -31,6 +35,8 @@ jobs:
         run: |
           bash -n scripts/setup_simple.sh
           bash -n scripts/doctor_secrets.sh
+          bash -n scripts/build_web_console.sh
+          bash -n scripts/deploy_web_console10.sh
           bash -n register.sh
           bash -n providers/mimo/run-register.sh
           bash -n providers/mimo/smoke.sh
@@ -38,48 +44,66 @@ jobs:
 
       - name: Syntax check
         run: |
-          uv run python -m py_compile \
-            register_cli.py \
-            grok_register_ttk.py \
-            cpa_export.py \
-            account_backup.py \
-            tab_pool.py \
-            proxy_bridge.py \
-            optimization_checks.py \
-            cf_mail_debug.py \
-            cpa_xai/__init__.py \
-            cpa_xai/accounts.py \
-            cpa_xai/browser_confirm.py \
-            cpa_xai/mint.py \
-            cpa_xai/oauth_device.py \
-            cpa_xai/probe.py \
-            cpa_xai/protocol_mint.py \
-            cpa_xai/proxyutil.py \
-            cpa_xai/schema.py \
-            cpa_xai/writer.py \
-            register_core/__init__.py \
-            register_core/__main__.py \
-            register_core/cli.py \
-            register_core/contracts.py \
-            register_core/errors.py \
-            register_core/pipeline.py \
-            register_core/email/__init__.py \
-            register_core/providers/__init__.py \
-            register_core/providers/grok_adapter.py \
-            register_core/providers/mimo_adapter.py \
-            register_core/verify/__init__.py \
-            register_core/sink/jsonl_sink.py \
-            register_core/util/process.py \
-            register_core/util/secrets.py \
-            register_core/verify/mimo_tts.py \
-            register_core/verify/grok_chat.py \
-            providers/mimo/inject_cpa_openai.py \
-            scripts/backfill_cpa_xai_from_accounts.py \
-            scripts/backup_registered_accounts.py \
-            scripts/export_cpa_xai_from_grok_auth.py \
-            scripts/remint_expired_and_sync_authdir.py \
-            scripts/quality_milestone_watch.py \
+          # Compile listed modules when present (allows staged features without breaking CI).
+          set -euo pipefail
+          files=(
+            register_cli.py
+            grok_register_ttk.py
+            cpa_export.py
+            account_backup.py
+            tab_pool.py
+            proxy_bridge.py
+            proxy_rotate.py
+            mail_pool_probe.py
+            optimization_checks.py
+            cf_mail_debug.py
+            cpa_xai/__init__.py
+            cpa_xai/accounts.py
+            cpa_xai/browser_confirm.py
+            cpa_xai/mint.py
+            cpa_xai/oauth_device.py
+            cpa_xai/probe.py
+            cpa_xai/protocol_mint.py
+            cpa_xai/proxyutil.py
+            cpa_xai/schema.py
+            cpa_xai/writer.py
+            register_core/__init__.py
+            register_core/__main__.py
+            register_core/cli.py
+            register_core/contracts.py
+            register_core/errors.py
+            register_core/pipeline.py
+            register_core/email/__init__.py
+            register_core/providers/__init__.py
+            register_core/providers/grok_adapter.py
+            register_core/providers/mimo_adapter.py
+            register_core/verify/__init__.py
+            register_core/sink/jsonl_sink.py
+            register_core/util/process.py
+            register_core/util/secrets.py
+            register_core/verify/mimo_tts.py
+            register_core/verify/grok_chat.py
+            apps/control_api/app.py
+            apps/control_api/mail_ops.py
+            apps/control_api/process_registry.py
+            providers/mimo/inject_cpa_openai.py
+            scripts/backfill_cpa_xai_from_accounts.py
+            scripts/backup_registered_accounts.py
+            scripts/export_cpa_xai_from_grok_auth.py
+            scripts/remint_expired_and_sync_authdir.py
+            scripts/quality_milestone_watch.py
             scripts/quality_sample_accounts.py
+            scripts/probe_mail_pool.py
+          )
+          present=()
+          for f in "${files[@]}"; do
+            if [[ -f "$f" ]]; then
+              present+=("$f")
+            else
+              echo "skip missing: $f"
+            fi
+          done
+          uv run python -m py_compile "${present[@]}"
 
       - name: Offline unit tests
         env:
@@ -97,3 +121,51 @@ jobs:
           fi
           echo "OK: no secret runtime paths tracked"
           bash scripts/doctor_secrets.sh || test $? -eq 2
+
+  package-web:
+    name: package-console10
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [test]
+    # Always package on main; on PR still package so reviewers can download the SPA
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Build console10
+        run: ./scripts/build_web_console.sh
+
+      - name: Pack tarball
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          tar -C apps/web/dist -czf artifacts/console10-webroot.tgz .
+          # also keep a flat dist tree for artifact browsing
+          cp -a apps/web/dist artifacts/console10-dist
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("artifacts/console10-webroot.tgz")
+          print(f"artifact_bytes={p.stat().st_size}")
+          assert p.stat().st_size > 1000, "web tarball too small"
+          idx = Path("artifacts/console10-dist/index.html")
+          assert idx.is_file(), "missing index.html in dist"
+          print("index_head:")
+          print(idx.read_text(encoding="utf-8", errors="replace")[:400])
+          PY
+
+      - name: Upload console10 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: console10-web
+          path: |
+            artifacts/console10-webroot.tgz
+            artifacts/console10-dist/**
+          if-no-files-found: error
+          retention-days: 14

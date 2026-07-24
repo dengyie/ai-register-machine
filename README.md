@@ -89,14 +89,14 @@ bash scripts/doctor_secrets.sh
 
 ```bash
 export CONTROL_API_SESSION_SECRET="$(openssl rand -hex 32)"
-uv run python scripts/control_api_user.py set admin
 ./scripts/run_control_api.sh
-# http://127.0.0.1:8787 → 用户名/密码登录
+# http://127.0.0.1:8787 → 默认 admin / admin123（仅空用户库时 bootstrap）
+# 改密：uv run python scripts/control_api_user.py set admin
 ```
 
 FastAPI + console10 SPA（`apps/control_api` + `apps/web` Vite/Preact；`npm run build` → `apps/web/dist`）：
 
-- **登录**：操作员账密（scrypt + HttpOnly session）；脚本可用 Bearer token
+- **登录**：操作员账密（scrypt + HttpOnly session）；**默认** `admin` / `admin123`（仅首次、无 `.control_api_users.json` 时创建）；脚本可用 Bearer token
 - **Overview**：product_ok 计数、当前 batch 状态
 - **Config**：编辑 `config.json`（备份后写；密钥脱敏）
 - **Import**：节点/代理、邮箱凭证、auth dump、配置包
@@ -345,8 +345,10 @@ Web UI：`./scripts/run_control_api.sh` → http://127.0.0.1:8787
 | `cpa_remote_ssh_host` 等 | 仅注入工具侧配置（如 `tebi-tunnel`） |
 
 ```bash
-# 产号（主链路）— supervisor 已 disk-first
-logs/launch_batch_supervisor.sh ordinary N
+# 产号（主链路）— supervisor 已 disk-first（勿用仓库根目录或 logs/ 下旧脚本）
+scripts/launch_batch_supervisor.sh ordinary N
+# 家宽: scripts/launch_batch_supervisor.sh residential N
+# 控制台 API 同样只调 scripts/launch_batch_supervisor.sh
 
 # 注入（独立，用户触发）— 先 probe healthy，再只导入 healthy 列表
 # 勿在 register_cli 成功路径里一键绑死
@@ -478,7 +480,7 @@ PROXY_ROTATE_MODE=list PROXY_LIST="http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:80
 | `cpa_copy_to_hotload` | `false` | 是否复制到本机 CPA 热加载目录 |
 | `cpa_hotload_dir` | 空 | 本机 CPA `auth-dir` |
 | `cpa_auth_priority` | `1000` | 写入 `xai-*.json` 的 CPA 路由权重（mint/写盘/注入统一） |
-| `cpa_remote_inject` | `false` | 单号 mint 后是否立即 SSH 注入（生产 bulk **务必 false**）。bulk supervisor 另读此值作「批末统一导入」意图：产号全程仍强制 inject off，**整批 target 达成后**再跑 `import_cpa_auth_dir.py`（batch5 + healthy-only）。显式 env：`CPA_BATCH_END_INJECT=true` |
+| `cpa_remote_inject` | `false` | 单号 mint 后是否立即 SSH 注入（生产 bulk **务必 false**）。bulk supervisor 另读此值作「批边界统一导入」意图：产号全程仍强制 inject off；**每满 N 个新 complete（默认 100）+ 批末余量**再跑 `import_cpa_auth_dir.py`（healthy-only）。显式 env：`CPA_BATCH_END_INJECT=true`；边界大小：`CPA_BATCH_IMPORT_EVERY=100`；导入波次：`CPA_BATCH_IMPORT_SIZE=100` |
 | `cpa_remote_live_dir` | `/root/.cli-proxy-api` | 一键成功门闩目录（live 池） |
 | `cpa_remote_live_required` | `true` | live 注入失败则整次 export 失败（inventory-only 不算一键成功） |
 | `cpa_remote_inject_required` | `false` | 所有远端目录都必须成功；比 live 门闩更严 |
@@ -488,9 +490,10 @@ PROXY_ROTATE_MODE=list PROXY_LIST="http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:80
 | `cpa_remote_credentials_file` | `~/.ssh/bohrium_credentials` | 可选密码文件；也可用环境变量 `CPA_REMOTE_SSHPASS` / `SSHPASS` |
 
 **产号主链路：** 注册成功 → mint → 本地 `cpa_auths` complete auth（含 refresh）即结束。  
-**CPA 注入（独立 / 批末）：** chat probe → **仅 healthy** 导入 live/inventory。勿在单号 mint 成功路径绑立即 inject。  
-- 手动：`python -u scripts/import_cpa_auth_dir.py --src cpa_auths --remote --batch-size 5 --batch-pause 3`  
-- bulk 自动：`CPA_BATCH_END_INJECT=true`（或 config `cpa_remote_inject=true` 作意图）→ supervisor 在 **TARGET 达成后** 统一 import 一次；未达目标不导入。  
+**CPA 注入（独立 / 批边界）：** chat probe → **仅 healthy** 导入 live/inventory。勿在单号 mint 成功路径绑立即 inject。  
+- 手动：`python -u scripts/import_cpa_auth_dir.py --src cpa_auths --remote --batch-size 100 --batch-pause 3`  
+- bulk 自动：`CPA_BATCH_END_INJECT=true`（或 config `cpa_remote_inject=true` 作意图）→ supervisor **不**在每次注册后 import；只在 **每满 `CPA_BATCH_IMPORT_EVERY` 个新 complete（默认 100）** 以及 **TARGET 后的余量** 跑统一 import。intent=false 时全程不自动导入。  
+- 可调：`CPA_BATCH_IMPORT_EVERY=100`（批边界账号数）、`CPA_BATCH_IMPORT_SIZE=100`（importer 内 wave 大小）、`CPA_BATCH_IMPORT_PAUSE=3`。  
 存量 remint 工具仍可用：
 
 ```bash
@@ -752,7 +755,7 @@ Live Hotmail REST（**不要**在 CI 开）：
 GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 ```
 
-贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub Actions 在 `main` 上跑 shell 语法 + py_compile + 离线 pytest + 密钥路径守卫。
+贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub Actions：`CI` 在 `main`/PR 跑 shell 语法 + py_compile + 离线 pytest + 密钥路径守卫，测试通过后打包 console10 并上传 artifact `console10-web`。部署用手动 workflow **Deploy console10**（`workflow_dispatch`，静态 scp 到 pxed，不碰 batch）；需仓库 secrets `PXED_SSH_PRIVATE_KEY` + `PXED_HOST` + `PXED_KNOWN_HOSTS`（Environment `pxed`）；`dry_run` 可不配密钥。
 
 ---
 

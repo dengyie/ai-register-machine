@@ -1,5 +1,5 @@
 # ai-register-machine — common developer targets
-.PHONY: help test test-unit syntax doctor list core-list example clean
+.PHONY: help test test-unit syntax doctor list core-list example clean build-web package-web
 
 ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PY   := uv run python
@@ -10,6 +10,8 @@ help:
 	@echo "  make test-unit   skeleton + layer unit tests only"
 	@echo "  make syntax      bash -n + py_compile critical paths"
 	@echo "  make doctor      local secret hygiene (never prints secrets)"
+	@echo "  make build-web   Vite console10 → apps/web/dist"
+	@echo "  make package-web tar apps/web/dist → /tmp/console10-webroot.tgz"
 	@echo "  make list        hub help + core list"
 	@echo "  make example     run examples/minimal_pipeline.py"
 	@echo "  make clean       caches only"
@@ -30,14 +32,24 @@ syntax:
 	bash -n providers/_template/run-register.sh
 	bash -n scripts/setup_simple.sh
 	bash -n scripts/doctor_secrets.sh
+	bash -n scripts/build_web_console.sh
+	bash -n scripts/deploy_web_console10.sh
 	$(PY) -m py_compile register_cli.py register_core/cli.py register_core/pipeline.py \
 	  register_core/providers/registry.py register_core/util/secrets.py \
 	  register_core/util/process.py register_core/verify/mimo_tts.py \
 	  register_core/verify/grok_chat.py providers/mimo/inject_cpa_openai.py \
-	  scripts/probe_clash_nodes.py
+	  scripts/probe_clash_nodes.py mail_pool_probe.py
 
 doctor:
 	bash scripts/doctor_secrets.sh || test $$? -eq 2
+
+build-web:
+	bash scripts/build_web_console.sh
+
+package-web: build-web
+	tar -C apps/web/dist -czf /tmp/console10-webroot.tgz .
+	@ls -la /tmp/console10-webroot.tgz
+	@echo "upload/deploy via GitHub Actions preferred; local: DRY_RUN=1 ./scripts/deploy_web_console10.sh"
 
 list:
 	./register.sh help

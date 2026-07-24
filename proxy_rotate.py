@@ -636,6 +636,10 @@ class ProxyRotator:
         self._started = False
         self._last_error = ""
         self._atexit_registered = False
+        # Refcount of mint jobs that must keep a specific clash leaf (same IP as reg).
+        # While any hold is active, rotate will not leave that node so concurrent
+        # register fail-fast cannot steal the mixed-port leaf mid-mint.
+        self._mint_holds: dict[str, int] = {}
 
     def configure(self, cfg: dict | None) -> None:
         cfg = cfg if isinstance(cfg, dict) else {}
@@ -725,6 +729,7 @@ class ProxyRotator:
             self._started = False
             self.clash_setup_done = False
             self._last_error = ""
+            self._mint_holds = {}
 
             if mode == "clash" and self.clash_restore_on_exit and not self._atexit_registered:
                 atexit.register(_atexit_restore_clash)
@@ -748,6 +753,7 @@ class ProxyRotator:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            holds = {k: v for k, v in self._mint_holds.items() if v > 0}
             return {
                 "mode": self.mode,
                 "every": self.every,
@@ -762,7 +768,118 @@ class ProxyRotator:
                 "clash_dirty": self._clash_dirty,
                 "original_clash_node": self._original_clash_node,
                 "last_error": self._last_error,
+                "mint_holds": holds,
             }
+
+    def _active_mint_holds_locked(self) -> dict[str, int]:
+        return {k: int(v) for k, v in self._mint_holds.items() if int(v) > 0}
+
+    def _primary_mint_hold_locked(self) -> str:
+        holds = self._active_mint_holds_locked()
+        if not holds:
+            return ""
+        # Prefer the most-held node; stable max for multi-mint same-leaf case.
+        return max(holds.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+    def acquire_mint_egress(self, node: str, log: LogFn = None) -> dict[str, Any]:
+        """Pin clash leaf for a mint job so reg rotate cannot change egress mid-mint."""
+        target = str(node or "").strip()
+        with self._lock:
+            if self.mode != "clash":
+                # list/off: no shared leaf switch; mint uses its own proxy URL if any
+                return {
+                    "ok": True,
+                    "mode": self.mode,
+                    "node": target,
+                    "pinned": False,
+                    "reason": "mode_not_clash",
+                }
+            if not target:
+                return {"ok": False, "mode": "clash", "reason": "empty_node"}
+            try:
+                self._ensure_clash_setup_locked(log=log)
+                nodes, now, _ = clash_list_nodes(
+                    self.clash_api,
+                    self.clash_group,
+                    secret=self.clash_secret,
+                    exclude_re=self.clash_exclude,
+                    include_re=self.clash_include,
+                )
+            except Exception as exc:
+                self._last_error = str(exc)
+                return {"ok": False, "mode": "clash", "node": target, "error": str(exc)}
+            if target not in nodes:
+                # Soft: still record hold on label for scoring; cannot pin missing leaf
+                self._mint_holds[target] = int(self._mint_holds.get(target, 0) or 0) + 1
+                self.current_label = now or self.current_label
+                _log(
+                    log,
+                    f"[*] mint_hold: node={target!r} not in pool; "
+                    f"hold recorded but leaf stays {now!r}",
+                )
+                return {
+                    "ok": False,
+                    "mode": "clash",
+                    "node": target,
+                    "now": now,
+                    "reason": "node_not_in_pool",
+                    "holds": self._active_mint_holds_locked(),
+                }
+            prev = now
+            if target != now:
+                try:
+                    clash_switch_node(
+                        self.clash_api,
+                        self.clash_group,
+                        target,
+                        secret=self.clash_secret,
+                        flush=self.clash_flush,
+                    )
+                    self._clash_dirty = True
+                except Exception as exc:
+                    self._last_error = str(exc)
+                    return {
+                        "ok": False,
+                        "mode": "clash",
+                        "node": target,
+                        "prev": prev,
+                        "error": str(exc),
+                    }
+            self.current_label = target
+            self._mint_holds[target] = int(self._mint_holds.get(target, 0) or 0) + 1
+            holds = self._active_mint_holds_locked()
+            _log(
+                log,
+                f"[*] mint_hold acquire node={target} prev={prev or '-'} "
+                f"holds={holds} group={self.clash_group}",
+            )
+            return {
+                "ok": True,
+                "mode": "clash",
+                "node": target,
+                "prev": prev,
+                "pinned": target != prev,
+                "holds": holds,
+                "group": self.clash_group,
+            }
+
+    def release_mint_egress(self, node: str, log: LogFn = None) -> dict[str, Any]:
+        """Drop one mint hold; when all holds clear, reg rotate may switch leaf again."""
+        target = str(node or "").strip()
+        with self._lock:
+            if not target:
+                return {"ok": False, "reason": "empty_node"}
+            cur = int(self._mint_holds.get(target, 0) or 0)
+            if cur <= 1:
+                self._mint_holds.pop(target, None)
+            else:
+                self._mint_holds[target] = cur - 1
+            holds = self._active_mint_holds_locked()
+            _log(
+                log,
+                f"[*] mint_hold release node={target} remaining={holds or '{}'}",
+            )
+            return {"ok": True, "node": target, "holds": holds}
 
     def _due_locked(self, *, force: bool) -> bool:
         if self.mode == "off":
@@ -806,13 +923,34 @@ class ProxyRotator:
         except Exception:
             pass
 
-    def _rotate_list_locked(self) -> dict[str, Any]:
+    def _rotate_list_locked(self, cfg: dict | None = None) -> dict[str, Any]:
         if not self.list_pool:
             raise RuntimeError("proxy_rotate_mode=list 但 proxy_list 为空")
-        if self._started or self.accounts_on_current > 0:
-            self.list_index = (self.list_index + 1) % len(self.list_pool)
-        proxy = self.list_pool[self.list_index]
         prev = self.current_proxy
+        pick_reason = "round_robin"
+        # First claim keeps pool[0] (symmetric to clash on_start_keep_current).
+        if not self._started and self.accounts_on_current == 0:
+            self.list_index = 0
+            proxy = self.list_pool[0]
+        else:
+            nxt = ""
+            try:
+                import node_score as _ns
+
+                if _ns.scoring_enabled(cfg):
+                    nxt = _ns.pick_next(
+                        self.list_pool, prev or self.list_pool[0], cfg=cfg
+                    )
+                    pick_reason = "node_score"
+            except Exception:
+                nxt = ""
+            if nxt and nxt in self.list_pool:
+                self.list_index = self.list_pool.index(nxt)
+                proxy = nxt
+            else:
+                self.list_index = (self.list_index + 1) % len(self.list_pool)
+                proxy = self.list_pool[self.list_index]
+                pick_reason = "round_robin"
         self.current_proxy = proxy
         self.current_label = proxy_log_label(proxy) or proxy
         return {
@@ -824,10 +962,15 @@ class ProxyRotator:
             "pool_size": len(self.list_pool),
             "prev": proxy_log_label(prev) or prev,
             "scope": "browser_only",
+            "pick": pick_reason,
         }
 
     def _rotate_clash_locked(
-        self, log: LogFn = None, *, force_advance: bool = False
+        self,
+        log: LogFn = None,
+        *,
+        force_advance: bool = False,
+        cfg: dict | None = None,
     ) -> dict[str, Any]:
         self._ensure_clash_setup_locked(log=log)
         # hard guard again
@@ -897,13 +1040,61 @@ class ProxyRotator:
                 "original": self._original_clash_node,
             }
 
+        # Mint holds freeze the leaf so concurrent reg fail-fast cannot steal
+        # the shared mixed-port egress while a mint browser/token-poll runs.
+        hold = self._primary_mint_hold_locked()
+        if hold and hold in nodes:
+            if hold != now:
+                try:
+                    clash_switch_node(
+                        self.clash_api,
+                        self.clash_group,
+                        hold,
+                        secret=self.clash_secret,
+                        flush=self.clash_flush,
+                    )
+                    self._clash_dirty = True
+                except Exception as exc:
+                    self._last_error = str(exc)
+                    _log(log, f"[!] mint_hold re-pin failed: {exc}")
+            self.current_label = hold
+            return {
+                "rotated": hold != now,
+                "mode": "clash",
+                "label": hold,
+                "node": hold,
+                "prev": now,
+                "reason": "mint_hold",
+                "group": self.clash_group,
+                "pool_size": len(nodes),
+                "domains": list(self.clash_domains),
+                "proxy": proxy_log_label(self.current_proxy) or self.current_proxy,
+                "scope": "domain_rules_only",
+                "will_restore": self.clash_restore_on_exit,
+                "original": self._original_clash_node,
+                "holds": self._active_mint_holds_locked(),
+            }
+
+        # Prefer scored pick (NODE_SCORE / node_score_enabled); fall back round-robin.
+        nxt = ""
+        pick_reason = "round_robin"
         try:
-            idx = nodes.index(now)
-            nxt = nodes[(idx + 1) % len(nodes)]
-        except ValueError:
-            nxt = nodes[0]
-            if nxt == now and len(nodes) > 1:
-                nxt = nodes[1]
+            import node_score as _ns  # local module; optional at runtime
+
+            if _ns.scoring_enabled(cfg):
+                nxt = _ns.pick_next(nodes, now, cfg=cfg)
+                pick_reason = "node_score"
+        except Exception:
+            nxt = ""
+        if not nxt or nxt not in nodes:
+            try:
+                idx = nodes.index(now)
+                nxt = nodes[(idx + 1) % len(nodes)]
+            except ValueError:
+                nxt = nodes[0]
+                if nxt == now and len(nodes) > 1:
+                    nxt = nodes[1]
+            pick_reason = "round_robin"
         if nxt == now:
             self.current_label = now
             return {
@@ -937,6 +1128,7 @@ class ProxyRotator:
             "scope": "domain_rules_only",
             "will_restore": self.clash_restore_on_exit,
             "original": self._original_clash_node,
+            "pick": pick_reason,
         }
 
     def maybe_rotate(
@@ -967,10 +1159,12 @@ class ProxyRotator:
 
             try:
                 if self.mode == "list":
-                    result = self._rotate_list_locked()
+                    result = self._rotate_list_locked(cfg=config)
                 else:
                     # force=True (fail-fast): advance even on first call / same every window
-                    result = self._rotate_clash_locked(log=log, force_advance=bool(force))
+                    result = self._rotate_clash_locked(
+                        log=log, force_advance=bool(force), cfg=config
+                    )
                 self._last_error = ""
             except Exception as exc:
                 self._last_error = str(exc)
@@ -1098,3 +1292,51 @@ def current_proxy_override() -> str:
         if _rotator.mode == "list" and _rotator.current_proxy:
             return _rotator.current_proxy
         return ""
+
+
+def current_egress_label() -> str:
+    """Best-effort current node/proxy label for scoring attribution."""
+    with _rotator._lock:
+        if _rotator.mode == "clash":
+            return str(_rotator.current_label or "").strip()
+        if _rotator.mode == "list":
+            return (
+                proxy_log_label(_rotator.current_proxy)
+                or _rotator.current_label
+                or _rotator.current_proxy
+                or ""
+            )
+        return str(_rotator.current_label or "").strip()
+
+
+def acquire_mint_egress(node: str, log: LogFn = None) -> dict[str, Any]:
+    """Hold clash leaf for one mint job (same IP as registration for that account)."""
+    return _rotator.acquire_mint_egress(node, log=log)
+
+
+def release_mint_egress(node: str, log: LogFn = None) -> dict[str, Any]:
+    """Release one mint leaf hold after mint finishes (ok or fail)."""
+    return _rotator.release_mint_egress(node, log=log)
+
+
+def note_egress_outcome(
+    kind: str,
+    *,
+    node: str | None = None,
+    log: LogFn = None,
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """Record success/fail for dynamic weight. No-op when NODE_SCORE off or import fails.
+
+    kind: mint_ok | reg_ok | turnstile | browser_boot | other_fail
+    """
+    label = (node or "").strip() or current_egress_label()
+    if not label:
+        return {"ok": False, "reason": "no_label"}
+    try:
+        import node_score as _ns
+
+        return _ns.record(label, kind, cfg=config, log=log)
+    except Exception as exc:
+        _log(log, f"[node_score] record skip: {exc}")
+        return {"ok": False, "reason": str(exc)}
