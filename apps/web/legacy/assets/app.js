@@ -1543,6 +1543,66 @@
     }
   }
 
+  function clashSubPayload(forceDryRun) {
+    const url = ($("#clash-sub-url")?.value || "").trim();
+    const group = ($("#clash-sub-group")?.value || "🎯Grok注册").trim();
+    const prefix = ($("#clash-sub-prefix")?.value || "SUB").trim() || "SUB";
+    const mode = ($("#clash-sub-mode")?.value || "merge").trim() || "merge";
+    const dry = forceDryRun ? true : !!$("#clash-sub-dry")?.checked;
+    const reload = !!$("#clash-sub-reload")?.checked;
+    return { url, group, prefix, mode, dry_run: dry, reload };
+  }
+
+  async function importClashSubscription(forceDryRun) {
+    const pre = $("#clash-sub-result");
+    const btn = forceDryRun ? $("#clash-sub-preview") : $("#clash-sub-import");
+    const body = clashSubPayload(forceDryRun);
+    if (!body.url) {
+      setResult(pre, "请填写订阅 URL", "err");
+      showOpsFeedback("订阅导入：缺少 URL", "err");
+      return;
+    }
+    setBusy(btn, true, forceDryRun ? "预检中…" : "导入中…");
+    setResult(pre, forceDryRun ? "预检中…" : "导入中…", "info");
+    try {
+      const data = await api("/api/nodes/clash/import-url", {
+        method: "POST",
+        headers: headers(true),
+        body: JSON.stringify(body),
+      });
+      const kind = data && data.ok ? (data.warning ? "warn" : "ok") : "err";
+      setResult(pre, data, kind);
+      const t = (data && data.timings) || {};
+      const timingBit =
+        t.total_ms != null
+          ? ` · ${t.total_ms}ms` +
+            (t.fetch_ms != null
+              ? ` (fetch ${t.fetch_ms}/parse ${t.parse_ms || 0}/write ${t.write_ms || 0})`
+              : "")
+          : data && data.ms != null
+            ? ` · ${data.ms}ms`
+            : "";
+      const msg =
+        ((data && data.message) ||
+          (data && data.ok
+            ? forceDryRun
+              ? `预检成功：${(data.parse && data.parse.imported) || "?"} 节点`
+              : "导入成功"
+            : (data && (data.detail || data.error)) || "导入失败")) +
+        (String((data && data.message) || "").includes("ms") ? "" : timingBit);
+      showOpsFeedback(msg, kind);
+      if (data && data.ok && !data.dry_run) {
+        await refreshClash();
+      }
+    } catch (e) {
+      if (e.status === 401) return showGate(true);
+      setResult(pre, String(e.message || e), "err");
+      showOpsFeedback(`订阅导入失败：${e.message || e}`, "err");
+    } finally {
+      setBusy(btn, false);
+    }
+  }
+
   // ── Wire ────────────────────────────────────────────────────────────────
   if ($("#token")) {
     $("#token").value = sessionStorage.getItem(tokenKey) || "";
@@ -1663,6 +1723,8 @@
   $("#clash-refresh")?.addEventListener("click", refreshClash);
   $("#clash-test-pool")?.addEventListener("click", () => clashTest(80, true));
   $("#clash-test-all")?.addEventListener("click", () => clashTest(40, false));
+  $("#clash-sub-preview")?.addEventListener("click", () => importClashSubscription(true));
+  $("#clash-sub-import")?.addEventListener("click", () => importClashSubscription(false));
   $("#clash-filter")?.addEventListener("change", () => {
     if (clashCache) renderClashTable(clashCache);
     else refreshClash();

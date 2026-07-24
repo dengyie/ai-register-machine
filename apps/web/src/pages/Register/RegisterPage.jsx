@@ -27,6 +27,7 @@ import {
 } from "../../store/run.js";
 import { RegForm } from "./RegForm.jsx";
 import { RunProgress } from "./RunProgress.jsx";
+import { formatApiError as formatApiErrorShared } from "../../lib/format.js";
 import "../../styles/run.css";
 
 // Initial form state (also used before config loads). Mirrors legacy defaults.
@@ -67,14 +68,13 @@ function providerKeyField(provider) {
 
 function formatApiError(e) {
   if (!e) return "未知错误";
-  const msg = String(e.message || e);
   if (e.status === 409) {
+    const msg = String(e.message || e);
     return `已有任务在跑（${msg}）。首页会显示当前 progress；如需停请用「停止」（会杀外部 supervisor）。`;
   }
   if (e.status === 401) return "未登录或会话过期，请重新登录。";
-  if (e.status === 422) return `参数校验失败: ${msg}`;
-  if (e.status) return `HTTP ${e.status}: ${msg}`;
-  return msg;
+  if (e.status === 422) return `参数校验失败: ${formatApiErrorShared(e)}`;
+  return formatApiErrorShared(e);
 }
 
 function snapshotFormFromConfig(c, prev) {

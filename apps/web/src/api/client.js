@@ -42,8 +42,29 @@ export async function api(path, opts = {}) {
     body = { detail: text };
   }
   if (!res.ok) {
-    const detail = body.detail || res.statusText;
-    const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const detail = body.detail || body.error || body.message || res.statusText;
+    let msg =
+      typeof detail === "string"
+        ? detail
+        : detail != null
+          ? JSON.stringify(detail)
+          : res.statusText;
+    // Never keep multi-KB Cloudflare HTML in Error.message — toast/banner explode.
+    if (
+      msg.length > 280 ||
+      /<!DOCTYPE\s+html/i.test(msg) ||
+      /<html[\s>]/i.test(msg)
+    ) {
+      const title = (msg.match(/<title[^>]*>([^<]+)<\/title>/i) || [])[1] || "";
+      const codeM = msg.match(/Error code\s+(\d{3})/i);
+      const code = codeM ? codeM[1] : String(res.status);
+      if (String(code) === "524" || /timeout occurred/i.test(msg)) {
+        msg = `网关超时 (Cloudflare 524)：源站处理过久未响应${title ? ` · ${title}` : ""}`;
+      } else {
+        msg = `HTTP ${code}: ${(title || "源站错误页").replace(/\s*\|\s*.*$/, "").trim()}`;
+      }
+    }
+    const err = new Error(msg);
     err.status = res.status;
     throw err;
   }
@@ -122,6 +143,18 @@ export const importClashUrl = (body) =>
     headers: headers(true),
     body: JSON.stringify(body),
   });
+export const deleteClashPrefix = (body) =>
+  api("/api/nodes/clash/delete-prefix", {
+    method: "POST",
+    headers: headers(true),
+    body: JSON.stringify(body),
+  });
+export const pruneClashUnhealthy = (body) =>
+  api("/api/nodes/clash/prune-unhealthy", {
+    method: "POST",
+    headers: headers(true),
+    body: JSON.stringify(body),
+  });
 export const listCatalog = (qs) => api(`/api/nodes?${qs}`);
 export const addCatalogNode = (body) =>
   api("/api/nodes", {
@@ -159,4 +192,19 @@ export const cleanupOrphans = () =>
   api("/api/ops/cleanup-orphans?dry_run=false", {
     method: "POST",
     headers: headers(true),
+  });
+
+// Mail pool probe
+export const mailPoolStats = () => api("/api/mail/pool");
+export const probeMail = (body) =>
+  api("/api/mail/probe", {
+    method: "POST",
+    headers: headers(true),
+    body: JSON.stringify(body || {}),
+  });
+export const quarantineMail = (body) =>
+  api("/api/mail/quarantine", {
+    method: "POST",
+    headers: headers(true),
+    body: JSON.stringify(body || {}),
   });

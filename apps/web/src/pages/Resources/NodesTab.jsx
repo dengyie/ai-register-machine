@@ -50,6 +50,20 @@ const CLASH_FILTER = [
   { value: "fail", label: "仅失败" },
 ];
 
+// Must match apps.control_api.nodes_ops.IMPORTABLE_GROUPS (register-relevant first).
+const IMPORT_POOL_OPTS = [
+  { value: "🎯Grok注册", label: "🎯Grok注册 · 注册主池（推荐）" },
+  { value: "♻️Grok优选", label: "♻️Grok优选" },
+  { value: "PROXY", label: "PROXY" },
+  { value: "🔰ChatGPT", label: "🔰ChatGPT" },
+  { value: "GROK-REG", label: "GROK-REG · 域名隔离组" },
+];
+
+const IMPORT_MODE_OPTS = [
+  { value: "merge", label: "merge · 追加/同名覆盖" },
+  { value: "replace_prefix", label: "replace_prefix · 替换同前缀" },
+];
+
 const HEALTH_OPTS = [
   { value: "", label: "全部" },
   { value: "ok", label: "可用" },
@@ -77,7 +91,14 @@ export function NodesTab() {
   const [clashResult, setClashResult] = useState("");
   const [busy, setBusy] = useState("");
   const [importUrl, setImportUrl] = useState("");
-  const [importDry, setImportDry] = useState(true);
+  // Default real import (write + reload). dry-run is opt-in via checkbox.
+  const [importDry, setImportDry] = useState(false);
+  const [importGroup, setImportGroup] = useState("🎯Grok注册");
+  const [importMode, setImportMode] = useState("merge");
+  const [importPrefix, setImportPrefix] = useState("SUB");
+  // Pool health: independent from subscription import prefix/mode.
+  const [poolTarget, setPoolTarget] = useState("🎯Grok注册");
+  const [lastPoolProbe, setLastPoolProbe] = useState(null);
 
   // catalog state
   const [cat, setCat] = useState(null);
@@ -149,10 +170,23 @@ export function NodesTab() {
     return filterClashLeaves(clash.leaves || [], clashFilter, clashQ);
   }, [clash, clashFilter, clashQ]);
 
+  function namesInPool(listing, groupName, limit = 120) {
+    const g = (groupName || "").trim();
+    const leaves = (listing && listing.leaves) || [];
+    let names = leaves
+      .filter((x) => Array.isArray(x.groups) && x.groups.includes(g))
+      .map((x) => x.name);
+    // fallback: register-pool flag when group is a known register group
+    if (!names.length && (g.includes("Grok") || g.includes("GROK") || g === "PROXY")) {
+      names = leaves.filter((x) => x.in_register_pool).map((x) => x.name);
+    }
+    return names.slice(0, Math.max(1, limit));
+  }
+
   async function clashTestOne(name) {
     setClashResult("testing…");
     try {
-      const r = await api.testClash({ names: [name] });
+      const r = await api.testClash({ names: [name], timeout_ms: 4000, limit: 1 });
       setClashResult(pretty(r));
       await refreshClash();
     } catch (e) {
@@ -168,19 +202,175 @@ export function NodesTab() {
       let names = null;
       if (poolOnly) {
         const listing = clash || (await api.listClash());
-        names = (listing.leaves || [])
-          .filter((x) => x.in_register_pool)
-          .map((x) => x.name);
+        names = namesInPool(listing, "🎯Grok注册", limit || 120);
+        if (!names.length) {
+          names = (listing.leaves || [])
+            .filter((x) => x.in_register_pool)
+            .map((x) => x.name)
+            .slice(0, limit || 120);
+        }
       }
       const body = names
-        ? { names, limit: names.length || 40 }
-        : { limit: limit || 40 };
+        ? { names, limit: names.length || 40, timeout_ms: 4000 }
+        : { limit: limit || 40, timeout_ms: 4000 };
       const data = await api.testClash(body);
       setClashResult(pretty(data));
+      showOpsFeedback(
+        data.ok
+          ? `测活完成 · 测 ${data.tested || 0} · 通 ${data.healthy || 0}`
+          : `测活失败: ${(data && (data.error || data.message)) || "unknown"}`,
+        data.ok ? "ok" : "err",
+      );
       await refreshClash();
     } catch (e) {
       if (auth(e)) return;
       setClashResult(String(e.message || e));
+      showOpsFeedback(`测活失败: ${formatApiError(e)}`, "err");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function doPoolDelayTest() {
+    const group = (poolTarget || "").trim() || "🎯Grok注册";
+    setBusy("pool-test");
+    setClashResult("testing pool…");
+    try {
+      const listing = clash || (await api.listClash());
+      const names = namesInPool(listing, group, 120);
+      if (!names.length) {
+        showOpsFeedback(`池「${group}」里没有可测叶子节点`, "warn");
+        setClashResult(pretty({ ok: false, error: "empty_pool", group }));
+        return;
+      }
+      const data = await api.testClash({
+        names,
+        limit: names.length,
+        timeout_ms: 4000,
+      });
+      setClashResult(pretty(data));
+      const tested = data.tested != null ? data.tested : 0;
+      const healthy = data.healthy != null ? data.healthy : 0;
+      const dead = Math.max(0, tested - healthy);
+      setLastPoolProbe({
+        group,
+        tested,
+        healthy,
+        dead,
+        ms: data.ms,
+        at: Date.now(),
+      });
+      showOpsFeedback(
+        data.ok
+          ? `池测活「${group}」· 测 ${tested} · 通 ${healthy} · 不通 ${dead}${data.ms != null ? ` · ${data.ms}ms` : ""}`
+          : `池测活失败: ${(data && (data.error || data.message)) || "unknown"}`,
+        data.ok ? "ok" : "err",
+      );
+      await refreshClash();
+    } catch (e) {
+      if (auth(e)) return;
+      setClashResult(String(e.message || e));
+      showOpsFeedback(`池测活失败: ${formatApiError(e)}`, "err");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function doPoolDeleteDead() {
+    const group = (poolTarget || "").trim() || "🎯Grok注册";
+    if (
+      !window.confirm(
+        `确认对「${group}」测活，并删除其中不通的节点？\n\n会从 Clash YAML 去掉不通节点的定义与组引用，然后热重载。\n不影响正在跑的 batch / coinbot 进程。`,
+      )
+    ) {
+      return;
+    }
+    setBusy("pool-prune");
+    try {
+      const data = await api.pruneClashUnhealthy({
+        prefix: "",
+        group,
+        dry_run: false,
+        reload: true,
+        delete_defs: true,
+        timeout_ms: 4000,
+        limit: 120,
+      });
+      setClashResult(pretty(data));
+      const dead =
+        data.unhealthy != null
+          ? data.unhealthy
+          : data.would_remove != null
+            ? data.would_remove
+            : 0;
+      const tested = data.tested != null ? data.tested : 0;
+      const healthy = data.healthy != null ? data.healthy : Math.max(0, tested - dead);
+      setLastPoolProbe({
+        group,
+        tested,
+        healthy,
+        dead,
+        removed: data.removed != null ? data.removed : dead,
+        ms: data.ms,
+        at: Date.now(),
+      });
+      showOpsFeedback(
+        data.ok
+          ? `已删不通「${group}」· 测 ${tested} · 不通 ${dead} · 删除 ${data.removed != null ? data.removed : dead}`
+          : `删除不通失败: ${(data && (data.detail || data.error || data.message)) || "unknown"}`,
+        data.ok ? "ok" : "err",
+      );
+      if (data.ok) await refreshClash();
+    } catch (e) {
+      if (auth(e)) return;
+      setClashResult(String(e.message || e));
+      showOpsFeedback(`删除不通失败: ${formatApiError(e)}`, "err");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function doPoolPreviewDead() {
+    const group = (poolTarget || "").trim() || "🎯Grok注册";
+    setBusy("pool-preview");
+    try {
+      const data = await api.pruneClashUnhealthy({
+        prefix: "",
+        group,
+        dry_run: true,
+        reload: false,
+        delete_defs: true,
+        timeout_ms: 4000,
+        limit: 120,
+      });
+      setClashResult(pretty(data));
+      const dead =
+        data.unhealthy != null
+          ? data.unhealthy
+          : data.would_remove != null
+            ? data.would_remove
+            : 0;
+      const tested = data.tested != null ? data.tested : 0;
+      const healthy = data.healthy != null ? data.healthy : Math.max(0, tested - dead);
+      setLastPoolProbe({
+        group,
+        tested,
+        healthy,
+        dead,
+        preview: true,
+        ms: data.ms,
+        at: Date.now(),
+      });
+      showOpsFeedback(
+        data.ok
+          ? `预检「${group}」· 测 ${tested} · 通 ${healthy} · 将删 ${dead}（未写盘）`
+          : `预检失败: ${(data && (data.detail || data.error || data.message)) || "unknown"}`,
+        data.ok ? "ok" : "err",
+      );
+    } catch (e) {
+      if (auth(e)) return;
+      setClashResult(String(e.message || e));
+      showOpsFeedback(`预检失败: ${formatApiError(e)}`, "err");
     } finally {
       setBusy("");
     }
@@ -192,9 +382,22 @@ export function NodesTab() {
       showOpsFeedback("请填写订阅 URL", "warn");
       return;
     }
+    const group = (importGroup || "").trim() || "🎯Grok注册";
+    const prefix = (importPrefix || "").trim() || "SUB";
+    const mode = (importMode || "merge").trim() || "merge";
     setBusy("import");
     try {
-      const body = { url, dry_run: importDry };
+      // Backend: group + groups — we send both so the chosen pool is explicit
+      // (default alone used to look like "whatever is in YAML" when UI omitted it).
+      const body = {
+        url,
+        dry_run: importDry,
+        group,
+        groups: [group],
+        prefix,
+        mode,
+        reload: !importDry,
+      };
       const data = await api.importClashUrl(body);
       setClashResult(pretty(data));
       const ms =
@@ -202,11 +405,20 @@ export function NodesTab() {
           ? data.total_ms
           : data.timings && data.timings.total_ms;
       const msTxt = ms != null ? ` · ${Math.round(ms)}ms` : "";
+      const poolTxt = (data.groups && data.groups.join(",")) || group;
+      const n =
+        (data.parse && data.parse.imported) != null
+          ? data.parse.imported
+          : data.ok
+            ? "?"
+            : 0;
       showOpsFeedback(
-        `Clash 导入${importDry ? " dry-run" : ""}完成${msTxt}`,
-        "ok",
+        data.ok
+          ? `Clash 导入${importDry ? " dry-run" : ""} · ${n} 节点 → 池 ${poolTxt}${msTxt}`
+          : `导入失败: ${(data && (data.detail || data.error || data.message)) || "unknown"}`,
+        data.ok ? "ok" : "err",
       );
-      if (!importDry) await refreshClash();
+      if (!importDry && data.ok) await refreshClash();
     } catch (e) {
       if (auth(e)) return;
       setClashResult(String(e.message || e));
@@ -342,6 +554,10 @@ export function NodesTab() {
 
           <div class="card">
             <h2>订阅导入</h2>
+            <p class="hint" style={{ marginTop: 0 }}>
+              节点会写入 Clash YAML 的<strong>指定策略组（池子）</strong>叶子列表。
+              注册批跑用的是「🎯Grok注册 / ♻️Grok优选」等注册相关组；不要选无关主策略组。
+            </p>
             <div class="actions-bar wrap">
               <input
                 class="grow"
@@ -349,22 +565,109 @@ export function NodesTab() {
                 placeholder="https://… subscription URL"
                 onInput={(e) => setImportUrl(e.currentTarget.value)}
               />
+            </div>
+            <div class="actions-bar wrap">
+              <label class="inline">
+                目标池{" "}
+                <Select
+                  value={importGroup}
+                  options={IMPORT_POOL_OPTS}
+                  onChange={setImportGroup}
+                />
+              </label>
+              <label class="inline">
+                模式{" "}
+                <Select
+                  value={importMode}
+                  options={IMPORT_MODE_OPTS}
+                  onChange={setImportMode}
+                />
+              </label>
+              <label class="inline">
+                前缀{" "}
+                <input
+                  style={{ width: "6rem" }}
+                  value={importPrefix}
+                  title="节点名前缀，replace_prefix 时按此前缀清理旧订阅"
+                  onInput={(e) => setImportPrefix(e.currentTarget.value)}
+                />
+              </label>
               <label class="check">
                 <input
                   type="checkbox"
                   checked={importDry}
                   onChange={(e) => setImportDry(e.currentTarget.checked)}
                 />{" "}
-                dry-run
+                仅预检（不写盘）
               </label>
               <Button
-                variant="ghost"
+                variant="primary"
                 busy={busy === "import"}
                 onClick={doImportUrl}
               >
-                导入 URL
+                {importDry ? "预检" : "导入"}
               </Button>
             </div>
+            <p class="hint">
+              当前目标：<code>{importGroup || "🎯Grok注册"}</code>
+              {" · "}
+              {importMode}
+              {" · "}
+              prefix=<code>{importPrefix || "SUB"}</code>
+              {importDry ? " · 仅预检不写盘" : " · 导入到所选池并热重载"}
+            </p>
+          </div>
+
+          <div class="card">
+            <h2>池测活 / 删不通</h2>
+            <p class="hint" style={{ marginTop: 0 }}>
+              选一个策略组（节点池）→ 先<strong>测活</strong>看延迟，或
+              <strong>一键删除不通</strong>（delay 失败的节点从 YAML 去掉并热重载）。
+              不影响 batch / coinbot 进程。单次最多测/删约 120 个。
+            </p>
+            <div class="actions-bar wrap">
+              <label class="inline">
+                节点池{" "}
+                <Select
+                  value={poolTarget}
+                  options={IMPORT_POOL_OPTS}
+                  onChange={setPoolTarget}
+                />
+              </label>
+              <Button
+                variant="primary"
+                busy={busy === "pool-test"}
+                onClick={doPoolDelayTest}
+              >
+                测活该池
+              </Button>
+              <Button
+                variant="ghost"
+                busy={busy === "pool-preview"}
+                onClick={doPoolPreviewDead}
+              >
+                预检将删多少
+              </Button>
+              <Button
+                variant="danger"
+                busy={busy === "pool-prune"}
+                onClick={doPoolDeleteDead}
+              >
+                删除不通节点
+              </Button>
+            </div>
+            <p class="hint">
+              当前池：<code>{poolTarget || "🎯Grok注册"}</code>
+              {lastPoolProbe && lastPoolProbe.group === poolTarget
+                ? ` · 上次：测 ${lastPoolProbe.tested} · 通 ${lastPoolProbe.healthy} · 不通 ${lastPoolProbe.dead}${
+                    lastPoolProbe.preview
+                      ? "（预检未写盘）"
+                      : lastPoolProbe.removed != null
+                        ? ` · 已删 ${lastPoolProbe.removed}`
+                        : ""
+                  }${lastPoolProbe.ms != null ? ` · ${lastPoolProbe.ms}ms` : ""}`
+                : " · 尚未测活"}
+            </p>
           </div>
 
           <div class="card">

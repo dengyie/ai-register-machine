@@ -126,6 +126,89 @@
   margin-bottom: 0;
 }
 
+.mail-probe-kpis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  margin: 0.5rem 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.mail-probe-kpis strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.mail-domain-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.75rem;
+  align-items: center;
+}
+
+.mail-probe-controls {
+  margin: 0.35rem 0 0.75rem;
+  gap: 0.55rem;
+}
+
+.mail-probe-results .table-wrap {
+  overflow: auto;
+  max-height: 28rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.mail-probe-results table.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.mail-probe-results table.data-table th,
+.mail-probe-results table.data-table td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.mail-probe-results table.data-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.mail-probe-results tr.dead td {
+  background: rgba(212, 91, 91, 0.06);
+}
+
+.mail-probe-results tr.soft td {
+  background: rgba(212, 180, 91, 0.07);
+}
+
+.mail-probe-results .badge.ok {
+  color: #7dcea0;
+}
+
+.mail-probe-results .badge.bad {
+  color: #f0a0a0;
+}
+
+.mail-probe-results .badge.soft {
+  color: #e0c070;
+}
+
+.mail-probe-results td.muted {
+  color: var(--muted);
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .resources-tab label.check {
   display: flex;
   align-items: center;
