@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 from pathlib import Path
@@ -350,6 +351,12 @@ def test_start_popen_argv(tmp_path: Path, monkeypatch):
         "apps.control_api.process_registry.ProcessRegistry.pid_alive",
         staticmethod(lambda pid: pid == 555),
     )
+    # Stale process env must lose to config.json (console source of truth).
+    monkeypatch.setenv("EMAIL_PROVIDER", "cloudflare")
+    (tmp_path / "config.json").write_text(
+        json.dumps({"email_provider": "hotmail", "email_provider_strategy": "round_robin"}),
+        encoding="utf-8",
+    )
     result = start_run(
         tmp_path,
         StartRunRequest(
@@ -368,11 +375,63 @@ def test_start_popen_argv(tmp_path: Path, monkeypatch):
     assert captured["argv"][4] == "1"
     assert captured["argv"][5] == "batch_web"
     assert captured["kwargs"].get("start_new_session") is True
+    child_env = captured["kwargs"].get("env") or {}
+    assert child_env.get("EMAIL_PROVIDER") == "hotmail"
+    assert child_env.get("EMAIL_PROVIDER_STRATEGY") == "round_robin"
+    assert child_env.get("NODE_SCORE") == "1"
     # Parent log handle closed after successful Popen (child keeps its dup).
     assert closed["n"] == 1
     meta = result["run"]["meta"]
     assert meta.get("process_group") is True
     assert meta.get("pgid") == 555
+
+
+def test_start_run_extra_env_overrides_config(tmp_path: Path, monkeypatch):
+    """Request extra_env wins over config.json for one-shot experiments."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "launch_batch_supervisor.sh").write_text(
+        "#!/bin/bash\n", encoding="utf-8"
+    )
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "config.json").write_text(
+        json.dumps({"email_provider": "hotmail"}),
+        encoding="utf-8",
+    )
+
+    class FakeProc:
+        pid = 556
+
+        def poll(self):
+            return None
+
+    captured: dict = {}
+
+    class FakeFile:
+        def close(self):
+            pass
+
+    def fake_popen(argv, **kwargs):
+        captured["env"] = kwargs.get("env") or {}
+        return FakeProc()
+
+    monkeypatch.setattr("apps.control_api.runs.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("apps.control_api.runs.supervisor_lock_held", lambda: False)
+    monkeypatch.setattr("apps.control_api.runs.time.sleep", lambda _s: None)
+    monkeypatch.setattr("builtins.open", lambda *_a, **_k: FakeFile())
+    monkeypatch.setattr(
+        "apps.control_api.process_registry.ProcessRegistry.pid_alive",
+        staticmethod(lambda pid: pid == 556),
+    )
+    start_run(
+        tmp_path,
+        StartRunRequest(
+            kind="grok_supervisor",
+            target=10,
+            tag="t",
+            extra_env={"EMAIL_PROVIDER": "cloudflare"},
+        ),
+    )
+    assert captured["env"].get("EMAIL_PROVIDER") == "cloudflare"
 
 
 def test_run_status_flattens_recent_writes(tmp_path: Path):

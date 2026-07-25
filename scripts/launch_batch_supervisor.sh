@@ -56,12 +56,19 @@ RES_CREDS=(
 )
 RES_HOST=us.1024proxy.io:3000
 
+# Load .env as defaults only — never clobber keys already set by the control
+# plane (start_run injects config.json → env) or the parent shell.
+# Previously this overwrote EMAIL_PROVIDER etc., so console hotmail lost to a
+# stale .env cloudflare line and the batch kept minting temp-mail addresses.
 if [[ -f .env ]]; then
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ""|\#*) continue ;; esac
     key=${line%%=*}
     val=${line#*=}
-    export "$key=$val"
+    # Skip if parent/control already exported this key (including empty).
+    if [[ -n "${key}" && -z "${!key+x}" ]]; then
+      export "$key=$val"
+    fi
   done < .env
 fi
 
@@ -93,6 +100,28 @@ then
   BATCH_CPA_INJECT_INTENT=true
 fi
 
+# Fallback only when neither control plane, parent, nor .env set a provider.
+# Prefer config.json over the historical cloudflare hard-default so a console
+# save that only touched config still wins on bare CLI launches.
+if [[ -z "${EMAIL_PROVIDER:-}" ]]; then
+  if [[ -f config.json ]]; then
+    _cfg_ep=$(.venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+try:
+    c = json.loads(Path("config.json").read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+v = str(c.get("email_provider") or "").strip()
+if v:
+    print(v)
+PY
+)
+    if [[ -n "${_cfg_ep}" ]]; then
+      export EMAIL_PROVIDER="${_cfg_ep}"
+    fi
+  fi
+fi
 export EMAIL_PROVIDER=${EMAIL_PROVIDER:-cloudflare}
 export CPA_EXPORT_ENABLED=true
 export CPA_PROBE_CHAT=false
@@ -424,10 +453,28 @@ while true; do
   # slot-retry>=1: browser_boot/ERR_CONNECTION_CLOSED can force-rotate + retry
   # (ordinary/clash only; residential rotate=off → force-rotate is a no-op).
   SLOT_RETRY=${ACCOUNT_SLOT_RETRY:-2}
+  # Fingerprint: off|light|anon.
+  # light/anon UA pool major must match CFT Chromium (149); spoofed older majors
+  # break Turnstile passive tokens. anon = light + hard recycle every account
+  # (fresh auto_port profile; no --incognito).
+  # Override: BROWSER_FINGERPRINT_MODE=off|light|anon
+  # Default off: known-good Turnstile path on pxed (anon was 0/N token_len=0).
+  FP_MODE=${BROWSER_FINGERPRINT_MODE:-off}
+  case "$FP_MODE" in
+    off|light|anon) ;;
+    anonymous|incognito|guest|private) FP_MODE=anon ;;
+    *) FP_MODE=off ;;
+  esac
+  # anon forces hard recycle inside register_cli; hybrid only applies for off/light.
+  RECYCLE_MODE=${BROWSER_RECYCLE_MODE:-hybrid}
+  if [[ "$FP_MODE" == "anon" ]]; then
+    RECYCLE_MODE=hard
+  fi
   xvfb-run -a -s "-screen 0 1280x900x24 -ac +extension GLX +render -noreset" \
     python -u register_cli.py --extra "$chunk" --threads "$THREADS" --no-headless --fast \
       --account-slot-retry "$SLOT_RETRY" \
-      --browser-recycle-mode hybrid \
+      --browser-recycle-mode "$RECYCLE_MODE" \
+      --browser-fingerprint-mode "$FP_MODE" \
       --proxy-rotate "$PROXY_ROTATE_CLI" --proxy-rotate-every "$PROXY_ROTATE_EVERY_CLI" \
     >"$SUB_LOG" 2>&1
   code=$?

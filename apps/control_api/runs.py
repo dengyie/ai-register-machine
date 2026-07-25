@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+from apps.control_api.config_io import ENV_ALLOWLIST, config_to_env_map, load_config
 from apps.control_api.process_registry import (
     ProcessRegistry,
     stop_pid,
@@ -20,20 +21,8 @@ from apps.control_api.process_registry import (
 from apps.control_api.progress import build_progress
 from apps.control_api.schemas import StartRunRequest
 
-EXTRA_ENV_ALLOWLIST = frozenset(
-    {
-        "SKIP_CLASH_PREFLIGHT",
-        "CPA_PROBE_CHAT",
-        "CPA_BATCH_END_INJECT",
-        "CPA_BATCH_IMPORT_EVERY",
-        "CPA_BATCH_IMPORT_SIZE",
-        "CPA_BATCH_IMPORT_PAUSE",
-        "SUPERVISOR_CHUNK",
-        "EMAIL_PROVIDER",
-        "DEFAULT_DOMAINS",
-        "NODE_SCORE",
-    }
-)
+# Request extra_env may only set allowlisted operational keys (same set as .env sync).
+EXTRA_ENV_ALLOWLIST = frozenset(ENV_ALLOWLIST)
 
 
 def filter_extra_env(extra: dict[str, str] | None) -> dict[str, str]:
@@ -44,6 +33,15 @@ def filter_extra_env(extra: dict[str, str] | None) -> dict[str, str]:
             raise ValueError(f"extra_env key not allowed: {key}")
         out[key] = str(v)
     return out
+
+
+def env_from_config(root: Path) -> dict[str, str]:
+    """Build process env overlays from config.json (console source of truth).
+
+    Empty strings are skipped so a blank config ``proxy`` does not wipe a
+    working process/PROXY inherited by the supervisor.
+    """
+    return config_to_env_map(load_config(root), skip_empty=True)
 
 
 def _latest_supervisor_log(root: Path) -> Path | None:
@@ -227,7 +225,15 @@ def start_run(root: Path, req: StartRunRequest) -> dict[str, Any]:
             raise HTTPException(status_code=500, detail=f"missing {register_sh}")
         argv = ["bash", str(register_sh), req.product, str(req.target), str(req.threads)]
 
+    # Precedence for operational controls:
+    #   1) process env inherited from control_api (weakest for UI intent)
+    #   2) config.json mirrored via config_to_env_map (console source of truth)
+    #   3) request extra_env (explicit one-shot override)
+    # launch_batch_supervisor loads .env without clobbering already-set keys,
+    # so injecting config here makes the batch follow the console even when
+    # a stale .env still has EMAIL_PROVIDER=cloudflare.
     env = os.environ.copy()
+    env.update(env_from_config(root))
     env.update(extra)
     env["REGISTER_PROJECT_ROOT"] = str(root)
 

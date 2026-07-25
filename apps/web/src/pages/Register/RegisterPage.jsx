@@ -211,20 +211,25 @@ export function RegisterPage() {
   }
 
   // Build the config partial from the form (save path). Mirrors legacy saveRegisterCfg.
+  // Sticky fields: omit blank proxy/defaultDomains so we never POST "" and wipe
+  // host .env / config values the batch actually uses (backend also guards this).
   function buildConfigPartial() {
     const v = form;
     const provider = v.email_provider;
+    const domains = (v.defaultDomains || "").trim();
+    const proxy = (v.proxy || "").trim();
     const partial = {
       email_provider: provider,
-      defaultDomains: (v.defaultDomains || "").trim(),
-      proxy: (v.proxy || "").trim(),
       proxy_rotate_mode: v.proxyMode,
-      proxy_list: v.proxyList || "",
       turnstile_stuck_timeout: Number(v.turnstile || 150),
       // disk-first mid-mint inject always off; batch-end inject is CPA_BATCH_END_INJECT (extra_env).
       cpa_remote_inject: false,
       cpa_probe_chat: false,
     };
+    if (domains) partial.defaultDomains = domains;
+    if (proxy) partial.proxy = proxy;
+    // proxy_list is intentionally clearable (multi-line free-form).
+    if (v.proxyList != null) partial.proxy_list = v.proxyList;
     const key = (v.mailKey || "").trim();
     const keyField = providerKeyField(provider);
     if (key && keyField) partial[keyField] = key;
@@ -239,17 +244,32 @@ export function RegisterPage() {
       const data = await api.putConfig({ config: partial });
       regFormDirty.value = false;
       regFormLoaded.value = true;
-      // Keep saved secret placeholder fresh + clear entered key.
-      const keyField = providerKeyField(provider);
-      if (keyField && data.config && data.config[keyField] != null) {
-        setForm((p) => ({ ...p, mailKey: "", savedSecret: String(data.config[keyField]) }));
-      } else {
-        setForm((p) => ({ ...p, mailKey: "" }));
-      }
+      // Re-hydrate sticky fields from server (may be .env-enriched when form was blank).
+      const saved = data.config || {};
+      setForm((p) => {
+        const next = {
+          ...p,
+          mailKey: "",
+          email_provider: saved.email_provider || p.email_provider,
+        };
+        if (saved.defaultDomains != null && String(saved.defaultDomains).trim()) {
+          next.defaultDomains = String(saved.defaultDomains);
+        }
+        if (saved.proxy != null && String(saved.proxy).trim()) {
+          next.proxy = String(saved.proxy);
+        }
+        const keyField = providerKeyField(provider || saved.email_provider);
+        if (keyField && saved[keyField] != null) {
+          next.savedSecret = String(saved[keyField]);
+        }
+        return next;
+      });
       if (!silent) {
-        const prov = provider || "—";
-        const dom = partial.defaultDomains || "—";
-        showOpsFeedback(`配置已保存 · provider=${prov} · domains=${dom}`, "ok");
+        const prov = saved.email_provider || provider || "—";
+        const dom = (saved.defaultDomains || partial.defaultDomains || "—");
+        const envN = (data.changed_env_keys || []).length;
+        const envHint = envN ? ` · env×${envN}` : "";
+        showOpsFeedback(`配置已保存 · provider=${prov} · domains=${dom}${envHint}`, "ok");
       }
       return data;
     } catch (e) {

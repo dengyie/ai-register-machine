@@ -36,6 +36,8 @@ class ConfigPutOut(BaseModel):
     ok: bool
     backup: str | None = None
     changed_keys: list[str] = Field(default_factory=list)
+    changed_env_keys: list[str] = Field(default_factory=list)
+    env_backup: str | None = None
     config: dict[str, Any]
 
 
