@@ -98,12 +98,14 @@ def _patched_create_browser_options(browser_proxy=None, *, apply_config_proxy=Tr
     except Exception:
         pass
 
-    # pxed/k8s / Xvfb: force sandbox-less flags even if upstream options omitted them
+    # pxed/k8s / Xvfb: force sandbox-less + CDP origin flags even if upstream omitted them
     for flag in (
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
         "--disable-blink-features=AutomationControlled",
+        # Chrome 149 CDP: without this WS handshake 403s after /json is fine
+        "--remote-allow-origins=*",
     ):
         try:
             opts.set_argument(flag)
@@ -728,9 +730,87 @@ def _should_persist_email_stage_error() -> bool:
     }
 
 
+def email_failure_should_burn_mailbox(msg: str) -> bool:
+    """Whether a failure should permanently write ``emails_error.txt``.
+
+    Burn only mailbox-side or terminal account problems (no code, OTP accepted
+    but profile stuck, SSO never issued after a full attempt). Do **not** burn
+    on Turnstile / SPA / browser / dead-Clash flakes — those are slot-retry +
+    rotate class; permanently blacklisting Hotmail mains was emptying the pool
+    while the same addresses were still fine for a later egress.
+    """
+    text = str(msg or "").strip()
+    if not text:
+        return False
+    # Strip common wrappers then re-evaluate (slot-retry / demote / ARN prefixes).
+    low_prefixes = (
+        "slot-retry:",
+        "slot_retry:",
+        "turnstile:",
+        "browser_boot:",
+        "progress_fail:",
+        "turnstile-headed-upgrade:",
+    )
+    low = text.lower()
+    for pref in low_prefixes:
+        if low.startswith(pref):
+            return email_failure_should_burn_mailbox(text.split(":", 1)[-1].strip())
+
+    # Egress / CF human-check — never a mailbox defect.
+    if is_turnstile_stuck_error(text):
+        return False
+    if "wait-cloudflare" in text or "token_len=0" in text or "token长度=0" in text:
+        return False
+    if "Turnstile" in text and (
+        "token" in text.lower() or "卡住" in text or "iframe" in text.lower()
+    ):
+        return False
+
+    kind = classify_email_stage_failure(text)
+    if kind == "browser_boot":
+        return False
+    if kind in ("mail_miss", "progress_fail"):
+        return True
+    if kind == "fatal":
+        # Pool/config exhausted — usually no single mailbox to blame.
+        return False
+    # Terminal after the address was committed to xAI signup.
+    if "未获取到 sso cookie" in text or "未获取到 sso" in text:
+        return True
+    # Remaining "other" (unknown / hard reg fail): burn conservatively.
+    return True
+
+
+def _release_email_attempt(email: str) -> None:
+    """Drop in-process reservation without permanent emails_error burn."""
+    if not email:
+        return
+    try:
+        release = getattr(reg, "release_email_attempt", None)
+        if callable(release):
+            release(email)
+            return
+    except Exception:
+        pass
+    try:
+        # Fallback: hotmail alias reservation only.
+        fn = getattr(reg, "_hotmail_release_alias", None)
+        if callable(fn):
+            fn(email)
+    except Exception:
+        pass
+
+
 def _mark_email_stage_error(email: str, reason: str) -> None:
-    """Persist failed addresses so the next run does not reuse them."""
+    """Persist failed addresses when the failure is mailbox/account-terminal.
+
+    Transient Turnstile/SPA/browser failures only release the in-process
+    reservation so the same Hotmail main can be retried on a later slot/sub.
+    """
     if not email or not _should_persist_email_stage_error():
+        return
+    if not email_failure_should_burn_mailbox(reason):
+        _release_email_attempt(email)
         return
     try:
         reg.mark_error(email, reason=str(reason)[:120])
@@ -980,8 +1060,9 @@ def _soft_recycle_browser(worker_id: int) -> None:
 def _hard_recycle_browser(worker_id: int) -> None:
     """Full Chromium quit+create for stuck pages / unknown failures.
 
-    Also kills PPID=1 Drission leftovers so the next start does not race
-    auto_port against orphan processes from a previous crash.
+    Also kills leftover Drission families (PPID=1 orphans *and* untracked
+    children of this process + Helpers) so the next start does not race
+    auto_port against zombie processes from a previous crash/failed boot.
     """
     try:
         reg.restart_browser(log_callback=lambda m: log(worker_id, m))
@@ -999,11 +1080,17 @@ def _hard_recycle_browser(worker_id: int) -> None:
             log_callback=lambda m: log(worker_id, m),
             protect_pids=protect,
             only_ppid_init=True,
+            include_self_children=True,
+            kill_related_helpers=True,
+            clean_tmp_dirs=True,
+            tmp_dir_max_age_sec=0,
         )
-        if cres.get("killed"):
+        if cres.get("killed") or cres.get("helpers_killed") or cres.get("tmp_removed"):
             log(
                 worker_id,
-                f"[*] hard recycle orphan cleanup: killed={cres['killed']} pids={cres.get('pids')}",
+                f"[*] hard recycle orphan cleanup: killed={cres.get('killed')} "
+                f"helpers={cres.get('helpers_killed')} tmp={cres.get('tmp_removed')} "
+                f"pids={cres.get('pids')}",
             )
     except Exception as exc:  # noqa: BLE001
         log(worker_id, f"[Debug] hard recycle orphan cleanup skipped: {exc}")
@@ -1175,6 +1262,7 @@ def register_one(
                         raise FatalRegisterError(msg) from exc
                     if kind == "mail_miss" and mail_try < max_mail_retry:
                         log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
+                        # mail_miss = burn (mailbox didn't deliver); not Turnstile class.
                         _mark_email_stage_error(email, msg)
                         _advance_mail_provider_on_miss()
                         # 收码失败通常不是浏览器崩溃；优先软回收避免进程爆炸
@@ -1183,22 +1271,27 @@ def register_one(
                         continue
                     if kind == "progress_fail":
                         # Code filled but profile not reached — CF mid-state / SPA lag.
-                        # Raise ARN only; outer slot handler rotates once + hard-recycles.
+                        # Raise ARN only; outer slot handler rotates once + hard-recycles
+                        # and owns mailbox burn (OTP consumed → burn). Do NOT mark here
+                        # (would double-write emails_error with the ARN handler).
                         # Do NOT force_rotate here (would double-rotate with ARN handler).
                         log(
                             worker_id,
                             f"! 验证码阶段推进失败(slot 重试, 不换邮箱): {msg}",
                         )
-                        _mark_email_stage_error(email, msg)
                         _clear_mail_provider_bind()
-                        raise AccountRetryNeeded(f"progress_fail: {msg}") from exc
+                        raise AccountRetryNeeded(
+                            f"progress_fail: {msg}", email=email
+                        ) from exc
                     if kind == "browser_boot":
                         # Chromium / chrome-error / dead Clash / transient form mount.
-                        # Raise ARN only; outer slot handler owns rotate + hard recycle.
+                        # Raise ARN only; outer slot handler owns rotate + hard recycle
+                        # and release-without-burn for the mailbox.
                         log(worker_id, f"! 浏览器/表单瞬态失败({kind}): {msg}")
-                        _mark_email_stage_error(email, msg)
                         _clear_mail_provider_bind()
-                        raise AccountRetryNeeded(f"browser_boot: {msg}") from exc
+                        raise AccountRetryNeeded(
+                            f"browser_boot: {msg}", email=email
+                        ) from exc
                     log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
                     _mark_email_stage_error(email, msg)
                     traceback.print_exc()
@@ -1269,14 +1362,12 @@ def register_one(
                             reason=f"turnstile-headed-upgrade:{msg[:60]}",
                         )
                         _hard_recycle_browser(worker_id)
-                        # Re-enter outer while as slot-style retry without burning fatal
+                        # Re-enter outer while as slot-style retry without burning fatal.
+                        # Turnstile is egress class — never permanent-burn the mailbox.
                         if email:
-                            try:
-                                reg.mark_error(
-                                    email, reason=f"turnstile-headed-upgrade:{msg[:80]}"
-                                )
-                            except Exception:
-                                pass
+                            _mark_email_stage_error(
+                                email, f"turnstile-headed-upgrade:{msg[:80]}"
+                            )
                         slot_retry += 1
                         if slot_retry <= max(max_slot_retry, 1):
                             reg.sleep_with_cancel(1.0, cancel)
@@ -1459,13 +1550,27 @@ def register_one(
             _inc("reg_success")
             return job
         except AccountRetryNeeded as exc:
-            # Mark the stuck attempt's email so slot retry does not burn alias budget silently.
-            if email:
+            # Slot-retry: only permanent-burn mailbox on terminal/mail classes.
+            # Turnstile / SPA / browser_boot → release reservation only so Hotmail
+            # mains remain pickable after rotate (was: mark_error on every ARN).
+            # fill_email may raise ARN before returning (email, token); recover
+            # address from exception.email so we still release the reservation.
+            exc_text = str(exc)
+            if not email:
                 try:
-                    reg.mark_error(email, reason=f"slot-retry:{str(exc)[:100]}")
+                    email = (getattr(exc, "email", None) or "").strip()
                 except Exception:
-                    _mark_email_stage_error(email, str(exc))
+                    email = ""
+            if email:
                 last_slot_email = email
+                if email_failure_should_burn_mailbox(exc_text):
+                    _mark_email_stage_error(email, f"slot-retry:{exc_text[:100]}")
+                else:
+                    _release_email_attempt(email)
+                    log(
+                        worker_id,
+                        f"[*] 不永久烧号（瞬态/出口类）: {email} reason={exc_text[:80]}",
+                    )
             # Final-page Turnstile already raises AccountRetryNeeded from ttk;
             # profile path also raises ARN after demote. Streak is per *account*
             # (slot-exhausted), not per mid-slot ARN — so slot_retry=2 does not
@@ -1473,7 +1578,6 @@ def register_one(
             # Classify only via stuck helper (covers "turnstile:" demote prefix +
             # final-page markers). Bare startswith("turnstile:") alone is NOT enough:
             # that would count non-stuck turnstile:* mark_error noise as streak.
-            exc_text = str(exc)
             is_turnstile_arn = is_turnstile_stuck_error(exc_text)
             # Always switch path on stuck (even when slot budget is 0) so the *next*
             # account / next process does not inherit a dead Clash node.
@@ -1532,7 +1636,9 @@ def register_one(
             }
         except Exception as exc:
             log(worker_id, f"! 注册失败: {exc}")
-            reg.mark_error(email or "", reason=str(exc)[:120])
+            # Gate permanent burn (sso-timeout burns; bare Turnstile profile fail does not).
+            if email:
+                _mark_email_stage_error(email, str(exc)[:120])
             traceback.print_exc()
             _inc("reg_fail")
             try:
@@ -1573,6 +1679,18 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
             else:
                 # list/off: no shared leaf; still attribute mint to reg_egress
                 held_node = ""
+            # Verify leaf after hold (shared mixed-port 7897; leaf is Clash group select).
+            try:
+                now_leaf = current_egress_label() or ""
+            except Exception:
+                now_leaf = ""
+            log(
+                worker_id,
+                f"[*] mint_egress pin verify reg={reg_egress!r} now={now_leaf!r} "
+                f"held={held_node!r} hold_ok={bool(hold.get('ok'))} "
+                f"pinned={hold.get('pinned')} prev={hold.get('prev')!r} "
+                f"reason={hold.get('reason') or hold.get('error') or ''}",
+            )
         except Exception as exc:  # noqa: BLE001
             log(worker_id, f"[!] mint_hold acquire error: {exc}")
 
@@ -1903,9 +2021,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--browser-fingerprint-mode",
-        choices=("off", "light"),
+        choices=("off", "light", "anon"),
         default="",
-        help="浏览器轻量指纹 off|light（默认 config/env=off；light=每次 hard boot 从 UA/viewport/lang 池抽取）",
+        help=(
+            "浏览器指纹 off|light|anon（默认 config/env=off；"
+            "light=每次 hard boot 从 UA/viewport/lang 池抽取（UA major 必须匹配 Chromium）；"
+            "anon=light + 强制每号 hard recycle 新 profile；不再加 --incognito）"
+        ),
     )
     parser.add_argument(
         "--account-slot-retry",
@@ -2015,9 +2137,24 @@ def main() -> int:
             fp_mode = reg.resolve_browser_fingerprint_mode()
         except Exception:
             fp_mode = str(cfg0.get("browser_fingerprint_mode") or "off").strip().lower() or "off"
-    if fp_mode not in ("off", "light"):
+    if fp_mode in ("anonymous", "incognito", "guest", "private"):
+        fp_mode = "anon"
+    if fp_mode not in ("off", "light", "anon"):
         fp_mode = "off"
     reg.config["browser_fingerprint_mode"] = fp_mode
+    try:
+        reg.PERF_FLAGS["browser_fingerprint_mode"] = fp_mode
+    except Exception:
+        pass
+    # anon only works with a fresh process per account — override recycle to hard.
+    if fp_mode == "anon" and recycle_mode != "hard":
+        recycle_mode = "hard"
+        reg.config["browser_recycle_mode"] = "hard"
+        try:
+            reg.PERF_FLAGS["browser_recycle_mode"] = "hard"
+            reg.PERF_FLAGS["browser_reuse"] = False
+        except Exception:
+            pass
     print(
         f"[*] browser_recycle_mode={recycle_mode} every={recycle_every} "
         f"account_slot_retry={reg.config.get('account_slot_retry', 3)} "
@@ -2089,7 +2226,7 @@ def main() -> int:
     log_thread = threading.Thread(target=_log_writer, daemon=True)
     log_thread.start()
 
-    # Crashed prior runs leave Drission Chrome / empty Xvfb reparented to init.
+    # Crashed prior runs leave Drission Chrome helpers + empty Xvfb reparented to init.
     # Clean those before starting workers; never touch live children of this process.
     try:
         from tab_pool import cleanup_orphan_drission_chromes, cleanup_orphan_xvfb
@@ -2097,10 +2234,16 @@ def main() -> int:
         cres = cleanup_orphan_drission_chromes(
             log_callback=lambda m: print(m, flush=True),
             only_ppid_init=True,
+            include_self_children=True,
+            kill_related_helpers=True,
+            clean_tmp_dirs=True,
+            tmp_dir_max_age_sec=0,
         )
-        if cres.get("killed"):
+        if cres.get("killed") or cres.get("helpers_killed") or cres.get("tmp_removed"):
             print(
-                f"[*] 启动清理孤儿浏览器: killed={cres['killed']} pids={cres.get('pids')}",
+                f"[*] 启动清理孤儿浏览器: killed={cres.get('killed')} "
+                f"helpers={cres.get('helpers_killed')} tmp={cres.get('tmp_removed')} "
+                f"pids={cres.get('pids')}",
                 flush=True,
             )
         xres = cleanup_orphan_xvfb(

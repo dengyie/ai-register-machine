@@ -249,79 +249,10 @@ def test_enrich_config_from_env_fills_blank_ops(tmp_path: Path):
     assert out["defaultDomains"] == "mangoqwq.com,a.cd"
 
 
-def test_save_sticky_empty_proxy_does_not_wipe_env(tmp_path: Path):
-    """Register page used to POST proxy=\"\" and blank host PROXY / DEFAULT_DOMAINS."""
-    (tmp_path / "config.json").write_text(
-        json.dumps(
-            {
-                "email_provider": "cloudflare",
-                "proxy": "http://127.0.0.1:7897",
-                "defaultDomains": "a.com,b.com",
-            }
-        ),
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "EMAIL_PROVIDER=cloudflare\n"
-        "PROXY=http://127.0.0.1:7897\n"
-        "DEFAULT_DOMAINS=a.com,b.com\n",
-        encoding="utf-8",
-    )
-    result = save_config(
-        tmp_path,
-        {
-            "email_provider": "hotmail",
-            "proxy": "",
-            "defaultDomains": "   ",
-            "proxy_list": "",  # clearable
-        },
-    )
-    data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
-    assert data["email_provider"] == "hotmail"
-    assert data["proxy"] == "http://127.0.0.1:7897"
-    assert data["defaultDomains"] == "a.com,b.com"
-    assert data.get("proxy_list") == ""
-    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "EMAIL_PROVIDER=hotmail" in env_text
-    assert "PROXY=http://127.0.0.1:7897" in env_text
-    assert "DEFAULT_DOMAINS=a.com,b.com" in env_text
-    assert "PROXY_LIST=" in env_text
-    assert "EMAIL_PROVIDER" in result["changed_env_keys"]
-    assert "PROXY" not in result["changed_env_keys"]
-    assert "DEFAULT_DOMAINS" not in result["changed_env_keys"]
 
 
-def test_config_to_env_map_sticky_empty_skips_proxy():
-    m = config_to_env_map(
-        {
-            "email_provider": "hotmail",
-            "proxy": "",
-            "defaultDomains": "",
-            "email_providers": [],
-        }
-    )
-    assert m["EMAIL_PROVIDER"] == "hotmail"
-    assert "PROXY" not in m
-    assert "DEFAULT_DOMAINS" not in m
-    # multi-select may clear
-    assert m.get("EMAIL_PROVIDERS") == ""
 
 
-def test_enrich_config_from_env_fills_blank_ops(tmp_path: Path):
-    (tmp_path / "config.json").write_text(
-        json.dumps({"email_provider": "hotmail", "proxy": "", "defaultDomains": ""}),
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "PROXY=http://127.0.0.1:7897\n"
-        "DEFAULT_DOMAINS=mangoqwq.com,a.cd\n"
-        "EMAIL_PROVIDER=cloudflare\n",  # config non-blank wins
-        encoding="utf-8",
-    )
-    out = enrich_config_from_env(tmp_path)
-    assert out["email_provider"] == "hotmail"
-    assert out["proxy"] == "http://127.0.0.1:7897"
-    assert out["defaultDomains"] == "mangoqwq.com,a.cd"
 
 
 def test_config_api_roundtrip(tmp_path: Path, monkeypatch):
@@ -433,78 +364,5 @@ def test_config_api_put_sticky_empty_and_enrich(tmp_path: Path, monkeypatch):
     assert "EMAIL_PROVIDER=hotmail" in env_text
 
 
-def test_config_api_get_enriches_from_env(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("REGISTER_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("CONTROL_API_TOKEN", "t")
-    (tmp_path / "config.json").write_text(
-        json.dumps({"email_provider": "hotmail", "proxy": "", "defaultDomains": ""}),
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "PROXY=http://127.0.0.1:7897\nDEFAULT_DOMAINS=keep.me\n",
-        encoding="utf-8",
-    )
-    from apps.control_api.app import create_app
-    from apps.control_api.settings import clear_settings_cache
-    from fastapi.testclient import TestClient
-
-    clear_settings_cache()
-    client = TestClient(create_app())
-    headers = {"Authorization": "Bearer t"}
-    r = client.get("/api/config", headers=headers)
-    assert r.status_code == 200
-    cfg = r.json()["config"]
-    assert cfg["email_provider"] == "hotmail"
-    assert cfg["proxy"] == "http://127.0.0.1:7897"
-    assert cfg["defaultDomains"] == "keep.me"
-    # disk unchanged
-    disk = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
-    assert disk["proxy"] == ""
-    assert disk["defaultDomains"] == ""
 
 
-def test_config_api_put_sticky_empty_and_enrich(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("REGISTER_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("CONTROL_API_TOKEN", "t")
-    (tmp_path / "config.json").write_text(
-        json.dumps(
-            {
-                "email_provider": "cloudflare",
-                "proxy": "http://old:1",
-                "defaultDomains": "old.com",
-            }
-        ),
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "PROXY=http://old:1\nDEFAULT_DOMAINS=old.com\nEMAIL_PROVIDER=cloudflare\n",
-        encoding="utf-8",
-    )
-    from apps.control_api.app import create_app
-    from apps.control_api.settings import clear_settings_cache
-    from fastapi.testclient import TestClient
-
-    clear_settings_cache()
-    client = TestClient(create_app())
-    headers = {"Authorization": "Bearer t"}
-    r = client.put(
-        "/api/config",
-        headers=headers,
-        json={
-            "config": {
-                "email_provider": "hotmail",
-                "proxy": "",
-                "defaultDomains": "",
-            }
-        },
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["config"]["email_provider"] == "hotmail"
-    assert body["config"]["proxy"] == "http://old:1"
-    assert body["config"]["defaultDomains"] == "old.com"
-    assert "PROXY" not in body.get("changed_env_keys", [])
-    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "PROXY=http://old:1" in env_text
-    assert "DEFAULT_DOMAINS=old.com" in env_text
-    assert "EMAIL_PROVIDER=hotmail" in env_text

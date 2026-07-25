@@ -55,8 +55,13 @@ DEFAULT_CONFIG = {
     "browser_headless": False,
     "enable_nsfw": True,
     "register_count": 1,
-    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-    # off | light — light = small UA/viewport/lang pool on each Chromium boot (A/B).
+    # Must match the Chromium binary major (pxed CFT = 149). Spoofing an older
+    # major (e.g. 138) while Client Hints report 149 makes Turnstile refuse tokens.
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    # off | light | anon
+    #   light = UA/viewport/lang pool on each Chromium hard boot (A/B)
+    #   anon  = light + force browser_recycle_mode=hard (fresh auto_port profile every account)
+    #           Note: do NOT add --incognito; isolation comes from hard recycle + auto_port.
     # Default off: production batch keeps fixed fingerprint until experiment wins.
     "browser_fingerprint_mode": "off",
     "grok2api_auto_add_local": True,
@@ -223,6 +228,21 @@ def mark_error(email: str, password: str = "", reason: str = ""):
         pass
 
 
+def release_email_attempt(email: str = "") -> None:
+    """Drop in-process mailbox reservation without permanent emails_error burn.
+
+    Used for Turnstile / SPA / browser flakes so Hotmail mains stay pickable
+    after slot-retry + rotate. Does not write emails_used/error ledgers.
+    """
+    if not email or not str(email).strip():
+        return
+    try:
+        _hotmail_release_alias(email)
+    except Exception:
+        pass
+    # Gmail catch-all addresses are synthetic; no reservation set — no-op.
+
+
 def is_email_used(email: str) -> bool:
     """检查邮箱是否已被使用或标记为失败。"""
     email_lower = email.strip().lower()
@@ -251,7 +271,7 @@ PERF_FLAGS = {
     "browser_recycle_every": 15,  # full quit+recreate after N successful reuses (hybrid)
     # soft | hybrid | hard — hybrid = soft until recycle_every then hard (prod default)
     "browser_recycle_mode": "hybrid",
-    # off | light — applied in create_browser_options on each hard boot
+    # off | light | anon — applied in create_browser_options on each hard boot
     "browser_fingerprint_mode": "off",
 }
 
@@ -493,9 +513,16 @@ class RegistrationCancelled(Exception):
 
 
 class AccountRetryNeeded(Exception):
-    """Soft stuck-state: retry the same account slot without consuming fatal stop."""
+    """Soft stuck-state: retry the same account slot without consuming fatal stop.
 
-    pass
+    Optional ``email`` carries the address already reserved/created when the
+    failure happens inside ``fill_email_and_submit`` (before it returns), so
+    ``register_cli`` can release or burn the mailbox correctly.
+    """
+
+    def __init__(self, message: str = "", email: str = "", *args):
+        super().__init__(message, *args)
+        self.email = (email or "").strip()
 
 
 def load_config():
@@ -754,7 +781,7 @@ def cloudflare_create_temp_address(api_base):
 def get_user_agent():
     return config.get(
         "user_agent",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
     )
 
 
@@ -923,17 +950,25 @@ CHROMIUM_SLIM_FLAGS = [
     "--disable-background-networking",
     "--no-first-run",
     "--disable-blink-features=AutomationControlled",
+    # Chrome ≥111 / Playwright CFT 149: CDP WebSocket handshake requires an
+    # allowed Origin. Without this, HTTP /json works but ws://…/devtools/* returns
+    # 403 and DrissionPage later dies mid-session ("page disconnected").
+    "--remote-allow-origins=*",
 ]
 
 
-# Light fingerprint pools (A/B arm). Keep majors near default Chrome/138;
-# prefer Win + Linux UA (pxed runs Linux Chromium — avoid exotic OS spoof).
+# Light fingerprint pools (A/B arm).
+# CRITICAL: UA major MUST match the Chromium binary (pxed CFT = Chrome/149).
+# Spoofing Chrome/138 (or any other major) while navigator.userAgentData /
+# Client Hints still report the real 149 build makes Cloudflare Turnstile
+# refuse passive tokens → token_len=0 forever (seen on batch_web_ordinary
+# 20260725_063052 with browser_fingerprint_mode=anon).
+# Prefer Win + Linux UA only (pxed runs Linux Chromium — avoid macOS spoof).
 _LIGHT_UA_POOL = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36",
 )
 _LIGHT_VIEWPORTS = (
     (1280, 900),
@@ -977,7 +1012,13 @@ _LAST_BROWSER_FINGERPRINT: dict | None = None
 
 
 def resolve_browser_fingerprint_mode(explicit: str | None = None) -> str:
-    """Resolve off|light from explicit arg, PERF_FLAGS, config, env (in that order of override)."""
+    """Resolve off|light|anon from explicit arg, PERF_FLAGS, config, env.
+
+    Precedence: explicit > PERF_FLAGS > config > env.
+    Aliases:
+      random/on/true → light
+      anonymous/incognito/guest → anon
+    """
     candidates = [
         explicit,
         (PERF_FLAGS or {}).get("browser_fingerprint_mode"),
@@ -986,13 +1027,21 @@ def resolve_browser_fingerprint_mode(explicit: str | None = None) -> str:
     ]
     for raw in candidates:
         mode = str(raw or "").strip().lower()
-        if mode in ("off", "light"):
+        if mode in ("off", "light", "anon"):
             return mode
         if mode in ("0", "false", "no", "none", ""):
             continue
-        if mode in ("1", "true", "yes", "on", "random", "anon", "anonymous"):
+        if mode in ("anonymous", "incognito", "guest", "private"):
+            return "anon"
+        if mode in ("1", "true", "yes", "on", "random"):
             return "light"
     return "off"
+
+
+def fingerprint_forces_hard_recycle(mode: str | None = None) -> bool:
+    """True when fingerprint mode needs a fresh Chromium process per account."""
+    m = resolve_browser_fingerprint_mode(mode) if mode is not None else resolve_browser_fingerprint_mode()
+    return m == "anon"
 
 
 def pick_light_fingerprint(*, rng: random.Random | None = None) -> dict:
@@ -1013,8 +1062,21 @@ def pick_light_fingerprint(*, rng: random.Random | None = None) -> dict:
     }
 
 
-def apply_light_fingerprint(options, fp: dict | None = None, *, rng: random.Random | None = None) -> dict:
-    """Apply light fingerprint onto ChromiumOptions. Returns the profile used."""
+def apply_light_fingerprint(
+    options,
+    fp: dict | None = None,
+    *,
+    rng: random.Random | None = None,
+    mode: str = "light",
+    incognito: bool | None = None,
+) -> dict:
+    """Apply light fingerprint onto ChromiumOptions. Returns the profile used.
+
+    mode: recorded as profile['mode'] ('light' or 'anon').
+    incognito: ignored (kept for call-site compat). Do NOT set --incognito —
+    hard recycle + auto_port already give a fresh user-data-dir per account,
+    and --incognito was correlated with Turnstile token_len=0 under CFT 149.
+    """
     global _LAST_BROWSER_FINGERPRINT
     profile = dict(fp or pick_light_fingerprint(rng=rng))
     ua = str(profile.get("user_agent") or "").strip()
@@ -1022,6 +1084,9 @@ def apply_light_fingerprint(options, fp: dict | None = None, *, rng: random.Rand
     h = int(profile.get("height") or 900)
     lang = str(profile.get("lang") or "en-US").strip() or "en-US"
     accept_lang = str(profile.get("accept_lang") or lang).strip() or lang
+    # Explicit True still refused: isolation is hard recycle, not private mode.
+    _ = incognito  # API compat; never applied
+    use_incognito = False
     if ua:
         try:
             options.set_user_agent(ua)
@@ -1043,7 +1108,10 @@ def apply_light_fingerprint(options, fp: dict | None = None, *, rng: random.Rand
         options.set_argument(f"--accept-lang={accept_lang}")
     except Exception:
         pass
-    profile["mode"] = "light"
+    # Intentionally no --incognito (see docstring).
+    out_mode = "anon" if str(mode).lower() == "anon" else "light"
+    profile["mode"] = out_mode
+    profile["incognito"] = use_incognito
     profile["user_agent"] = ua
     profile["width"] = w
     profile["height"] = h
@@ -1082,7 +1150,7 @@ def create_browser_options(
             except Exception:
                 options.set_argument("--headless")
         # Fixed UA/viewport when fingerprint mode is off (legacy headless path).
-        if resolve_browser_fingerprint_mode() != "light":
+        if resolve_browser_fingerprint_mode() == "off":
             ua = (config.get("user_agent") or "").strip()
             if ua:
                 try:
@@ -1113,9 +1181,12 @@ def create_browser_options(
                 "headed 需要 DISPLAY/xvfb-run（当前 Linux DISPLAY 为空；"
                 "请用默认 --no-headless + xvfb-run，或 HEADLESS_FLAG 不要用 bare --headless）"
             )
-    # Light fingerprint: apply on every hard Chromium boot (register + mint factory).
+    # Light/anon fingerprint: apply on every hard Chromium boot (register + mint factory).
+    # auto_port() allocates a fresh user-data-dir per Chromium() construct.
+    # anon forces hard recycle (every account reboots) — no --incognito.
+    # Soft recycle reuses the process and keeps the same fingerprint.
     fp_mode = resolve_browser_fingerprint_mode()
-    if fp_mode == "light":
+    if fp_mode in ("light", "anon"):
         seed_raw = (os.environ.get("BROWSER_FINGERPRINT_SEED") or "").strip()
         rng = None
         if seed_raw:
@@ -1123,11 +1194,18 @@ def create_browser_options(
                 rng = random.Random(int(seed_raw))
             except Exception:
                 rng = random.Random(seed_raw)
-        fp = apply_light_fingerprint(options, rng=rng)
+        fp = apply_light_fingerprint(
+            options,
+            rng=rng,
+            mode=fp_mode,
+            incognito=False,
+        )
         try:
             print(
-                f"[*] browser_fingerprint=light ua={fp.get('user_agent', '')[:48]}… "
-                f"viewport={fp.get('width')}x{fp.get('height')} lang={fp.get('lang')}",
+                f"[*] browser_fingerprint={fp.get('mode')} "
+                f"ua={fp.get('user_agent', '')[:48]}… "
+                f"viewport={fp.get('width')}x{fp.get('height')} "
+                f"lang={fp.get('lang')} incognito={fp.get('incognito')}",
                 flush=True,
             )
         except Exception:
@@ -1923,7 +2001,34 @@ def _hotmail_release_alias(email):
 
 
 def _hotmail_split_credential_line(line):
-    parts = line.rstrip("\n").split("----", 3)
+    """Parse dash form or vendor JSON credential line.
+
+    Canonical: email----password----ClientID----Token
+    Also accepts one-line JSON: {"email","password","clientId","refreshToken"}.
+    """
+    raw = (line or "").rstrip("\n")
+    s = raw.strip()
+    if not s or s.startswith("#") or s.startswith("//"):
+        return None
+    if s.startswith("{") or s.startswith("["):
+        try:
+            from mail_pool_probe import normalize_credential_line
+
+            norm = normalize_credential_line(raw)
+        except Exception:
+            norm = None
+        if not norm:
+            return None
+        parts = norm.split("----", 3)
+        if len(parts) < 4:
+            return None
+        return {
+            "email": parts[0],
+            "password": parts[1],
+            "client_id": parts[2],
+            "refresh_token": parts[3],
+        }
+    parts = raw.split("----", 3)
     if len(parts) < 4:
         return None
     email_addr = parts[0].strip()
@@ -3969,9 +4074,17 @@ def start_browser(log_callback=None, use_proxy: bool = True):
                 TabPool.release_tab()
             except Exception:
                 pass
-            # Failed boots often leave PPID=1 Drission Chromes holding auto_port dirs.
+            # Failed boots leave Drission Chrome still parented by this python
+            # (not yet PPID=1) plus Helpers on autoPortData — kill the family.
             try:
-                TabPool.cleanup_orphans(log_callback=log_callback, only_ppid_init=True)
+                TabPool.cleanup_orphans(
+                    log_callback=log_callback,
+                    only_ppid_init=True,
+                    include_self_children=True,
+                    kill_related_helpers=True,
+                    clean_tmp_dirs=True,
+                    tmp_dir_max_age_sec=0,
+                )
             except Exception:
                 pass
             # Headed without DISPLAY is not retryable — spinning 4× wastes time.
@@ -3996,6 +4109,9 @@ def stop_browser():
 
 
 def _resolved_recycle_mode() -> str:
+    # anon fingerprint is only meaningful on a fresh Chromium process; force hard.
+    if fingerprint_forces_hard_recycle():
+        return "hard"
     mode = str(
         PERF_FLAGS.get("browser_recycle_mode")
         or config.get("browser_recycle_mode")
@@ -4527,7 +4643,14 @@ def open_signup_page(log_callback=None, cancel_callback=None):
             # release_tab 后 _get_page() 会返回 None，必须 start_browser 重建
             TabPool.release_tab()
             try:
-                TabPool.cleanup_orphans(log_callback=log_callback, only_ppid_init=True)
+                TabPool.cleanup_orphans(
+                    log_callback=log_callback,
+                    only_ppid_init=True,
+                    include_self_children=True,
+                    kill_related_helpers=True,
+                    clean_tmp_dirs=True,
+                    tmp_dir_max_age_sec=0,
+                )
             except Exception:
                 pass
             browser, page = start_browser(log_callback=log_callback)
@@ -4967,8 +5090,11 @@ return true;
                 log_callback=log_callback,
                 cancel_callback=cancel_callback,
             ):
+                # Carry email so register_cli can release (not silent-lose) the
+                # reservation; post-submit SPA stall is not a permanent burn.
                 raise AccountRetryNeeded(
-                    "邮箱提交后未进入验证码页（服务端可能未发信 / SPA 卡住）"
+                    "邮箱提交后未进入验证码页（服务端可能未发信 / SPA 卡住）",
+                    email=email,
                 )
             return email, dev_token
         now = time.time()

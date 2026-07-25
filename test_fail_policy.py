@@ -139,8 +139,10 @@ def test_soft_hard_helpers() -> None:
     assert "_soft_recycle_browser(worker_id)" in src
     assert "_hard_recycle_browser(worker_id)" in src
     # progress_fail must NOT instant-return reg_fail; must slot-retry via ARN
-    assert 'raise AccountRetryNeeded(f"progress_fail:' in src
-    assert 'raise AccountRetryNeeded(f"browser_boot:' in src
+    # Multi-line raise: AccountRetryNeeded(\n f"progress_fail: {msg}", email=email)
+    assert 'f"progress_fail: {msg}"' in src and "AccountRetryNeeded(" in src
+    assert 'f"browser_boot: {msg}"' in src
+    assert "email=email" in src  # ARN carries mailbox for release/burn gate
     assert 'kind": "progress_fail"' not in src  # old hard-fail return removed
     # form flake classified as browser_boot (slot retry class)
     assert '"未找到邮箱输入框或注册按钮" in text' in src or "未找到邮箱输入框或注册按钮" in src
@@ -571,6 +573,89 @@ def test_turnstile_streak_fatal_no_second_egress_note() -> None:
     print("PASS turnstile streak-fatal no second egress note")
 
 
+def _load_burn_helpers():
+    """Load burn gate + deps without importing ttk side effects."""
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    wanted = {
+        "is_fatal_register_error",
+        "is_turnstile_stuck_error",
+        "classify_email_stage_failure",
+        "email_failure_should_burn_mailbox",
+    }
+    nodes = [
+        n
+        for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name in wanted
+    ]
+    names = {n.name for n in nodes}
+    missing = wanted - names
+    if missing:
+        raise RuntimeError(f"missing burn helpers: {sorted(missing)}")
+    order = {
+        "is_fatal_register_error": 0,
+        "is_turnstile_stuck_error": 1,
+        "classify_email_stage_failure": 2,
+        "email_failure_should_burn_mailbox": 3,
+    }
+    nodes.sort(key=lambda n: order.get(n.name, 9))
+    ns: dict = {}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "register_cli.py", "exec"), ns)
+    return ns["email_failure_should_burn_mailbox"]
+
+
+def test_email_failure_burn_policy() -> None:
+    """Turnstile/SPA/browser must not permanent-burn Hotmail; mail/sso must."""
+    burn = _load_burn_helpers()
+    # Do NOT burn — egress / SPA / form flakes (live batch dominant failures).
+    no_burn = [
+        "Turnstile 卡住 fail-fast: pre-submit retries exhausted token_len=0 "
+        "stuck_timeout=150.0s retries=2/2",
+        "turnstile: Turnstile 卡住 fail-fast: token_len=0",
+        "slot-retry:turnstile: Turnstile 卡住 fail-fast: token_len=0",
+        "最终页 Turnstile 卡住 fail-fast: wait 45s token_len=0",
+        "最终注册页资料填写失败: last='wait-cloudflare:0' not_ready=0",
+        "邮箱提交后未进入验证码页（服务端可能未发信 / SPA 卡住）",
+        "browser_boot: 邮箱提交后未进入验证码页（服务端可能未发信 / SPA 卡住）",
+        "未找到邮箱输入框或注册按钮",
+        "net::ERR_CONNECTION_CLOSED",
+        "turnstile-headed-upgrade: token_len=0",
+    ]
+    # DO burn — mailbox or account-terminal after commit.
+    do_burn = [
+        "Hotmail/Outlook 在 1200s 内未收到验证码邮件: a@b.com",
+        "获取验证码失败",
+        "验证码已填写，但未进入资料页: code=ABC",
+        "progress_fail: 验证码已填写，但未进入资料页: code=ABC",
+        "等待超时：未获取到 sso cookie。已看到 cookies: ['cf_clearance']",
+        "slot-retry:等待超时：未获取到 sso cookie",
+    ]
+    failed = 0
+    for msg in no_burn:
+        got = burn(msg)
+        ok = got is False
+        print(f"{'PASS' if ok else 'FAIL'}  burn={got!r:5} expect=False  {msg[:56]}")
+        if not ok:
+            failed += 1
+    for msg in do_burn:
+        got = burn(msg)
+        ok = got is True
+        print(f"{'PASS' if ok else 'FAIL'}  burn={got!r:5} expect=True   {msg[:56]}")
+        if not ok:
+            failed += 1
+    if failed:
+        raise SystemExit(f"burn policy failures: {failed}")
+    # Wiring: ARN handler must not unconditional mark_error; fill_email carries email=
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    assert "email_failure_should_burn_mailbox" in src
+    assert "不永久烧号（瞬态/出口类）" in src
+    assert "reg.mark_error(email, reason=f\"slot-retry:" not in src
+    ttk = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    assert "def release_email_attempt" in ttk
+    assert "email=email" in ttk  # fill_email ARN carries address
+    print("PASS email failure burn policy")
+
+
 def main() -> int:
     test_classify()
     test_open_signup_hardens_release()
@@ -589,6 +674,7 @@ def main() -> int:
     test_turnstile_force_headed_on_demote_wiring()
     test_turnstile_streak_cross_sub_disk()
     test_turnstile_streak_fatal_no_second_egress_note()
+    test_email_failure_burn_policy()
     print("\nALL PASS")
     return 0
 
