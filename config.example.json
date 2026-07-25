@@ -114,7 +114,7 @@
   "browser_recycle_mode": "hybrid",
   "// browser_recycle_every": "仅 hybrid 生效：复用 N 次后完整回收；soft 忽略此值；CLI --browser-recycle-every。",
   "browser_recycle_every": 15,
-  "// browser_fingerprint_mode": "off=固定 UA/viewport（生产默认）；light=每次 Chromium hard boot 从 UA/viewport/lang 小池随机。CLI --browser-fingerprint-mode / env BROWSER_FINGERPRINT_MODE。A/B 用，默认勿开。",
+  "// browser_fingerprint_mode": "off=固定 UA/viewport（生产默认）；light=每次 Chromium hard boot 从 UA/viewport/lang 小池随机（UA major 必须匹配 CFT/Chrome 二进制，当前 149）；anon=light + 强制 browser_recycle_mode=hard（每号新 profile；不再加 --incognito）。CLI --browser-fingerprint-mode / env BROWSER_FINGERPRINT_MODE。",
   "browser_fingerprint_mode": "off",
   "// account_slot_retry": "最终页/SSO 卡住(AccountRetryNeeded)时同号软重试次数，不覆盖 FatalRegisterError。0=不重试。CLI --account-slot-retry。",
   "account_slot_retry": 3,
@@ -123,7 +123,7 @@
   "// browser_headless": "true=无头 Chromium 注册；Turnstile 成功率可能下降。CLI --headless/--no-headless 可覆盖。",
   "browser_headless": false,
   "// user_agent": "Chromium UA；一般保持默认 Chrome 桌面串即可。",
-  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
   "// enable_nsfw": "注册成功后是否尝试打开 NSFW（历史字段；与 CPA 无关）",
   "enable_nsfw": true,
 

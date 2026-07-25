@@ -66,6 +66,9 @@ def test_resolve_mode_defaults_off() -> None:
         assert ttk.resolve_browser_fingerprint_mode("light") == "light"
         assert ttk.resolve_browser_fingerprint_mode("OFF") == "off"
         assert ttk.resolve_browser_fingerprint_mode("random") == "light"
+        assert ttk.resolve_browser_fingerprint_mode("anon") == "anon"
+        assert ttk.resolve_browser_fingerprint_mode("anonymous") == "anon"
+        assert ttk.resolve_browser_fingerprint_mode("incognito") == "anon"
         os.environ["BROWSER_FINGERPRINT_MODE"] = "light"
         ttk.config["browser_fingerprint_mode"] = "off"
         ttk.PERF_FLAGS["browser_fingerprint_mode"] = "off"
@@ -109,7 +112,7 @@ def test_apply_light_fingerprint_sets_options() -> None:
     fp = {
         "user_agent": (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
         ),
         "width": 1440,
         "height": 900,
@@ -201,15 +204,119 @@ def test_register_cli_surface() -> None:
     src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
     assert "--browser-fingerprint-mode" in src
     assert "browser_fingerprint_mode" in src
-    assert 'choices=("off", "light")' in src or "choices=('off', 'light')" in src
+    assert 'choices=("off", "light", "anon")' in src or "choices=('off', 'light', 'anon')" in src
     ttk_src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
     assert "def resolve_browser_fingerprint_mode" in ttk_src
     assert "def pick_light_fingerprint" in ttk_src
     assert "def apply_light_fingerprint" in ttk_src
+    assert "def fingerprint_forces_hard_recycle" in ttk_src
     assert '"browser_fingerprint_mode"' in ttk_src
     cfg = (ROOT / "config.example.json").read_text(encoding="utf-8")
     assert "browser_fingerprint_mode" in cfg
+    assert "anon" in cfg
     print("PASS  register_cli + ttk + config.example surface")
+
+
+def test_anon_forces_hard_recycle_no_incognito() -> None:
+    """anon = light + hard recycle; --incognito is intentionally NOT set.
+
+    2026-07-25: anon+Chrome/138 spoof + --incognito → Turnstile token_len=0 on
+    CFT 149. Isolation comes from hard recycle + auto_port, not private mode.
+    """
+    ttk = _load()
+
+    class FakeOpts:
+        def __init__(self):
+            self.arguments = []
+            self.ua = None
+
+        def auto_port(self):
+            return None
+
+        def set_timeouts(self, **kw):
+            return None
+
+        def set_argument(self, flag):
+            self.arguments.append(flag)
+
+        def set_user_agent(self, ua):
+            self.ua = ua
+
+        def headless(self, v):
+            return None
+
+        def add_extension(self, path):
+            return None
+
+    old_co = ttk.ChromiumOptions
+    old_env = os.environ.pop("BROWSER_FINGERPRINT_MODE", None)
+    old_seed = os.environ.pop("BROWSER_FINGERPRINT_SEED", None)
+    old_mode_cfg = ttk.config.get("browser_fingerprint_mode")
+    old_mode_perf = ttk.PERF_FLAGS.get("browser_fingerprint_mode")
+    old_recycle_cfg = ttk.config.get("browser_recycle_mode")
+    old_recycle_perf = ttk.PERF_FLAGS.get("browser_recycle_mode")
+    old_headless = ttk.config.get("browser_headless")
+    try:
+        ttk.ChromiumOptions = FakeOpts  # type: ignore
+        ttk.config["browser_headless"] = True
+        ttk.config["browser_fingerprint_mode"] = "anon"
+        ttk.PERF_FLAGS["browser_fingerprint_mode"] = "anon"
+        ttk.config["browser_recycle_mode"] = "hybrid"
+        ttk.PERF_FLAGS["browser_recycle_mode"] = "hybrid"
+        assert ttk.fingerprint_forces_hard_recycle() is True
+        assert ttk._resolved_recycle_mode() == "hard"
+        os.environ["BROWSER_FINGERPRINT_SEED"] = "99"
+        opts = ttk.create_browser_options(browser_proxy="", apply_config_proxy=False)
+        assert isinstance(opts, FakeOpts)
+        assert opts.ua
+        assert "Chrome/149" in opts.ua  # must match CFT major
+        assert "--incognito" not in opts.arguments
+        assert ttk._LAST_BROWSER_FINGERPRINT.get("mode") == "anon"
+        assert ttk._LAST_BROWSER_FINGERPRINT.get("incognito") is False
+        # light does not force hard or incognito
+        ttk.config["browser_fingerprint_mode"] = "light"
+        ttk.PERF_FLAGS["browser_fingerprint_mode"] = "light"
+        assert ttk.fingerprint_forces_hard_recycle() is False
+        assert ttk._resolved_recycle_mode() == "hybrid"
+        opts_light = ttk.create_browser_options(browser_proxy="", apply_config_proxy=False)
+        assert "--incognito" not in opts_light.arguments
+        assert ttk._LAST_BROWSER_FINGERPRINT.get("mode") == "light"
+        assert "Chrome/149" in (opts_light.ua or "")
+    finally:
+        ttk.ChromiumOptions = old_co
+        if old_env is None:
+            os.environ.pop("BROWSER_FINGERPRINT_MODE", None)
+        else:
+            os.environ["BROWSER_FINGERPRINT_MODE"] = old_env
+        if old_seed is None:
+            os.environ.pop("BROWSER_FINGERPRINT_SEED", None)
+        else:
+            os.environ["BROWSER_FINGERPRINT_SEED"] = old_seed
+        if old_mode_cfg is not None:
+            ttk.config["browser_fingerprint_mode"] = old_mode_cfg
+        if old_mode_perf is not None:
+            ttk.PERF_FLAGS["browser_fingerprint_mode"] = old_mode_perf
+        if old_recycle_cfg is not None:
+            ttk.config["browser_recycle_mode"] = old_recycle_cfg
+        if old_recycle_perf is not None:
+            ttk.PERF_FLAGS["browser_recycle_mode"] = old_recycle_perf
+        if old_headless is not None:
+            ttk.config["browser_headless"] = old_headless
+    print("PASS  anon forces hard recycle, no --incognito, UA major 149")
+
+
+def test_light_ua_pool_matches_cft_major() -> None:
+    """Every pool UA must carry Chrome/149 — binary is CFT 149 on pxed."""
+    ttk = _load()
+    for ua in ttk._LIGHT_UA_POOL:
+        assert "Chrome/149" in ua, f"stale major in pool: {ua}"
+        assert "Chrome/138" not in ua
+        assert "Chrome/137" not in ua
+        assert "Chrome/136" not in ua
+    # default config UA too
+    default_ua = str(ttk.DEFAULT_CONFIG.get("user_agent") or "")
+    assert "Chrome/149" in default_ua, default_ua
+    print("PASS  light UA pool major matches CFT 149")
 
 
 def test_email_fill_shares_ready_selectors() -> None:
@@ -281,6 +388,8 @@ def main() -> int:
     test_apply_light_fingerprint_sets_options()
     test_create_browser_options_light_applies_pool()
     test_register_cli_surface()
+    test_anon_forces_hard_recycle_no_incognito()
+    test_light_ua_pool_matches_cft_major()
     test_email_fill_shares_ready_selectors()
     test_submit_button_matches_en_sign_up_after_space_strip()
     test_signing_into_not_login_progress()
