@@ -322,3 +322,62 @@ input:focus, select:focus, textarea:focus, .select:focus {
   overflow: auto;
   padding: 0.9rem 1rem;
 }
+
+/* LogDetails — collapsed raw-response evidence (batch-2 IA) */
+.log-details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 0.2rem 0;
+  user-select: none;
+}
+.log-details > summary:hover { color: var(--text); }
+.log-details[open] > summary { margin-bottom: 0.35rem; }
+
+/* ProviderPoolStatus — email_providers 池状态行（batch-2 IA） */
+.pool-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.25rem 0 0.35rem;
+}
+
+.pool-status .pool-status-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.pool-status .pool-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.08rem 0.5rem;
+  font-size: 0.74rem;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.pool-status .pool-chip.empty {
+  font-family: var(--font);
+  color: var(--muted);
+  background: transparent;
+}
+
+.pool-status .pool-tag {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.05rem 0.4rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.pool-status .pool-tag.can-clear {
+  color: var(--ok);
+  border-color: rgba(91, 212, 154, 0.45);
+}
+
+.pool-status .pool-tag.warn {
+  color: var(--warn);
+  border-color: rgba(212, 177, 91, 0.45);
+}

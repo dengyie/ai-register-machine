@@ -16,7 +16,7 @@
 //    buttons here (spec IA — selfcheck lives on settings).
 import { useEffect, useState, useCallback } from "preact/hooks";
 import * as api from "../../api/client.js";
-import { session } from "../../store/session.js";
+import { auth401 } from "../../lib/http.js";
 import { showOpsFeedback } from "../../store/feedback.js";
 import {
   currentRunState,
@@ -25,6 +25,7 @@ import {
   regFormLoaded,
   lastProductOk,
 } from "../../store/run.js";
+import { PageHeader } from "../../ui/index.js";
 import { RegForm } from "./RegForm.jsx";
 import { RunProgress } from "./RunProgress.jsx";
 import { formatApiError as formatApiErrorShared } from "../../lib/format.js";
@@ -112,8 +113,7 @@ export function RegisterPage() {
       regFormLoaded.value = true;
       if (force) regFormDirty.value = false;
     } catch (e) {
-      if (e.status === 401) {
-        session.value = { ...session.value, authenticated: false };
+      if (auth401(e)) {
         return;
       }
       if (force) showOpsFeedback(`加载配置失败: ${formatApiError(e)}`, "err");
@@ -134,9 +134,7 @@ export function RegisterPage() {
           if (ov.product_ok != null) lastProductOk.value = ov.product_ok;
         }
       } catch (e) {
-        if (e.status === 401) {
-          session.value = { ...session.value, authenticated: false };
-        }
+        auth401(e);
         // poll failures stay silent (no toast spam)
       }
     }
@@ -288,8 +286,7 @@ export function RegisterPage() {
       }
       return data;
     } catch (e) {
-      if (e.status === 401) {
-        session.value = { ...session.value, authenticated: false };
+      if (auth401(e)) {
         throw e;
       }
       if (!silent) showOpsFeedback(`保存失败: ${formatApiError(e)}`, "err");
@@ -328,8 +325,7 @@ export function RegisterPage() {
         { toast: true, sticky: true },
       );
     } catch (e) {
-      if (e.status === 401) {
-        session.value = { ...session.value, authenticated: false };
+      if (auth401(e)) {
         return;
       }
       showOpsFeedback(formatApiError(e), "err");
@@ -388,8 +384,7 @@ export function RegisterPage() {
         /* fine */
       }
     } catch (e) {
-      if (e.status === 401) {
-        session.value = { ...session.value, authenticated: false };
+      if (auth401(e)) {
         return;
       }
       showOpsFeedback(formatApiError(e), "err");
@@ -428,8 +423,7 @@ export function RegisterPage() {
       const cur = await api.currentRun();
       currentRunState.value = cur.run ?? cur ?? null;
     } catch (e) {
-      if (e.status === 401) {
-        session.value = { ...session.value, authenticated: false };
+      if (auth401(e)) {
         return;
       }
       showOpsFeedback(formatApiError(e), "err");
@@ -469,8 +463,7 @@ export function RegisterPage() {
       showOpsFeedback(`代理测试完成 (${via}) · ${summary}`, "ok");
       setActionResult(typeof data === "string" ? data : JSON.stringify(data, null, 2));
     } catch (e) {
-      if (e.status === 401) {
-        session.value = { ...session.value, authenticated: false };
+      if (auth401(e)) {
         return;
       }
       showOpsFeedback(`测代理失败: ${formatApiError(e)}`, "err");
@@ -481,46 +474,43 @@ export function RegisterPage() {
 
   return (
     <section class="page">
-      <header class="page-head">
-        <div>
-          <h1>协议注册</h1>
-          <p class="hint">左启动参数 · 右实时进度。完整 worker/supervisor 日志 → 日志页。</p>
-        </div>
-        <div class="toolbar">
-          <button
-            type="button"
-            class="btn btn-primary btn-md"
-            disabled={busyKey === "start" || !regFormLoaded.value}
-            title={!regFormLoaded.value ? "请先加载配置" : undefined}
-            onClick={start}
-          >
-            {busyKey === "start" ? "启动中…" : "开始"}
-          </button>
-          <button
-            type="button"
-            class="btn btn-danger btn-md"
-            disabled={busyKey === "stop"}
-            onClick={stop}
-          >
-            {busyKey === "stop" ? "停止中…" : "停止"}
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost btn-md"
-            disabled={busyKey === "refresh"}
-            onClick={refresh}
-          >
-            {busyKey === "refresh" ? "刷新中…" : "刷新"}
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost btn-md"
-            onClick={gotoLogs}
-          >
-            日志 →
-          </button>
-        </div>
-      </header>
+      <PageHeader
+        title="协议注册"
+        hint="左启动参数 · 右实时进度。完整 worker/supervisor 日志 → 日志页。"
+      >
+        <button
+          type="button"
+          class="btn btn-primary btn-md"
+          disabled={busyKey === "start" || !regFormLoaded.value}
+          title={!regFormLoaded.value ? "请先加载配置" : undefined}
+          onClick={start}
+        >
+          {busyKey === "start" ? "启动中…" : "开始"}
+        </button>
+        <button
+          type="button"
+          class="btn btn-danger btn-md"
+          disabled={busyKey === "stop"}
+          onClick={stop}
+        >
+          {busyKey === "stop" ? "停止中…" : "停止"}
+        </button>
+        <button
+          type="button"
+          class="btn btn-ghost btn-md"
+          disabled={busyKey === "refresh"}
+          onClick={refresh}
+        >
+          {busyKey === "refresh" ? "刷新中…" : "刷新"}
+        </button>
+        <button
+          type="button"
+          class="btn btn-ghost btn-md"
+          onClick={gotoLogs}
+        >
+          日志 →
+        </button>
+      </PageHeader>
 
       {/* Sticky banner + ops log live in App shell OpsFeedbackBar (all pages). */}
 
@@ -545,9 +535,6 @@ export function RegisterPage() {
             >
               {busyKey === "save" ? "保存中…" : "保存"}
             </button>
-            <a class="btn btn-ghost btn-sm" href="#/settings" title="自检 / 清理在设置页">
-              自检 →
-            </a>
             <button
               type="button"
               class="btn btn-ghost btn-sm"
@@ -556,6 +543,10 @@ export function RegisterPage() {
             >
               {busyKey === "proxy" ? "测代理…" : "测代理"}
             </button>
+            {/* Not a button: 本页不执行自检/清理，只跳转到设置页。 */}
+            <a class="link-hint" href="#/settings">
+              自检 / 清理 → 设置页
+            </a>
           </div>
           {actionResult ? (
             <pre class={`log compact ${actionResult ? "ok" : ""}`}>{actionResult}</pre>

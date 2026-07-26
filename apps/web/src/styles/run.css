@@ -1,25 +1,7 @@
-/* Register page + RunProgress (ported/adapted from legacy app.css) */
-
-.page-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-
-.page-head h1 {
-  margin: 0 0 var(--space-1);
-  font-size: 1.35rem;
-}
-
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
-  align-items: center;
-}
+/* Register 页外壳 + 日志页共用：split 布局、表单面板、ops 反馈、run-header、.log。
+   RunProgress 自身的样式已拆到 run-progress.css（只有注册页引用）。
+   .page-head / .page-head h1 / .toolbar 由 base.css 全局定义（后加载并覆盖本文件），
+   这里只保留 base.css 未设置的 .toolbar.wrap gap。 */
 
 .toolbar.wrap {
   flex-wrap: wrap;
@@ -90,12 +72,9 @@
   color: #e0a060;
 }
 
-.field-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.65rem 0.75rem;
-}
-
+/* .field-grid 本体在 components.css（后加载，逐条覆盖），这里只留 .span2 ——
+   components.css 只在 @media (max-width: 640px) 里定义 .field-grid .span2，
+   宽屏下没有等价规则，删掉会让跨列字段塌回单列。 */
 .field-grid .span2 {
   grid-column: 1 / -1;
 }
@@ -119,10 +98,17 @@
   align-items: center;
 }
 
-.form-foot-toolbar a.btn {
+.form-foot-toolbar .link-hint {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.8rem;
   text-decoration: none;
-  display: inline-flex;
-  align-items: center;
+  border-bottom: 1px dotted var(--border);
+}
+
+.form-foot-toolbar .link-hint:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
 .advanced {
@@ -165,96 +151,50 @@ label.check input {
   width: auto;
 }
 
-/* ops feedback / log (register-specific layout) */
+/* ops feedback / log：外观（配色、边框、间距、字号）全部由 components.css
+   定义并后加载覆盖，这里只保留 components.css 没有设置的那几条。
+   注意 .ops-feedback / .ops-log-wrap 的 margin-bottom 也是死的 ——
+   components.css 用 `margin: 0 0 0.65rem` 简写整体覆盖了纵向外边距。 */
 .ops-feedback {
-  margin-bottom: var(--space-3);
-  padding: 0.55rem 0.75rem;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
   cursor: pointer;
-  font-size: 0.9rem;
 }
 
+/* components.css 的 .ops-feedback.ok 只给了 border-color / background，
+   没有 color —— 这条文字色仍然生效，不能删。 */
 .ops-feedback.ok {
-  border-color: rgba(91, 212, 154, 0.45);
   color: var(--ok);
 }
-.ops-feedback.err {
-  border-color: rgba(212, 91, 91, 0.5);
-  color: #f0a0a0;
-}
-.ops-feedback.info {
-  border-color: rgba(91, 159, 212, 0.4);
-}
-.ops-feedback.warn {
-  border-color: rgba(212, 177, 91, 0.45);
-  color: var(--warn);
-}
 
-.ops-log-wrap {
-  margin-bottom: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.25rem 0.65rem 0.45rem;
-  background: var(--panel);
-}
-
+/* components.css 的 .ops-log-wrap > summary 已给了 cursor / color（子选择器；
+   .ops-log-wrap 就是 <details>，summary 必为其直接子元素，两种写法命中同一节点），
+   这里只补 components.css 没设的 font-size。 */
 .ops-log-wrap summary {
-  cursor: pointer;
-  color: var(--muted);
   font-size: 0.85rem;
 }
 
 .ops-log {
-  list-style: none;
-  margin: 0.35rem 0 0;
-  padding: 0;
-  max-height: 10rem;
-  overflow: auto;
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
 }
 
 .ops-log li {
-  display: grid;
-  grid-template-columns: 4.2rem 3.2rem 1fr;
-  gap: 0.4rem;
   font-size: 0.78rem;
   align-items: baseline;
 }
 
 .ops-log .t {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
   font-family: var(--mono);
 }
+
+/* components.css 的 .ops-log .k 没有 color，默认态的灰色由这条提供
+   （.k.ok/.err/.warn 三个状态色则已在 components.css 里定义）。 */
 .ops-log .k {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.68rem;
   color: var(--muted);
 }
-.ops-log .k.ok {
-  color: var(--ok);
-}
-.ops-log .k.err {
-  color: var(--danger);
-}
-.ops-log .k.warn {
-  color: var(--warn);
-}
+
 .ops-log .m {
   color: var(--text);
-  word-break: break-word;
-}
-
-/* run progress */
-.run-progress {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
 }
 
 .run-header {
@@ -299,279 +239,8 @@ label.check input {
   color: var(--muted);
 }
 
-.chip.chip-err,
-.chip.chip-danger {
-  color: var(--danger);
-  border-color: rgba(212, 91, 91, 0.5);
-}
-
-/* KPI: support both console10 (.kpi-label) and legacy (.label) naming */
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.55rem;
-}
-
-.kpi {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 0.55rem 0.7rem;
-  min-height: 4.25rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-}
-
-.kpi .kpi-label,
-.kpi .label {
-  font-size: 0.72rem;
-  color: var(--muted);
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-.kpi .kpi-value,
-.kpi .value {
-  font-size: 1.25rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.kpi .kpi-hint,
-.kpi .sub {
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-
-.kpi.ok {
-  border-color: rgba(91, 212, 154, 0.35);
-}
-.kpi.warn {
-  border-color: rgba(212, 177, 91, 0.4);
-}
-.kpi.danger {
-  border-color: rgba(212, 91, 91, 0.45);
-  background: rgba(212, 91, 91, 0.06);
-}
-
-.bars {
-  display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-}
-
-.bar-row {
-  display: grid;
-  grid-template-columns: 4.5rem 1fr auto;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.bar-row .bar-label {
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.bar-track {
-  height: 0.55rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  overflow: hidden;
-}
-
-.bar-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--accent-2), var(--ok));
-  transition: width 0.35s ease;
-}
-
-.bar-fill.bar-ok,
-.bar-fill.ok {
-  background: linear-gradient(90deg, var(--accent-2), var(--ok));
-}
-.bar-fill.bar-warn,
-.bar-fill.warn {
-  background: linear-gradient(90deg, var(--warn), #d48a5b);
-}
-.bar-fill.bar-err,
-.bar-fill.bar-danger,
-.bar-fill.danger {
-  background: linear-gradient(90deg, #a04040, var(--danger));
-}
-
-.bar-caption {
-  font-size: 0.78rem;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  min-width: 7rem;
-  text-align: right;
-}
-
-.step-rail {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem 0.55rem;
-  padding: 0.25rem 0;
-}
-
-.step {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-
-.step::before {
-  content: "";
-  width: 0.6rem;
-  height: 0.6rem;
-  border-radius: 999px;
-  border: 1px solid var(--muted);
-  background: transparent;
-}
-
-.step.done {
-  color: var(--ok);
-}
-.step.done::before {
-  background: var(--ok);
-  border-color: var(--ok);
-}
-.step.active {
-  color: var(--accent);
-  font-weight: 650;
-}
-.step.active::before {
-  background: var(--accent);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(91, 159, 212, 0.2);
-  animation: step-pulse 1.4s ease-in-out infinite;
-}
-.step.pending {
-  color: var(--muted);
-}
-
-@keyframes step-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 3px rgba(91, 159, 212, 0.2);
-  }
-  50% {
-    box-shadow: 0 0 0 5px rgba(91, 159, 212, 0.05);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .step.active::before {
-    animation: none;
-  }
-  .bar-fill {
-    transition: none;
-  }
-}
-
-.status-card {
-  background: linear-gradient(180deg, rgba(91, 159, 212, 0.08), transparent 70%),
-    var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 0.75rem 0.85rem;
-}
-
-.status-title {
-  font-weight: 650;
-  margin-bottom: 0.3rem;
-}
-
-.status-body {
-  color: var(--muted);
-  font-size: 0.86rem;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  margin: 0;
-  font-family: inherit;
-  background: transparent;
-  border: 0;
-  padding: 0;
-}
-
-.writes-wrap summary,
-.timeline-wrap summary {
-  cursor: pointer;
-  color: var(--muted);
-  font-size: 0.8rem;
-  padding: 0.15rem 0;
-}
-
-.run-writes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  padding: 0.3rem 0.4rem;
-  border: 1px dashed rgba(91, 212, 154, 0.25);
-  border-radius: 8px;
-  background: rgba(91, 212, 154, 0.03);
-}
-
-.run-writes .write-chip {
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  color: var(--ok);
-  padding: 0.12rem 0.45rem;
-  border-radius: 999px;
-  background: rgba(91, 212, 154, 0.08);
-}
-
-.timeline {
-  list-style: none;
-  margin: 0.25rem 0 0;
-  padding: 0 0 0 0.7rem;
-  border-left: 2px solid rgba(91, 159, 212, 0.3);
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.timeline-item {
-  font-size: 0.76rem;
-  color: var(--text);
-  line-height: 1.35;
-  display: flex;
-  gap: 0.4rem;
-  align-items: baseline;
-}
-
-.timeline-item .src {
-  font-size: 0.66rem;
-  padding: 0.05rem 0.35rem;
-  border-radius: 999px;
-  background: var(--panel-2);
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.progress-log-hint {
-  margin: 0;
-}
-
-button.linkish {
-  background: none;
-  border: 0;
-  color: var(--accent);
-  cursor: pointer;
-  padding: 0;
-  font: inherit;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-button.linkish:hover {
-  color: var(--accent-2, var(--accent));
-}
+/* .chip.chip-err / .chip.chip-danger 由 components.css 定义（后加载，
+   color + border-color 两条都被覆盖），这里不再重复。 */
 
 .log {
   background: #070b10;
@@ -601,9 +270,6 @@ button.linkish:hover {
   .form-panel,
   .progress-panel {
     max-height: none;
-  }
-  .kpi-grid {
-    grid-template-columns: 1fr 1fr;
   }
   .field-grid {
     grid-template-columns: 1fr;

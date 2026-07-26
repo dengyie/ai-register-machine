@@ -1,22 +1,15 @@
 // ImportTab — 2×2 cards: nodes file, mail text, auths file, pack zip
 import { useRef, useState } from "preact/hooks";
 import * as api from "../../api/client.js";
-import { session } from "../../store/session.js";
 import { showOpsFeedback } from "../../store/feedback.js";
-import { Button } from "../../ui/index.js";
+import { Button, LogDetails } from "../../ui/index.js";
 import { formatApiError } from "../../lib/format.js";
-
-function pretty(v) {
-  try {
-    return typeof v === "string" ? v : JSON.stringify(v, null, 2);
-  } catch {
-    return String(v);
-  }
-}
+import { pretty, auth401 } from "../../lib/http.js";
+import { useBusy } from "../../lib/useBusy.js";
 
 export function ImportTab() {
   const [result, setResult] = useState("");
-  const [busy, setBusy] = useState("");
+  const { is: busyIs, run: withBusy } = useBusy();
   const nodesFile = useRef(null);
   const authsFile = useRef(null);
   const packFile = useRef(null);
@@ -27,38 +20,29 @@ export function ImportTab() {
   const [authsRemote, setAuthsRemote] = useState(false);
   const [packApply, setPackApply] = useState(false);
 
-  function auth(e) {
-    if (e && e.status === 401) {
-      session.value = { ...session.value, authenticated: false };
-      return true;
-    }
-    return false;
-  }
-
   async function run(key, fn) {
-    setBusy(key);
-    try {
-      const body = await fn();
-      setResult(pretty(body));
-      if (key === "mail") {
-        const r = (body && body.result) || body || {};
-        const summary =
-          (body && body.detail) ||
-          r.summary ||
-          `邮箱导入 · 新增 ${r.new ?? r.lines_written ?? 0} · 重复 ${r.duplicate ?? 0} · 无效 ${r.skipped ?? 0}`;
-        const status = r.status || (r.new > 0 || r.lines_written > 0 ? "success" : "empty");
-        const kind = status === "success" ? "ok" : "info";
-        showOpsFeedback(summary, kind, { toast: true, sticky: true });
-      } else {
-        showOpsFeedback(`导入完成 · ${key}`, "ok", { toast: true, sticky: false });
+    await withBusy(key, async () => {
+      try {
+        const body = await fn();
+        setResult(pretty(body));
+        if (key === "mail") {
+          const r = (body && body.result) || body || {};
+          const summary =
+            (body && body.detail) ||
+            r.summary ||
+            `邮箱导入 · 新增 ${r.new ?? r.lines_written ?? 0} · 重复 ${r.duplicate ?? 0} · 无效 ${r.skipped ?? 0}`;
+          const status = r.status || (r.new > 0 || r.lines_written > 0 ? "success" : "empty");
+          const kind = status === "success" ? "ok" : "info";
+          showOpsFeedback(summary, kind, { toast: true, sticky: true });
+        } else {
+          showOpsFeedback(`导入完成 · ${key}`, "ok", { toast: true, sticky: false });
+        }
+      } catch (e) {
+        if (auth401(e)) return;
+        setResult(pretty({ error: formatApiError(e) }));
+        showOpsFeedback(`导入失败: ${formatApiError(e)}`, "err");
       }
-    } catch (e) {
-      if (auth(e)) return;
-      setResult(pretty({ error: formatApiError(e) }));
-      showOpsFeedback(`导入失败: ${formatApiError(e)}`, "err");
-    } finally {
-      setBusy("");
-    }
+    });
   }
 
   return (
@@ -85,7 +69,7 @@ export function ImportTab() {
           </label>
           <Button
             variant="ghost"
-            busy={busy === "nodes"}
+            busy={busyIs("nodes")}
             onClick={() =>
               run("nodes", async () => {
                 const f = nodesFile.current?.files?.[0];
@@ -125,7 +109,7 @@ export function ImportTab() {
           </label>
           <Button
             variant="ghost"
-            busy={busy === "mail"}
+            busy={busyIs("mail")}
             onClick={() =>
               run("mail", async () => {
                 const fd = new FormData();
@@ -152,7 +136,7 @@ export function ImportTab() {
           </label>
           <Button
             variant="ghost"
-            busy={busy === "auths"}
+            busy={busyIs("auths")}
             onClick={() =>
               run("auths", async () => {
                 const f = authsFile.current?.files?.[0];
@@ -181,7 +165,7 @@ export function ImportTab() {
           </label>
           <Button
             variant="ghost"
-            busy={busy === "pack"}
+            busy={busyIs("pack")}
             onClick={() =>
               run("pack", async () => {
                 const f = packFile.current?.files?.[0];
@@ -197,7 +181,7 @@ export function ImportTab() {
           </Button>
         </div>
       </div>
-      {result ? <pre class="log">{result}</pre> : null}
+      <LogDetails text={result} summary="导入响应详情" />
     </div>
   );
 }

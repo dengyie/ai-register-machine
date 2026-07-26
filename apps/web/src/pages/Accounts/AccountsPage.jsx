@@ -3,10 +3,10 @@
 // Delete is local-only (DELETE /api/accounts/{name}); does not touch tebi.
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import * as api from "../../api/client.js";
-import { session } from "../../store/session.js";
 import { showOpsFeedback } from "../../store/feedback.js";
-import { Button, Select, Kpi } from "../../ui/index.js";
+import { Button, Select, Kpi, PageHeader, LogDetails } from "../../ui/index.js";
 import { formatApiError } from "../../lib/format.js";
+import { auth401 } from "../../lib/http.js";
 import "../../styles/accounts.css";
 
 const COMPLETE_OPTS = [
@@ -46,14 +46,6 @@ export function AccountsPage() {
   const filtersRef = useRef({ q: "", complete: "", pageSize: "50", page: 1 });
   filtersRef.current = { q, complete, pageSize, page };
 
-  const handleAuth = (e) => {
-    if (e && e.status === 401) {
-      session.value = { ...session.value, authenticated: false };
-      return true;
-    }
-    return false;
-  };
-
   const load = useCallback(async (override = {}) => {
     const f = { ...filtersRef.current, ...override };
     const pg = f.page != null ? f.page : 1;
@@ -71,7 +63,7 @@ export function AccountsPage() {
       if (override.page != null) setPage(override.page);
       else if (res && res.page != null) setPage(res.page);
     } catch (e) {
-      if (handleAuth(e)) return;
+      if (auth401(e)) return;
       setData(null);
       setErr(formatApiError(e));
     } finally {
@@ -123,7 +115,7 @@ export function AccountsPage() {
       showOpsFeedback(`已删除 ${name}`, "ok", { toast: true, sticky: false });
       await load();
     } catch (e) {
-      if (handleAuth(e)) return;
+      if (auth401(e)) return;
       setResult(String(e.message || e));
       showOpsFeedback(`删除失败: ${formatApiError(e)}`, "err");
     }
@@ -139,20 +131,19 @@ export function AccountsPage() {
 
   return (
     <section class="page page-accounts">
-      <header class="page-head">
-        <div>
-          <h1>账号池</h1>
-          <p class="hint">
+      <PageHeader
+        title="账号池"
+        hint={
+          <>
             cpa_auths 落盘 complete（access+refresh）。注册主链路止于磁盘；导入 tebi 另走
             Import。
-          </p>
-        </div>
-        <div class="toolbar">
-          <Button variant="ghost" busy={busy} onClick={() => load()}>
-            刷新
-          </Button>
-        </div>
-      </header>
+          </>
+        }
+      >
+        <Button variant="ghost" busy={busy} onClick={() => load()}>
+          刷新
+        </Button>
+      </PageHeader>
 
       <div class="card filter-bar">
         <label class="inline">
@@ -281,7 +272,7 @@ export function AccountsPage() {
         </table>
       </div>
 
-      {result ? <pre class="log compact">{result}</pre> : null}
+      <LogDetails text={result} summary="操作响应详情" compact />
     </section>
   );
 }

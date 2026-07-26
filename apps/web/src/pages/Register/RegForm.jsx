@@ -3,7 +3,7 @@
 // per-provider secrets/domains live on Resources → 邮箱; pipeline pool
 // on Settings. State is lifted to RegisterPage so the 4s poll never wipes edits.
 import { useEffect } from "preact/hooks";
-import { Field, Select } from "../../ui/index.js";
+import { Field, Select, ProviderPoolStatus } from "../../ui/index.js";
 import { regFormDirty } from "../../store/run.js";
 import {
   EMAIL_PROVIDERS,
@@ -78,21 +78,20 @@ export function RegForm({
               </label>
             ))}
           </div>
+          <ProviderPoolStatus
+            selected={selected}
+            primaryProvider={residualPrimary}
+            canClear={false}
+          />
           <p class="hint tight">
-            仅选择本批使用的通道（与设置页共用 <code>email_providers</code>
-            ，有勾选保存会覆盖池）。密钥 / 域名 / 凭证在
-            <a href="#/resources">资源 → 邮箱</a>
-            ；轮询策略 / 清空池在
+            仅选择本批使用的通道（与设置页共用 <code>email_providers</code>）。密钥 / 域名 →{" "}
+            <a href="#/resources?tab=mail">资源 · 邮箱</a>；轮询策略 →{" "}
             <a href="#/settings">设置</a>
-            。空勾选<strong>不</strong>抹池、<strong>不</strong>把单通道写回 multi。
           </p>
           {!selected.length ? (
             <p class="hint warn tight">
               至少勾选一个才能启动
-              {residualPrimary
-                ? `（设置页单通道残留：${residualPrimary}；注册页不会自动勾选）`
-                : "；空勾选不会清空已保存的 email_providers"}
-              。
+              {residualPrimary ? `（注册页不会自动勾选残留单通道）` : ""}。
             </p>
           ) : null}
         </Field>

@@ -17,6 +17,7 @@ import {
   recentWrites,
   timeline,
 } from "./progressRender.jsx";
+import "../../styles/run-progress.css";
 
 function barKind(cls) {
   if (cls === "danger") return "err";

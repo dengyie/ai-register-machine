@@ -29,11 +29,8 @@
   font: inherit;
 }
 
-.chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-}
+/* .chip-row 由 components.css 定义（后加载，三条声明全部覆盖，
+   实际生效的 gap 是 components.css 的 0.4rem 而非这里的 0.35rem）。 */
 
 .chip.hot {
   color: var(--accent);
@@ -271,10 +268,6 @@
   font-size: 0.85rem;
 }
 
-.card.ok {
-  border-color: rgba(91, 212, 154, 0.35);
-}
-
 .card.muted {
   color: var(--muted);
 }
@@ -285,4 +278,32 @@
   .nodes-tab .grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* Mail tab 分区（batch-2 IA）：配置区 vs 运维区 */
+.mail-section-title {
+  margin: 1.1rem 0 0.4rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3rem;
+}
+
+.mail-section-title .hint {
+  font-weight: 400;
+}
+
+/* 全局 defaultDomains（原来 CF / CloudMail 面板各一份，现在一处） */
+.mail-global-domains h2 {
+  margin-top: 0;
+}
+
+.mail-global-domains .mail-domains-input {
+  display: block;
+  margin-top: 0.6rem;
+}
+
+.mail-global-domains .mail-domains-input input {
+  width: 100%;
 }

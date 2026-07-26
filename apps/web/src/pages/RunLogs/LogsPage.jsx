@@ -4,14 +4,14 @@
 // Hash route remains #/logs.
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import * as api from "../../api/client.js";
-import { session } from "../../store/session.js";
+import { auth401 } from "../../lib/http.js";
 import {
   currentRunState,
   overviewState,
   lastProductOk,
 } from "../../store/run.js";
 import { showOpsFeedback } from "../../store/feedback.js";
-import { StatusDot, Chip, Button, Select } from "../../ui/index.js";
+import { StatusDot, Chip, Button, Select, PageHeader } from "../../ui/index.js";
 import { runHeader } from "../Register/progressRender.jsx";
 import { formatApiError } from "../../lib/format.js";
 import "../../styles/run.css";
@@ -64,13 +64,6 @@ export function LogsPage() {
   whichRef.current = which;
   tailRef.current = tail;
 
-  const handleAuth = (e) => {
-    if (e && e.status === 401) {
-      session.value = { ...session.value, authenticated: false };
-      return true;
-    }
-    return false;
-  };
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -83,7 +76,7 @@ export function LogsPage() {
       }
       return run;
     } catch (e) {
-      if (handleAuth(e)) return null;
+      if (auth401(e)) return null;
       throw e;
     }
   }, []);
@@ -102,7 +95,7 @@ export function LogsPage() {
         if (el) el.scrollTop = el.scrollHeight;
       });
     } catch (e) {
-      if (handleAuth(e)) return;
+      if (auth401(e)) return;
       setLogText(String(e.message || e));
     }
   }, []);
@@ -113,7 +106,7 @@ export function LogsPage() {
       const data = await api.listRuns();
       setHistory(historyItems(data));
     } catch (e) {
-      if (handleAuth(e)) return;
+      if (auth401(e)) return;
       setHistory([]);
       setHistoryErr(String(e.message || e));
     }
@@ -143,7 +136,7 @@ export function LogsPage() {
           );
         }
       } catch (e) {
-        if (handleAuth(e)) return;
+        if (auth401(e)) return;
         if (explicit) showOpsFeedback(formatApiError(e), "err");
       } finally {
         if (explicit) setBusy(false);
@@ -198,39 +191,39 @@ export function LogsPage() {
 
   return (
     <section class="page page-logs">
-      <header class="page-head">
-        <div>
-          <h1>日志</h1>
-          <p class="hint">
+      <PageHeader
+        title="日志"
+        toolbarClass="toolbar wrap"
+        hint={
+          <>
             当前 run 的 worker / supervisor tail、路径摘要与历史 supervisor。启动与进度在「注册」。
-          </p>
-        </div>
-        <div class="toolbar wrap">
-          <Button
-            variant="ghost"
-            busy={busy}
-            onClick={() => refreshAll({ explicit: true })}
-          >
-            刷新
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => {
-              location.hash = "#/register";
-            }}
-          >
-            ← 注册
-          </Button>
-          <label class="inline check">
-            <input
-              type="checkbox"
-              checked={follow}
-              onChange={(e) => setFollow(!!e.currentTarget.checked)}
-            />{" "}
-            自动刷新
-          </label>
-        </div>
-      </header>
+          </>
+        }
+      >
+        <Button
+          variant="ghost"
+          busy={busy}
+          onClick={() => refreshAll({ explicit: true })}
+        >
+          刷新
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() => {
+            location.hash = "#/register";
+          }}
+        >
+          ← 注册
+        </Button>
+        <label class="inline check">
+          <input
+            type="checkbox"
+            checked={follow}
+            onChange={(e) => setFollow(!!e.currentTarget.checked)}
+          />{" "}
+          自动刷新
+        </label>
+      </PageHeader>
 
       <div
         class={`run-header run-header-${head.state}`}

@@ -10,3 +10,6 @@ export { Bar } from "./Bar.jsx";
 export { ToastHost } from "./ToastHost.jsx";
 export { OpsFeedbackBar } from "./OpsFeedbackBar.jsx";
 export { Drawer } from "./Drawer.jsx";
+export { PageHeader } from "./PageHeader.jsx";
+export { LogDetails } from "./LogDetails.jsx";
+export { ProviderPoolStatus } from "./ProviderPoolStatus.jsx";
