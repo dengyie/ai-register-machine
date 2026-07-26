@@ -20,7 +20,23 @@ def test_tab_pool_chromium_start_lock_source() -> None:
     assert "with _chromium_start_lock:" in src
     assert "browser = Chromium(options)" in src
     assert "def display_available" in src
-    print("PASS  tab_pool chromium start lock + display_available")
+    # CFT149 + turnstilePatch: only service_worker in /json → need page target.
+    assert "def patch_drission_test_connect" in src
+    assert "def ensure_cdp_page_target" in src
+    assert "patch_drission_test_connect()" in src
+    print("PASS  tab_pool chromium start lock + display_available + cdp page patch")
+
+
+def test_remote_allow_origins_in_slim_flags() -> None:
+    """Chrome 149 CDP rejects WS without --remote-allow-origins (HTTP /json still works)."""
+    ttk = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    assert '"--remote-allow-origins=*"' in ttk or "'--remote-allow-origins=*'" in ttk
+    assert "CHROMIUM_SLIM_FLAGS" in ttk
+    cli = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    assert "--remote-allow-origins=*" in cli
+    mint = (ROOT / "cpa_xai" / "browser_confirm.py").read_text(encoding="utf-8")
+    assert "--remote-allow-origins=*" in mint
+    print("PASS  remote-allow-origins in slim flags + register_cli + mint fallback")
 
 
 def test_display_available_unit() -> None:
@@ -75,6 +91,21 @@ def test_hard_recycle_cleans_orphans() -> None:
     assert "Turnstile headless 失败且无可用 DISPLAY" in src
     assert "headed_display_ready()" in src
     print("PASS  hard recycle orphan cleanup + DISPLAY upgrade gate source")
+
+
+def test_launch_supervisor_wires_fingerprint_default_off() -> None:
+    """Default off (known-good Turnstile). anon still available via env override."""
+    src = (ROOT / "scripts" / "launch_batch_supervisor.sh").read_text(encoding="utf-8")
+    assert "BROWSER_FINGERPRINT_MODE" in src
+    assert "--browser-fingerprint-mode" in src
+    assert (
+        'FP_MODE=${BROWSER_FINGERPRINT_MODE:-off}' in src
+        or 'FP_MODE="${BROWSER_FINGERPRINT_MODE:-off}"' in src
+    )
+    # anon still forces hard recycle when selected
+    assert 'RECYCLE_MODE=hard' in src
+    assert 'FP_MODE" == "anon"' in src or "FP_MODE == \"anon\"" in src or 'FP_MODE" == "anon"' in src or '[[ "$FP_MODE" == "anon" ]]' in src
+    print("PASS  launch_batch_supervisor fingerprint default=off")
 
 
 def test_start_browser_cleans_orphans_on_fail() -> None:
@@ -455,9 +486,11 @@ def test_headed_display_ready_unit() -> None:
 
 def main() -> int:
     test_tab_pool_chromium_start_lock_source()
+    test_remote_allow_origins_in_slim_flags()
     test_display_available_unit()
     test_create_standalone_retries_and_lock()
     test_hard_recycle_cleans_orphans()
+    test_launch_supervisor_wires_fingerprint_default_off()
     test_start_browser_cleans_orphans_on_fail()
     test_signup_spa_stuck_raises_account_retry()
     test_classify_email_stage_browser_boot()

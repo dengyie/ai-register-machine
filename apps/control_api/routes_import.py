@@ -44,7 +44,10 @@ async def post_import_mail(
         raise ValueError("mode must be append or replace")
     s = get_settings()
     result = import_mail(s.project_root, content, mode=mode)  # type: ignore[arg-type]
-    return ImportResultOut(ok=True, detail="mail import", result=result)
+    summary = str(result.get("summary") or "").strip() or "mail import"
+    # ok stays True for HTTP 200 so UI can render structured result; status field
+    # (success|partial|empty) drives toast kind.
+    return ImportResultOut(ok=True, detail=summary, result=result)
 
 
 @router.post("/api/import/auths", response_model=ImportResultOut)

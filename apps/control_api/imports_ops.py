@@ -76,33 +76,197 @@ def import_nodes(
     }
 
 
+def _mail_pool_email_set(path: Path) -> set[str]:
+    """Lowercased emails currently in the pool file (deduped). No secrets returned."""
+    from mail_pool_probe import parse_credential_line
+
+    out: set[str] = set()
+    if not path.is_file():
+        return out
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        item = parse_credential_line(raw)
+        if not item:
+            continue
+        out.add(item.email.strip().lower())
+    return out
+
+
+def _summarize_mail_import(
+    *,
+    mode: str,
+    parsed: int,
+    new: int,
+    duplicate: int,
+    skipped: int,
+    pool_before: int,
+    pool_after: int,
+    sample_new: list[str],
+    formats: dict[str, int],
+) -> str:
+    """Human-readable Chinese summary for UI toast/banner (no secrets)."""
+    bits: list[str] = []
+    if mode == "replace":
+        bits.append(f"替换写入 {new} 条")
+    else:
+        bits.append(f"新增 {new}")
+        if duplicate:
+            bits.append(f"重复跳过 {duplicate}")
+    if skipped:
+        bits.append(f"格式无效 {skipped}")
+    fmt_bits = []
+    if formats.get("json_objects"):
+        fmt_bits.append(f"JSON {formats['json_objects']}")
+    if formats.get("csv_rows"):
+        fmt_bits.append(f"CSV {formats['csv_rows']}")
+    if fmt_bits:
+        bits.append("来源 " + "+".join(fmt_bits))
+    bits.append(f"池 {pool_before}→{pool_after}")
+    if sample_new:
+        show = "、".join(sample_new[:3])
+        if len(sample_new) > 3:
+            show += f" 等{len(sample_new)}个"
+        bits.append(f"新号 {show}")
+    if new == 0 and duplicate > 0 and skipped == 0:
+        return "未新增（全部已在池中）· " + " · ".join(bits)
+    if new == 0 and skipped > 0 and duplicate == 0:
+        return "未导入（格式无效）· " + " · ".join(bits)
+    if new == 0 and parsed == 0:
+        return "未导入（无有效凭证）· " + " · ".join(bits)
+    if new > 0 and (duplicate or skipped):
+        return "部分成功 · " + " · ".join(bits)
+    if new > 0:
+        return "导入成功 · " + " · ".join(bits)
+    return "导入完成 · " + " · ".join(bits)
+
+
 def import_mail(
     root: Path,
     content: str,
     *,
     mode: Literal["append", "replace"] = "append",
 ) -> dict[str, Any]:
+    """Import mail credentials; normalize vendor formats → dash form before write.
+
+    Accepts classic ``email----password----clientId----refreshToken`` lines,
+    vendor JSON (objects/arrays/wrappers), CSV headers, and ``|``/``;``/tab/``:``
+    4-field lines. Invalid lines are skipped (not written raw).
+
+    Append mode skips emails already present in the pool (dedupe) and reports
+    new vs duplicate counts so the UI can show honest feedback.
+    """
+    from mail_pool_probe import normalize_credential_text, parse_credential_line
+
     cfg = load_config(root)
     rel = str(cfg.get("hotmail_accounts_file") or "mail_credentials.txt")
     target = ensure_under(root, (root / rel).resolve() if not Path(rel).is_absolute() else Path(rel))
     # Force under root even if absolute path outside
     if root.resolve() not in target.parents and target != root.resolve():
         target = root / "mail_credentials.txt"
+
+    text, norm_stats = normalize_credential_text(content)
+    parsed_lines = [ln for ln in text.splitlines() if ln.strip() and not ln.strip().startswith(("#", "//"))]
+
+    existing = _mail_pool_email_set(target) if target.is_file() else set()
+    pool_before = len(existing)
+
+    to_write: list[str] = []
+    new_emails: list[str] = []
+    dup_emails: list[str] = []
+    seen_batch: set[str] = set()
+    for ln in parsed_lines:
+        item = parse_credential_line(ln)
+        if not item:
+            continue
+        key = item.email.strip().lower()
+        if key in seen_batch:
+            dup_emails.append(item.email)
+            continue
+        seen_batch.add(key)
+        if mode == "append" and key in existing:
+            dup_emails.append(item.email)
+            continue
+        to_write.append(ln)
+        new_emails.append(item.email)
+
+    write_body = ""
+    if to_write:
+        write_body = "\n".join(to_write)
+        if not write_body.endswith("\n"):
+            write_body += "\n"
+
+    # replace + zero valid credentials would truncate the pool to empty. A .bak is
+    # taken below, but the UI only reports "未导入（格式无效）" — the user would not
+    # know the pool was wiped. Refuse instead; append never truncates so it is exempt.
+    if mode == "replace" and not write_body and target.is_file():
+        raise ValueError(
+            f"replace 模式解析出 0 条有效凭证，将清空邮箱池（当前 {pool_before} 个）——已拒绝。"
+            f"请检查格式（四段 ---- / JSON / CSV / 管道分隔），或改用 append。"
+        )
+
     backup = None
-    if target.is_file():
+    if target.is_file() and (mode == "replace" or write_body):
         bak = target.with_name(target.name + f".bak-web-{time.strftime('%Y%m%d_%H%M%S')}")
         shutil.copy2(target, bak)
         backup = str(bak)
-    text = content if content.endswith("\n") or content == "" else content + "\n"
+
     if mode == "replace" or not target.is_file():
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-        lines = len([ln for ln in text.splitlines() if ln.strip()])
-    else:
+        target.write_text(write_body, encoding="utf-8")
+    elif write_body:
         with target.open("a", encoding="utf-8") as f:
-            f.write(text)
-        lines = len([ln for ln in text.splitlines() if ln.strip()])
-    return {"ok": True, "path": str(target), "backup": backup, "mode": mode, "lines_written": lines}
+            f.write(write_body)
+
+    pool_after = len(_mail_pool_email_set(target)) if target.is_file() else 0
+    lines_written = len(to_write)
+    skipped = int(norm_stats.get("skipped") or 0)
+    # batch-internal dups counted in duplicate
+    duplicate = len(dup_emails)
+    formats = {
+        "json_objects": int(norm_stats.get("json_objects") or 0),
+        "csv_rows": int(norm_stats.get("csv_rows") or 0),
+    }
+    summary = _summarize_mail_import(
+        mode=mode,
+        parsed=len(parsed_lines),
+        new=lines_written,
+        duplicate=duplicate,
+        skipped=skipped,
+        pool_before=pool_before,
+        pool_after=pool_after,
+        sample_new=new_emails,
+        formats=formats,
+    )
+    # status for UI: success | partial | empty
+    if lines_written > 0 and (duplicate or skipped):
+        status = "partial"
+    elif lines_written > 0:
+        status = "success"
+    else:
+        status = "empty"
+
+    return {
+        "ok": True,
+        "status": status,
+        "summary": summary,
+        "path": str(target),
+        "backup": backup,
+        "mode": mode,
+        "lines_written": lines_written,
+        "parsed": len(parsed_lines),
+        "new": lines_written,
+        "duplicate": duplicate,
+        "skipped": skipped,
+        "pool_before": pool_before,
+        "pool_after": pool_after,
+        "new_emails": new_emails[:20],
+        "duplicate_emails": dup_emails[:20],
+        "normalized": norm_stats,
+        "formats": formats,
+    }
 
 
 def import_auths(

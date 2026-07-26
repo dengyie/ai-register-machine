@@ -294,9 +294,43 @@ def poll_device_token(
             log(f"oauth poll: {err} (sleep {sleep_for}s)")
             time.sleep(sleep_for)
             continue
+        # Hard terminal errors — dump status/body keys for invalid_grant diagnosis.
+        # Never log access_token / refresh_token even if present on odd responses.
+        body_keys: list[str] = []
+        safe_body: dict[str, Any] = {}
+        if isinstance(body, dict):
+            body_keys = sorted(str(k) for k in body.keys())
+            for k, v in body.items():
+                lk = str(k).lower()
+                if any(x in lk for x in ("token", "secret", "password", "code")) and lk not in (
+                    "error",
+                    "error_code",
+                    "error_description",
+                ):
+                    safe_body[str(k)] = f"<{type(v).__name__}>"
+                else:
+                    safe_body[str(k)] = v if not isinstance(v, (dict, list)) else type(v).__name__
         if err in ("expired_token", "access_denied"):
+            log(
+                f"oauth poll HARD: status={status} err={err} desc={desc!r} "
+                f"keys={body_keys} body={safe_body!r}"
+            )
             raise OAuthDeviceError(f"device auth failed: {err}: {desc}")
         if status == 400 and err:
+            # Taxonomy for operators: after browser lands on device/done,
+            # invalid_grant Access denied is server-side policy on the token
+            # exchange (same body as dead refresh_token), not a missed Allow click.
+            tax = "server_policy" if err == "invalid_grant" else "token_error"
+            log(
+                f"oauth poll HARD 400: status={status} err={err} desc={desc!r} "
+                f"tax={tax} keys={body_keys} body={safe_body!r}"
+            )
+            if err == "invalid_grant":
+                raise OAuthDeviceError(
+                    f"device auth token error: {err}: {desc or body} "
+                    f"[tax=server_policy; consent may have succeeded — "
+                    f"token endpoint denied exchange]"
+                )
             raise OAuthDeviceError(f"device auth token error: {err}: {desc or body}")
         # 5xx / empty / proxy HTML — treat as soft error and keep polling
         if status >= 500 or status in (502, 503, 504) or not isinstance(body, dict):

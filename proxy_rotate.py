@@ -58,9 +58,13 @@ DEFAULT_GROK_DOMAINS = (
     "assets.grok.com",
 )
 
+# Meta/group names + personal dog VPS (35.212.179.13 / mango9502 AnyTLS+TUIC)
+# and P1024 leaves that hairpin via dialer-proxy through that VPS.
+# Host config clash_node_exclude replaces this wholesale when set.
 _DEFAULT_CLASH_EXCLUDE = (
     r"剩余|距离|套餐|建议|官网|DIRECT|REJECT|自动选择|故障转移|"
-    r"Pass|Compatible|REJECT-DROP|GLOBAL|GROK-REG"
+    r"Pass|Compatible|REJECT-DROP|GLOBAL|GROK-REG|"
+    r"GVPS-AnyTLS|GVPS-TUIC|googlevps|P1024-"
 )
 
 _SELECTOR_TYPES = frozenset(

@@ -6,6 +6,8 @@ __pycache__/
 venv/
 dist/
 .DS_Store
+# macOS AppleDouble sidecar files (break Chrome --load-extension if copied to host)
+**/._*
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

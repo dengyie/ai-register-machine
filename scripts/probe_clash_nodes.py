@@ -68,10 +68,19 @@ GROUP_TYPES = {
 }
 # Groups whose leaf lists we rewrite to healthy-only for register batches
 REGISTER_GROUPS = ("🎯Grok注册", "♻️Grok优选", "PROXY", "🔰ChatGPT")
-# Always keep at front if healthy
-PREFERRED = (
+# Dog VPS (35.212.179.13 / mango9502) + hairpin dialer leaves — traffic-precious,
+# never front-load into Grok register rotate pool. Prefer residential 家宽 instead.
+REGISTER_POOL_EXCLUDE = (
     "GVPS-AnyTLS-googlevps",
     "GVPS-TUIC-googlevps",
+)
+REGISTER_POOL_EXCLUDE_RE = re.compile(
+    r"GVPS-AnyTLS-googlevps|GVPS-TUIC-googlevps|googlevps|P1024-"
+)
+# Prefer these markers (substring) at front of register groups when healthy
+PREFERRED_MARKERS = ("家宽",)
+# Legacy explicit names (still preferred if healthy and not excluded)
+PREFERRED = (
     "GVPS-VLESS-CF-LSJ",
     "GVPS-VLESS-CF-DLD",
 )
@@ -453,7 +462,21 @@ def main() -> int:
             }
 
     healthy.sort(key=lambda n: results[n]["delay_ms"] or 99999)
-    preferred_first = [n for n in PREFERRED if n in set(healthy)]
+    # Register pool: drop dog VPS / dialer-hairpin leaves even if delay-healthy.
+    healthy_reg = [
+        n
+        for n in healthy
+        if n not in REGISTER_POOL_EXCLUDE and not REGISTER_POOL_EXCLUDE_RE.search(n)
+    ]
+    preferred_residential = [
+        n
+        for n in healthy_reg
+        if any(m in n for m in PREFERRED_MARKERS)
+    ]
+    preferred_named = [n for n in PREFERRED if n in set(healthy_reg)]
+    preferred_first = preferred_residential + [
+        n for n in preferred_named if n not in preferred_residential
+    ]
 
     by_cls_ok = Counter(classify(n) for n in healthy)
     by_cls_dead = Counter(classify(n) for n in dead)
@@ -501,6 +524,10 @@ def main() -> int:
             for n in dead
         ],
         "preferred_first": preferred_first,
+        "healthy_reg": healthy_reg,
+        "register_pool_excluded": [
+            n for n in healthy if n not in set(healthy_reg)
+        ],
     }
     report_path = REPORT_DIR / f"clash_node_health_{ts}.json"
     report_path.write_text(
@@ -523,16 +550,29 @@ def main() -> int:
         return 0 if healthy else 2
 
     pick = args.select.strip()
-    if pick and pick not in set(healthy):
-        print(f"WARN requested --select {pick!r} not healthy; ignoring")
+    if pick and pick not in set(healthy_reg):
+        if pick in set(healthy) and pick not in set(healthy_reg):
+            print(
+                f"WARN requested --select {pick!r} is register-pool-excluded "
+                f"(dog VPS / dialer hairpin); ignoring"
+            )
+        else:
+            print(f"WARN requested --select {pick!r} not healthy; ignoring")
         pick = ""
     if not pick:
-        pick = preferred_first[0] if preferred_first else (healthy[0] if healthy else "")
+        pick = (
+            preferred_first[0]
+            if preferred_first
+            else (healthy_reg[0] if healthy_reg else "")
+        )
     if pick:
-        for g in ("GLOBAL", "PROXY", "🎯Grok注册", "🔰ChatGPT"):
+        for g in ("GLOBAL", "PROXY", "🎯Grok注册", "🔰ChatGPT", "♻️Grok优选"):
             put_group_now(secret, g, pick)
     else:
-        print("ERROR: no healthy nodes — not changing selection")
+        print(
+            "ERROR: no healthy register-pool nodes "
+            f"(healthy={len(healthy)} reg={len(healthy_reg)}) — not changing selection"
+        )
         return 2
 
     if args.purge_proxies and dead:
@@ -545,20 +585,31 @@ def main() -> int:
             print("\n=== rewrite config groups (post-purge) ===")
             for p in (CFG, MERGED):
                 if p.is_file():
-                    rewrite_config_groups(p, healthy, preferred_first)
+                    rewrite_config_groups(p, healthy_reg, preferred_first)
 
     if args.apply_config:
         print("\n=== rewrite config groups ===")
         for p in (CFG, MERGED):
             if p.is_file():
-                rewrite_config_groups(p, healthy, preferred_first)
+                rewrite_config_groups(p, healthy_reg, preferred_first)
         print(
             "NOTE: restart mihomo to load rewritten groups:\n"
             "  bash start-clash-for-grok.sh"
         )
 
-    print(f"\nREADY for register batch: select={pick} healthy={len(healthy)} dead={len(dead)}")
-    return 0 if healthy else 2
+    excluded_live = [n for n in healthy if n not in set(healthy_reg)]
+    if excluded_live:
+        print(
+            "register_pool_excluded_healthy="
+            + ",".join(excluded_live[:12])
+            + (f"...(+{len(excluded_live)-12})" if len(excluded_live) > 12 else "")
+        )
+    print(
+        f"\nREADY for register batch: select={pick} "
+        f"healthy={len(healthy)} reg_pool={len(healthy_reg)} dead={len(dead)} "
+        f"preferred_first={preferred_first[:5]}"
+    )
+    return 0 if healthy_reg else 2
 
 
 if __name__ == "__main__":

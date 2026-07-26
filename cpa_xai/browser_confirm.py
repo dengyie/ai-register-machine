@@ -9,15 +9,15 @@ Proven flow (2026-07-10, free account):
   4. 使用邮箱登录 → fill email → 下一步
   5. Wait cf-turnstile-response → fill password → REAL click 登录
   6. May land /account redirect or device page → 继续
-  7. Consent page /oauth2/device/consent → REAL click exact 允许
-     (by_js click causes Invalid action / empty form action)
+  7. Consent page /oauth2/device/consent → set action=allow then REAL click exact 允许
+     (empty actionVal + bare form.submit hits 拒绝 first → invalid_grant Access denied)
   8. /oauth2/device/done "设备已授权" + token poll SUCCESS
 
 Hard rules:
   - Token poll is source of truth
-  - Button match is EXACT text only (允许 ≠ 全部允许)
+  - Button match is EXACT text only (允许 ≠ 全部允许 ≠ 拒绝)
   - Cookie modal must be dismissed before consent Allow
-  - Consent Allow MUST be a real click, not by_js
+  - Consent Allow MUST be a real click after prepare action=allow (never bare f.submit)
   - Prefer headed browser + register turnstilePatch
 """
 
@@ -247,6 +247,8 @@ def _build_standalone_options(
             "--no-first-run",
             "--disable-background-networking",
             "--window-size=1280,900",
+            # Chrome 149 CDP WebSocket origin gate (see CHROMIUM_SLIM_FLAGS)
+            "--remote-allow-origins=*",
         ):
             opts.set_argument(flag)
         ext = str(_pkg_root / "turnstilePatch")
@@ -525,6 +527,14 @@ def create_standalone_page(
                 opts.set_argument(f"--proxy-server={chrome_proxy}")
 
             # Fresh options each attempt so auto_port re-allocates after a failed boot.
+            # CFT 149 + turnstilePatch often exposes only service_worker in /json;
+            # patch Drission test_connect to PUT /json/new before page/webview wait.
+            try:
+                from tab_pool import patch_drission_test_connect  # type: ignore
+
+                patch_drission_test_connect()
+            except Exception:
+                pass
             with chromium_start_lock():
                 browser = Chromium(opts)
             page = browser.latest_tab
@@ -1041,6 +1051,176 @@ def _find_button_exact(page: Any, label: str) -> Any | None:
         return None
 
 
+def _is_device_done(url: str, text: str = "") -> bool:
+    """True when browser landed on device authorized / done page."""
+    u = url or ""
+    t = text or ""
+    tl = t.lower()
+    return (
+        "device/done" in u
+        or "设备已授权" in t
+        or "device authorized" in tl
+    )
+
+
+def _is_consent_page(url: str, text: str = "") -> bool:
+    """OAuth device consent shell (not cookie modal alone)."""
+    u = url or ""
+    t = text or ""
+    return (
+        "/consent" in u
+        or "授权 Grok Build" in t
+        or "Authorize Grok Build" in t
+    )
+
+
+def _consent_should_reopen(
+    *,
+    consent_action_n: int,
+    reopens: int,
+    max_actions: int = 3,
+    max_reopens: int = 1,
+) -> bool:
+    """After several failed Allow attempts on the same consent shell, reopen device URI once."""
+    return consent_action_n >= max_actions and reopens < max_reopens
+
+
+def _wait_post_allow_state(
+    page: Any,
+    log: LogFn,
+    *,
+    budget_sec: float = 4.0,
+) -> tuple[str, str]:
+    """Re-read URL/text after Allow until device/done, leave consent, or budget ends.
+
+    Live 2026-07-25: click → device/done often lands after the first snapshot; a
+    stale capture then falsely logged ``consent still on shell`` while diag
+    already showed ``/device/done`` + 设备已授权. Classification must use a
+    fresh read, not the mid-navigation frame.
+    """
+    deadline = time.time() + max(0.5, float(budget_sec))
+    url = _page_url(page)
+    text = _visible_text(page)
+    while time.time() < deadline:
+        if _is_device_done(url, text):
+            return url, text
+        if not _is_consent_page(url, text):
+            return url, text
+        time.sleep(0.35)
+        url = _page_url(page)
+        text = _visible_text(page)
+    return url, text
+
+
+def _prepare_consent_allow_form(page: Any, log: LogFn) -> str:
+    """Force OAuth form hidden action=allow before clicking 允许.
+
+    Live DOM (2026-07-25): form posts to auth.x.ai/oauth2/device/approve with
+    empty actionVal; 拒绝 is the first type=submit. Bare form.submit() therefore
+    denies. We only set the hidden field here — click stays real on 允许.
+    """
+    try:
+        ret = page.run_js(
+            """
+const forms = Array.from(document.querySelectorAll('form'));
+const f = forms.find((x) => {
+  const t = (x.innerText || '');
+  return t.includes('Grok Build') || t.includes('允许') || t.includes('Allow')
+    || t.includes('拒绝') || t.includes('Deny');
+}) || null;
+if (!f) return 'no_form';
+const ft = (f.innerText || '');
+if (ft.includes('隐私偏好') || ft.includes('全部允许') || /cookie/i.test(ft)) {
+  return 'skip_cookie_form';
+}
+let a = f.querySelector('input[name=action]');
+if (!a) {
+  a = document.createElement('input');
+  a.type = 'hidden';
+  a.name = 'action';
+  f.appendChild(a);
+}
+a.value = 'allow';
+// Prefer name=value attributes on submit buttons when present
+for (const b of f.querySelectorAll('button[type=submit], input[type=submit]')) {
+  const t = String(b.innerText || b.value || '').trim();
+  if (t === '允许' || t === 'Allow' || t === 'Authorize' || t === 'Approve') {
+    if (!b.name) b.setAttribute('name', 'action');
+    if (!b.value || b.value === 'deny' || b.value === 'reject') {
+      try { b.value = 'allow'; } catch (e) {}
+    }
+  }
+}
+return 'ok:allow';
+            """
+        )
+        label = ret if isinstance(ret, str) and ret else "ok"
+        log(f"consent prepare action=allow ret={label!r}")
+        return str(label)
+    except Exception as e:
+        log(f"consent prepare action=allow failed: {e}")
+        return f"err:{type(e).__name__}"
+
+
+def _consent_page_diag(page: Any, log: LogFn, tag: str) -> None:
+    """One-shot diagnostic dump for consent / invalid_grant investigation.
+
+    Logs only — never clicks. Captures URL, cookie-banner state, exact Allow
+    button presence, and a compact form/action/button inventory via JS.
+    """
+    try:
+        url = _page_url(page)
+        text = _visible_text(page)
+        snip = _norm(text)[:200]
+        banner = _cookie_banner_visible(text)
+        exact_labels = ("允许", "Allow", "Authorize", "Approve", "全部允许", "继续", "Continue")
+        found: list[str] = []
+        for lab in exact_labels:
+            if _find_button_exact(page, lab) is not None:
+                found.append(lab)
+        forms_info = ""
+        try:
+            raw = page.run_js(
+                """
+const out = {forms: [], buttons: []};
+for (const f of Array.from(document.querySelectorAll('form')).slice(0, 6)) {
+  const act = f.querySelector('input[name=action]');
+  const t = String(f.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+  out.forms.push({
+    actionAttr: String(f.getAttribute('action') || '').slice(0, 80),
+    method: String(f.method || ''),
+    actionVal: act ? String(act.value || '') : null,
+    text: t,
+  });
+}
+for (const b of Array.from(document.querySelectorAll('button, [role="button"]')).slice(0, 12)) {
+  const t = String(b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim();
+  if (!t) continue;
+  out.buttons.push({
+    t: t.slice(0, 40),
+    type: String(b.getAttribute('type') || ''),
+    dis: !!b.disabled,
+  });
+}
+return JSON.stringify(out);
+                """
+            )
+            if isinstance(raw, str) and raw:
+                forms_info = raw[:500]
+            elif raw is not None:
+                forms_info = str(raw)[:500]
+        except Exception as je:
+            forms_info = f"js_err={type(je).__name__}:{je}"
+        log(
+            f"consent_diag[{tag}] url={url[:180]} banner={banner} "
+            f"exact_btns={found} visible={snip}"
+        )
+        if forms_info:
+            log(f"consent_diag[{tag}] dom={forms_info}")
+    except Exception as e:
+        log(f"consent_diag[{tag}] failed: {type(e).__name__}: {e}")
+
+
 def _cookie_banner_visible(text: str) -> bool:
     """Strong signals only — avoid false-positive on 隐私政策 / ToS links."""
     t = text or ""
@@ -1394,6 +1574,12 @@ def approve_device_code(
     # Wall-clock stall budget (unscaled): enough for a few click retries, far under full timeout.
     device_stall_budget_sec = min(45.0, max(20.0, float(timeout_sec) * 0.25))
     device_stall_click_limit = 6
+    # Consent diagnostics + stuck reopen (invalid_grant: empty action / Deny-first submit).
+    consent_diag_logged = False
+    consent_action_n = 0
+    consent_reopens = 0
+    max_consent_actions = 3
+    max_consent_reopens = 1
 
     while time.time() < deadline:
         if stop_event is not None and stop_event.is_set():
@@ -1425,8 +1611,11 @@ def approve_device_code(
             raise BrowserConfirmError(f"auth failed: {msg}")
 
         # Done page — token poll thread is source of truth; spin lightly until stop_event.
-        if "device/done" in url or "设备已授权" in text or "device authorized" in text.lower():
-            log("device done page — waiting for token poll")
+        if _is_device_done(url, text):
+            log(
+                f"device done page — waiting for token poll "
+                f"(consent_actions={consent_action_n})"
+            )
             # Unscaled short waits so we exit promptly when poll SUCCESS sets stop_event.
             for _ in range(10):
                 if stop_event is not None and stop_event.is_set():
@@ -1436,12 +1625,18 @@ def approve_device_code(
             continue
 
         if "Invalid action" in text:
-            log("Invalid action — reopen device uri")
+            log(
+                f"Invalid action — reopen device uri "
+                f"(consent_actions={consent_action_n})"
+            )
+            _consent_page_diag(page, log, "invalid_action")
             page.get(verification_uri_complete)
             _sleep(2.0)
             phase = "device"
             device_stall_started = None
             device_stall_clicks = 0
+            consent_diag_logged = False
+            consent_action_n = 0
             continue
 
         # Cookie / privacy modal first (blocks OAuth 允许 on consent page)
@@ -1451,39 +1646,99 @@ def approve_device_code(
                 continue
             # Modal still up: never click OAuth 允许 under the overlay
             if "隐私偏好" in text or "全部允许" in text:
-                if "/consent" in url or "授权 Grok Build" in text or "Authorize Grok Build" in text:
+                if _is_consent_page(url, text):
                     log("consent blocked by cookie banner — retry dismiss")
                     _sleep(0.8)
                     continue
 
-        # Consent page — REAL click exact 允许 (never 全部允许)
-        if "/consent" in url or "授权 Grok Build" in text or "Authorize Grok Build" in text:
+        # Consent page — prepare action=allow then REAL click exact 允许 (never 全部允许)
+        if _is_consent_page(url, text):
             phase = "consent"
             device_stall_started = None
             device_stall_clicks = 0
+            # First time we land on consent this loop session: dump DOM inventory.
+            if not consent_diag_logged:
+                consent_diag_logged = True
+                _consent_page_diag(page, log, "enter")
             # double-check banner cleared this frame
             if _cookie_banner_visible(_visible_text(page)):
                 _dismiss_cookie_banner(page, log)
+                _consent_page_diag(page, log, "post_banner")
                 _sleep(0.6)
                 continue
-            # Prefer real click; React needs it to set form action=allow
+
+            # Stuck on consent after repeated Allow attempts → reopen device URI once.
+            if _consent_should_reopen(
+                consent_action_n=consent_action_n,
+                reopens=consent_reopens,
+                max_actions=max_consent_actions,
+                max_reopens=max_consent_reopens,
+            ):
+                consent_reopens += 1
+                log(
+                    f"consent stuck after {consent_action_n} actions — "
+                    f"reopen device uri (reopen={consent_reopens}/{max_consent_reopens})"
+                )
+                _consent_page_diag(page, log, "consent_stuck_reopen")
+                page.get(verification_uri_complete)
+                _sleep(2.0)
+                phase = "device"
+                consent_diag_logged = False
+                consent_action_n = 0
+                continue
+
+            # Force hidden action=allow BEFORE click (empty actionVal → invalid_grant /
+            # bare submit hits 拒绝 which is first type=submit in DOM).
+            _prepare_consent_allow_form(page, log)
+
+            # Prefer real click on exact 允许 only (never 全部允许 / 拒绝).
             if _click_exact(page, ["允许", "Allow", "Authorize", "Approve"], log, real=True):
-                _sleep(2.5)
+                consent_action_n += 1
+                # Navigation to device/done can lag behind the click; poll briefly
+                # then classify from a fresh URL/text read (diag itself can race).
+                post_url, post_text = _wait_post_allow_state(page, log, budget_sec=4.0)
+                _consent_page_diag(
+                    page, log, f"post_real_click_n{consent_action_n}"
+                )
+                # Re-read after diag — JS inventory can outlast a mid-nav snapshot.
+                post_url = _page_url(page) or post_url
+                post_text = _visible_text(page) or post_text
+                if _is_device_done(post_url, post_text):
+                    log(
+                        f"consent allow → device done "
+                        f"(n={consent_action_n})"
+                    )
+                elif _is_consent_page(post_url, post_text):
+                    log(
+                        f"consent still on shell after Allow "
+                        f"(n={consent_action_n}) — will retry/prepare"
+                    )
+                else:
+                    log(
+                        f"consent post-Allow state url={post_url[:120]!r} "
+                        f"(n={consent_action_n})"
+                    )
                 # if cookie reappeared after click, loop will dismiss next iter
                 continue
-            # last resort: set action and submit only the OAuth form (not cookie form)
+
+            # last resort: prepare + click Allow button via JS (never bare form.submit —
+            # 拒绝 is first submit and would deny → invalid_grant Access denied).
+            _consent_page_diag(page, log, f"pre_js_fallback_n{consent_action_n + 1}")
             try:
-                page.run_js(
+                _prepare_consent_allow_form(page, log)
+                js_ret = page.run_js(
                     """
                     const forms = Array.from(document.querySelectorAll('form'));
                     const f = forms.find((x) => {
                       const t = (x.innerText || '');
-                      return t.includes('Grok Build') || t.includes('允许') || t.includes('Allow');
-                    }) || document.querySelector('form');
-                    if(!f) return;
-                    // skip cookie preference forms
+                      return t.includes('Grok Build') || t.includes('允许') || t.includes('Allow')
+                        || t.includes('拒绝') || t.includes('Deny');
+                    }) || null;
+                    if(!f) return 'no_form';
                     const ft = (f.innerText || '');
-                    if (ft.includes('隐私偏好') || ft.includes('全部允许') || /cookie/i.test(ft)) return;
+                    if (ft.includes('隐私偏好') || ft.includes('全部允许') || /cookie/i.test(ft)) {
+                      return 'skip_cookie_form';
+                    }
                     let a=f.querySelector('input[name=action]');
                     if(!a){a=document.createElement('input');a.type='hidden';a.name='action';f.appendChild(a);}
                     a.value='allow';
@@ -1491,13 +1746,23 @@ def approve_device_code(
                       const t=(b.innerText||'').trim();
                       return t==='允许'||t==='Allow'||t==='Authorize'||t==='Approve';
                     });
-                    if(btn) btn.click(); else f.submit();
+                    if(btn) { btn.click(); return 'btn_click:' + (btn.innerText||'').trim(); }
+                    // Do NOT f.submit() — first submit is often 拒绝.
+                    return 'no_allow_button';
                     """
                 )
-                log("consent form submit via JS fallback")
+                consent_action_n += 1
+                log(
+                    f"consent form submit via JS fallback n={consent_action_n} "
+                    f"ret={js_ret!r}"
+                )
                 _sleep(2.5)
+                _consent_page_diag(
+                    page, log, f"post_js_fallback_n{consent_action_n}"
+                )
             except Exception as e:
                 log(f"consent fallback failed: {e}")
+                _consent_page_diag(page, log, "js_fallback_exc")
             continue
 
         # Device code entry

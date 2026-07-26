@@ -25,6 +25,7 @@ from mail_pool_probe import (  # noqa: E402
     KNOWN_DOMAINS,
     QUARANTINABLE_STATUSES,
     STATUS_OK,
+    compact_pool,
     dead_archive_path,
     is_quarantinable,
     pool_stats,
@@ -82,6 +83,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print pool stats and exit (no network)",
     )
+    ap.add_argument(
+        "--compact",
+        action="store_true",
+        help="dedupe live pool by email (first wins); backup first",
+    )
+    ap.add_argument(
+        "--compact-dry-run",
+        action="store_true",
+        help="preview compact without rewriting the pool",
+    )
+    ap.add_argument(
+        "--drop-comments",
+        action="store_true",
+        help="with --compact, also strip # comments and blank lines",
+    )
     args = ap.parse_args(argv)
 
     if args.file:
@@ -102,9 +118,37 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"path: {st['path']}")
             print(f"total: {st['total']}")
+            print(
+                f"raw_lines: {st.get('raw_lines')}  "
+                f"duplicate_extra: {st.get('duplicate_extra')}  "
+                f"invalid: {st.get('invalid_lines')}  "
+                f"needs_compact: {st.get('needs_compact')}"
+            )
             for dom, n in (st.get("by_domain") or {}).items():
                 print(f"  {dom}: {n}")
             print(f"dead_path: {st['dead_path']} ({st['dead_total']})")
+        return 0
+
+    if args.compact or args.compact_dry_run:
+        # --compact-dry-run alone (or with --compact) previews; --compact alone writes.
+        dry = bool(args.compact_dry_run) or not bool(args.compact)
+        if args.compact and not args.compact_dry_run:
+            dry = False
+        out = compact_pool(
+            live,
+            dry_run=dry,
+            drop_invalid=True,
+            drop_comments=bool(args.drop_comments),
+        )
+        if args.json:
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+        else:
+            print(out.get("summary") or out)
+            print(
+                f"unique={out.get('unique')} dup_extra={out.get('duplicate_extra')} "
+                f"invalid_dropped={out.get('invalid_dropped')} "
+                f"backup={out.get('backup_path')}"
+            )
         return 0
 
     domains = _parse_domains(args.domains)
