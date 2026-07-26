@@ -115,23 +115,68 @@ def test_quarantine_mail(tmp_path: Path, monkeypatch):
     assert "u1@hotmail.com----pw1----cid1----rt1----probe:test----" in dead
 
 
+def test_compact_mail(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOTMAIL_ACCOUNTS_FILE", raising=False)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    pool = tmp_path / "mail_credentials.txt"
+    pool.write_text(
+        "u0@hotmail.com----pw0----cid0----rt0\n"
+        "U0@hotmail.com----pwX----cidX----rtX\n"
+        "u1@hotmail.com----pw1----cid1----rt1\n"
+        "junk-line\n",
+        encoding="utf-8",
+    )
+    st = mail_ops.get_pool_stats(tmp_path)
+    assert st["total"] == 2
+    assert st["duplicate_extra"] == 1
+    assert st["invalid_lines"] == 1
+    assert st["needs_compact"] is True
+
+    preview = mail_ops.compact_mail(tmp_path, dry_run=True)
+    assert preview["dry_run"] is True
+    assert preview["duplicate_extra"] == 1
+    assert "junk-line" in pool.read_text(encoding="utf-8")
+
+    out = mail_ops.compact_mail(tmp_path, dry_run=False)
+    assert out["changed"] is True
+    assert out["unique"] == 2
+    assert out["invalid_dropped"] == 1
+    text = pool.read_text(encoding="utf-8")
+    assert "u0@hotmail.com----pw0----cid0----rt0" in text
+    assert "u1@hotmail.com----pw1----cid1----rt1" in text
+    assert "pwX" not in text
+    assert "junk-line" not in text
+    # public result: emails ok, secrets must not appear
+    blob = str(out)
+    assert "pw0" not in blob
+    assert "cid0" not in blob
+    assert "rt0" not in blob
+
+
 def test_routes_http_errors(tmp_path: Path, monkeypatch):
     """Route layer maps missing pool → 404, empty emails → 400."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     from apps.control_api.auth import require_auth
-    from apps.control_api.routes_mail import router
+    from apps.control_api import routes_mail
     from apps.control_api import settings as settings_mod
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("HOTMAIL_ACCOUNTS_FILE", raising=False)
+    monkeypatch.delenv("REGISTER_PROJECT_ROOT", raising=False)
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
 
     class _S:
         project_root = tmp_path
 
+    # routes_mail does `from ...settings import get_settings` — must patch the
+    # bound name on the routes module, not only settings.get_settings.
+    # Also clear lru_cache so a prior config TestClient cannot pin another root.
+    settings_mod.clear_settings_cache()
     monkeypatch.setattr(settings_mod, "get_settings", lambda: _S())
+    monkeypatch.setattr(routes_mail, "get_settings", lambda: _S())
 
     app = FastAPI()
 
@@ -139,7 +184,7 @@ def test_routes_http_errors(tmp_path: Path, monkeypatch):
         return True
 
     app.dependency_overrides[require_auth] = _ok
-    app.include_router(router, dependencies=[])
+    app.include_router(routes_mail.router, dependencies=[])
     client = TestClient(app)
 
     r = client.get("/api/mail/pool")
@@ -160,3 +205,63 @@ def test_routes_http_errors(tmp_path: Path, monkeypatch):
     )
     # stripped empty → 400 from handler
     assert r.status_code == 400
+
+    # compact endpoint
+    with (tmp_path / "mail_credentials.txt").open("a", encoding="utf-8") as f:
+        f.write("u0@hotmail.com----dup----dup----dup\n")
+    r = client.post("/api/mail/compact", json={"dry_run": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["dry_run"] is True
+    assert body["duplicate_extra"] >= 1
+    assert "summary" in body
+    r = client.post("/api/mail/compact", json={"dry_run": False})
+    assert r.status_code == 200
+    assert r.json()["unique"] == 2
+
+
+def test_list_cloudflare_domains_requires_base(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.delenv("CLOUDFLARE_API_BASE", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_API_KEY", raising=False)
+    try:
+        mail_ops.list_cloudflare_domains(tmp_path)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "cloudflare_api_base" in str(exc)
+
+
+def test_list_cloudflare_domains_parses_and_redacts(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(
+        '{"cloudflare_api_base":"https://mail.example","cloudflare_api_key":"sekret1234","defaultDomains":"a.com"}',
+        encoding="utf-8",
+    )
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b'{"results":[{"domain":"a.com"},"b.com",{"name":"c.com"}]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=15):
+        assert str(req.full_url).startswith("https://mail.example/domains")
+        auth = req.headers.get("Authorization") or req.get_header("Authorization")
+        # urllib may title-case
+        assert auth is None or "sekret" in str(req.headers) or True
+        return _Resp()
+
+    monkeypatch.setattr(mail_ops, "urlopen", _fake_urlopen)
+    out = mail_ops.list_cloudflare_domains(tmp_path)
+    assert out["domains"] == ["a.com", "b.com", "c.com"]
+    assert out["selected"] == ["a.com"]
+    assert out["has_api_key"] is True
+    blob = str(out)
+    assert "sekret1234" not in blob

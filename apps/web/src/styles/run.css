@@ -59,6 +59,37 @@
   gap: 0.85rem;
 }
 
+.provider-multi.mail-domain-chips,
+.form-panel .mail-domain-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.75rem;
+  align-items: center;
+}
+
+.form-panel .mail-domain-chips .chip {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.65rem;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 0.86rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.form-panel .hint.tight {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.form-panel .hint.warn {
+  color: #e0a060;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

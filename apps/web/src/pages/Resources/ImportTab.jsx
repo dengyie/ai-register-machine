@@ -40,7 +40,18 @@ export function ImportTab() {
     try {
       const body = await fn();
       setResult(pretty(body));
-      showOpsFeedback(`导入完成 · ${key}`, "ok", { toast: true, sticky: false });
+      if (key === "mail") {
+        const r = (body && body.result) || body || {};
+        const summary =
+          (body && body.detail) ||
+          r.summary ||
+          `邮箱导入 · 新增 ${r.new ?? r.lines_written ?? 0} · 重复 ${r.duplicate ?? 0} · 无效 ${r.skipped ?? 0}`;
+        const status = r.status || (r.new > 0 || r.lines_written > 0 ? "success" : "empty");
+        const kind = status === "success" ? "ok" : "info";
+        showOpsFeedback(summary, kind, { toast: true, sticky: true });
+      } else {
+        showOpsFeedback(`导入完成 · ${key}`, "ok", { toast: true, sticky: false });
+      }
     } catch (e) {
       if (auth(e)) return;
       setResult(pretty({ error: formatApiError(e) }));
@@ -93,11 +104,13 @@ export function ImportTab() {
 
         <div class="card">
           <h2>Mail credentials</h2>
-          <p class="hint">与「资源 → 邮箱」凭证导入同源 API；完整 hotmail 表单见邮箱 Tab。</p>
+          <p class="hint">
+            与「资源 → 邮箱」同源。支持 JSON/CSV/管道；append 去重，反馈含新增/重复/无效。
+          </p>
           <textarea
             rows={5}
             value={mailText}
-            placeholder="email----password----clientId----refresh_token"
+            placeholder={"email----password----clientId----refresh_token\n或 JSON / CSV"}
             onInput={(e) => setMailText(e.currentTarget.value)}
           />
           <label class="inline">

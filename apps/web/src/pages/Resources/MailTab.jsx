@@ -1,22 +1,11 @@
-// MailTab — email provider config + hotmail cred import + pool probe
+// MailTab — per-provider email config + hotmail cred import + pool probe.
+// Pipeline multi-select / strategy live on Settings; Register only picks pool.
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import * as api from "../../api/client.js";
 import { session } from "../../store/session.js";
 import { showOpsFeedback } from "../../store/feedback.js";
-import { Button, Select } from "../../ui/index.js";
+import { Button } from "../../ui/index.js";
 import { formatApiError } from "../../lib/format.js";
-
-const PROVIDERS = [
-  "cloudflare",
-  "cloudmail",
-  "duckmail",
-  "yyds",
-  "gmail",
-  "hotmail",
-  "outlookmail",
-];
-
-const STRATEGIES = ["round_robin", "random", "failover"];
 
 const SECRET_KEYS = [
   "cloudflare_api_key",
@@ -26,8 +15,6 @@ const SECRET_KEYS = [
 ];
 
 const EMPTY = {
-  email_provider: "cloudflare",
-  email_provider_strategy: "round_robin",
   defaultDomains: "",
   cloudflare_api_base: "",
   cloudflare_api_key: "",
@@ -66,12 +53,51 @@ function statusLabel(row) {
   return "不定";
 }
 
+function parseDomainList(raw) {
+  return String(raw || "")
+    .replace(/，/g, ",")
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function joinDomains(list) {
+  const out = [];
+  const seen = new Set();
+  for (const d of list || []) {
+    const name = String(d || "").trim();
+    if (!name) continue;
+    const low = name.toLowerCase();
+    if (seen.has(low)) continue;
+    seen.add(low);
+    out.push(name);
+  }
+  return out.join(",");
+}
+
 export function MailTab() {
   const [form, setForm] = useState(EMPTY);
   const [result, setResult] = useState("");
   const [credText, setCredText] = useState("");
   const [credMode, setCredMode] = useState("append");
   const [busy, setBusy] = useState("");
+  // Block Save until GET /api/config succeeds — empty initial form must not
+  // clear defaultDomains via clearable empty write-through.
+  const [hydrated, setHydrated] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  // Last successful load domains — detect intentional clear on save.
+  const [baselineDomains, setBaselineDomains] = useState("");
+  const [openPanels, setOpenPanels] = useState({
+    cloudflare: true,
+    cloudmail: false,
+    duckmail: false,
+    yyds: false,
+    gmail: false,
+    hotmail: true,
+  });
+  const [cfDomains, setCfDomains] = useState([]);
+  const [cfSelected, setCfSelected] = useState([]);
+  const [cfMeta, setCfMeta] = useState(null);
 
   // Pool probe state
   const [pool, setPool] = useState(null);
@@ -95,15 +121,24 @@ export function MailTab() {
       const known = data.known_domains || [];
       const present = Object.keys(data.by_domain || {});
       const defaults = known.filter((d) => present.includes(d));
-      setProbeDomains((prev) => (prev.length ? prev : defaults.length ? defaults : known.slice(0, 2)));
+      setProbeDomains((prev) =>
+        prev.length ? prev : defaults.length ? defaults : known.slice(0, 2),
+      );
     } catch (e) {
       if (auth(e)) return;
-      // pool file may be missing on fresh install
       setPool(null);
     }
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ force = false } = {}) => {
+    if (force && dirty) {
+      if (
+        !window.confirm("有未保存的邮箱配置更改，确认丢弃并重新加载？")
+      ) {
+        showOpsFeedback("已取消重载", "info", { toast: true, sticky: false });
+        return;
+      }
+    }
     setBusy("load");
     try {
       const data = await api.getConfig();
@@ -114,44 +149,80 @@ export function MailTab() {
         if (k === "hotmail_allow_plus_alias") {
           next[k] = c[k] === true || c[k] === "true" || c[k] === 1 || c[k] === "1";
         } else if (SECRET_KEYS.includes(k)) {
-          // show masked placeholder; empty submit keeps old
           next[k] = "";
         } else {
           next[k] = String(c[k]);
         }
       }
       setForm(next);
+      setCfSelected(parseDomainList(next.defaultDomains));
+      setBaselineDomains(String(next.defaultDomains || ""));
+      setDirty(false);
+      setHydrated(true);
       setResult(
         pretty({
           loaded: true,
-          provider: c.email_provider,
           domains: c.defaultDomains,
+          note: "链路池/策略在设置页；本页只细配各 Provider",
         }),
       );
       await loadPool();
     } catch (e) {
+      // Always clear hydrated on failure (incl. 401) so Save stays blocked.
+      setHydrated(false);
       if (auth(e)) return;
       setResult(String(e.message || e));
+      showOpsFeedback(`加载邮箱配置失败: ${formatApiError(e)}`, "err");
     } finally {
       setBusy("");
     }
-  }, [loadPool]);
+  }, [dirty, loadPool]);
 
   useEffect(() => {
     load();
-  }, [load]);
+    // initial mount only
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function set(partial) {
+    setDirty(true);
     setForm((p) => ({ ...p, ...partial }));
   }
 
+  function togglePanel(name) {
+    setOpenPanels((p) => ({ ...p, [name]: !p[name] }));
+  }
+
   async function save() {
+    if (!hydrated || busy === "load") {
+      showOpsFeedback("请先加载配置后再保存（避免空表单清空 defaultDomains）", "err", {
+        toast: true,
+        sticky: true,
+      });
+      return;
+    }
+    // Single source of truth for domains:
+    // - form.defaultDomains is always kept in sync with chips / hand-edit.
+    // - empty string is intentional clear (backend defaultDomains is clearable).
+    const domains = joinDomains(parseDomainList(form.defaultDomains));
+    const baselineJoined = joinDomains(parseDomainList(baselineDomains));
+    if (!domains && baselineJoined) {
+      if (
+        !window.confirm(
+          "确认清空 defaultDomains？\n\n将写入空值到 config 与 .env（DEFAULT_DOMAINS=）。\nCloudflare / CloudMail / Gmail catch-all 将无可用域名。",
+        )
+      ) {
+        showOpsFeedback("已取消保存", "info", { toast: true, sticky: false });
+        return;
+      }
+    }
     setBusy("save");
     try {
-      // Mirror legacy collectForm: skip empty secrets + skip empty non-bool fields
-      // so we never wipe stored keys with "".
       const partial = {};
+      partial.defaultDomains = domains;
+
       for (const [k, raw] of Object.entries(form)) {
+        if (k === "defaultDomains") continue;
         if (SECRET_KEYS.includes(k)) {
           const v = String(raw || "");
           if (v === "" || v.startsWith("***")) continue;
@@ -167,20 +238,95 @@ export function MailTab() {
       }
       const data = await api.putConfig({ config: partial });
       setResult(pretty(data));
-      showOpsFeedback("邮箱配置已保存", "ok");
-      // clear secret inputs after save
+      const saved = data.config || {};
+      const savedDomains =
+        saved.defaultDomains != null ? String(saved.defaultDomains) : domains;
       setForm((p) => {
         const n = { ...p };
         for (const k of SECRET_KEYS) n[k] = "";
+        n.defaultDomains = savedDomains;
         return n;
       });
+      setCfSelected(parseDomainList(savedDomains));
+      setBaselineDomains(savedDomains);
+      setDirty(false);
+      showOpsFeedback(
+        domains
+          ? `邮箱配置已保存 · domains=${domains}`
+          : "邮箱配置已保存 · defaultDomains 已清空",
+        "ok",
+      );
     } catch (e) {
-      if (auth(e)) return;
+      if (auth(e)) {
+        setHydrated(false);
+        return;
+      }
       setResult(String(e.message || e));
       showOpsFeedback(`保存失败: ${formatApiError(e)}`, "err");
     } finally {
       setBusy("");
     }
+  }
+
+  async function fetchCfDomains() {
+    setBusy("cfDomains");
+    try {
+      const data = await api.cloudflareDomains();
+      const list = data.domains || [];
+      setCfDomains(list);
+      setCfMeta({
+        count: data.count,
+        api_base: data.api_base,
+        has_api_key: data.has_api_key,
+      });
+      // Keep form.defaultDomains as the only selection source.
+      // Never auto-check the full Worker list — that can dump dozens of
+      // domains into DEFAULT_DOMAINS on the next save. If form is empty but
+      // server still has selected, mirror that known selection only.
+      const fromForm = parseDomainList(form.defaultDomains);
+      if (fromForm.length) {
+        setCfSelected(fromForm);
+      } else {
+        const fromServer = Array.isArray(data.selected)
+          ? data.selected.map((d) => String(d || "").trim()).filter(Boolean)
+          : [];
+        if (fromServer.length) {
+          const joined = joinDomains(fromServer);
+          setDirty(true);
+          setForm((p) => ({ ...p, defaultDomains: joined }));
+          setCfSelected(parseDomainList(joined));
+        } else {
+          setCfSelected([]);
+        }
+      }
+      showOpsFeedback(
+        fromForm.length || (data.selected || []).length
+          ? `已拉取 ${list.length} 个域名 · 勾选保持已有选择`
+          : `已拉取 ${list.length} 个域名 · 请勾选后保存（不会自动全选）`,
+        "ok",
+      );
+      setResult(pretty({ cloudflare_domains: list, selected: data.selected }));
+    } catch (e) {
+      if (auth(e)) return;
+      showOpsFeedback(`拉取域名失败: ${formatApiError(e)}`, "err");
+      setResult(pretty({ error: formatApiError(e) }));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function toggleCfDomain(dom) {
+    // form.defaultDomains is the single source; cfSelected mirrors it.
+    // Compute next outside setState updaters — no nested setState side effects.
+    const cur = parseDomainList(form.defaultDomains);
+    const low = String(dom).toLowerCase();
+    const next = cur.some((d) => d.toLowerCase() === low)
+      ? cur.filter((d) => d.toLowerCase() !== low)
+      : [...cur, dom];
+    const joined = joinDomains(next);
+    setDirty(true);
+    setForm((p) => ({ ...p, defaultDomains: joined }));
+    setCfSelected(parseDomainList(joined));
   }
 
   async function importCreds() {
@@ -191,7 +337,14 @@ export function MailTab() {
       fd.append("mode", credMode || "append");
       const body = await api.importMailText(fd);
       setResult(pretty(body));
-      showOpsFeedback("凭证已导入", "ok");
+      const r = (body && body.result) || body || {};
+      const summary =
+        (body && body.detail) ||
+        r.summary ||
+        `导入完成 · 新增 ${r.new ?? r.lines_written ?? 0} · 重复 ${r.duplicate ?? 0} · 无效 ${r.skipped ?? 0}`;
+      const status = r.status || (r.new > 0 || r.lines_written > 0 ? "success" : "empty");
+      const kind = status === "success" ? "ok" : status === "partial" ? "info" : "info";
+      showOpsFeedback(summary, kind, { toast: true, sticky: true });
       await loadPool();
     } catch (e) {
       if (auth(e)) return;
@@ -224,15 +377,15 @@ export function MailTab() {
       };
       const data = await api.probeMail(body);
       setProbeOut(data);
-      // Default-check only hard-dead (quarantinable); skip network/unknown
       const nextSel = {};
       for (const r of data.results || []) {
         if (isQuarantinable(r)) nextSel[r.email] = true;
       }
       setSelected(nextSel);
-      const qn = data.quarantinable != null
-        ? data.quarantinable
-        : (data.results || []).filter(isQuarantinable).length;
+      const qn =
+        data.quarantinable != null
+          ? data.quarantinable
+          : (data.results || []).filter(isQuarantinable).length;
       const msg =
         `探测完成: 好用 ${data.ok || 0} / 挂了可移 ${qn} / 不定 ${Math.max(0, (data.dead || 0) - qn)}` +
         (data.timed_out ? " · 超时截断" : "");
@@ -269,7 +422,6 @@ export function MailTab() {
   }
 
   function toggleRow(email) {
-    // Soft-fail rows can be toggled in UI but doQuarantine only ships quarantinable.
     setSelected((prev) => ({ ...prev, [email]: !prev[email] }));
   }
 
@@ -277,6 +429,42 @@ export function MailTab() {
     () => Object.keys(selected).filter((k) => selected[k]),
     [selected],
   );
+
+  async function doCompact(dryRun = false) {
+    if (!dryRun) {
+      const ok = window.confirm(
+        "确认精简邮箱池？\n\n" +
+          "· 按邮箱去重（保留首次出现）\n" +
+          "· 去掉无效行\n" +
+          "· 先备份 mail_credentials.txt.bak-compact-*\n" +
+          "· 不触碰 dead 归档",
+      );
+      if (!ok) return;
+    }
+    setBusy("compact");
+    try {
+      const data = await api.compactMail({
+        dry_run: !!dryRun,
+        drop_invalid: true,
+        drop_comments: false,
+      });
+      setResult(pretty(data));
+      const summary =
+        data.summary ||
+        `${dryRun ? "预览" : "精简"} · 唯一 ${data.unique ?? "—"} · 重复 ${data.duplicate_extra ?? 0}`;
+      showOpsFeedback(summary, data.changed ? "ok" : "info", {
+        toast: true,
+        sticky: true,
+      });
+      await loadPool();
+    } catch (e) {
+      if (auth(e)) return;
+      showOpsFeedback(`精简失败: ${formatApiError(e)}`, "err");
+      setResult(pretty({ error: formatApiError(e) }));
+    } finally {
+      setBusy("");
+    }
+  }
 
   async function doQuarantine() {
     if (!selectedEmails.length) {
@@ -359,137 +547,271 @@ export function MailTab() {
     }));
   }, [pool]);
 
+  const selectedDomainSet = useMemo(() => {
+    return new Set(cfSelected.map((d) => d.toLowerCase()));
+  }, [cfSelected]);
+
+  function panel(name, title, body) {
+    const open = !!openPanels[name];
+    return (
+      <details
+        class="card provider-panel"
+        open={open}
+        onToggle={(e) => {
+          const next = e.currentTarget.open;
+          setOpenPanels((p) => ({ ...p, [name]: next }));
+        }}
+      >
+        <summary class="provider-panel-summary" onClick={(e) => e.preventDefault()}>
+          <button type="button" class="provider-panel-toggle" onClick={() => togglePanel(name)}>
+            {open ? "▾" : "▸"} {title}
+          </button>
+        </summary>
+        {open ? <div class="provider-panel-body grid mail-form">{body}</div> : null}
+      </details>
+    );
+  }
+
   return (
     <div class="resources-tab mail-tab">
       <div class="toolbar wrap mail-toolbar">
-        <Button variant="ghost" busy={busy === "load"} onClick={load}>
+        <Button
+          variant="ghost"
+          busy={busy === "load"}
+          onClick={() => load({ force: true })}
+        >
           重载
         </Button>
         <Button
           variant="primary"
           busy={busy === "save"}
+          disabled={!hydrated || busy === "load"}
           onClick={save}
+          title={!hydrated ? "请先加载配置" : undefined}
         >
           保存邮箱配置
         </Button>
+        <a class="btn btn-ghost btn-sm" href="#/settings">
+          链路池 → 设置
+        </a>
       </div>
 
-      <form class="card grid mail-form" onSubmit={(e) => e.preventDefault()}>
-        <label>
-          email_provider
-          <Select
-            value={form.email_provider}
-            options={PROVIDERS}
-            onChange={(v) => set({ email_provider: v })}
-          />
-        </label>
-        <label>
-          email_provider_strategy
-          <Select
-            value={form.email_provider_strategy}
-            options={STRATEGIES}
-            onChange={(v) => set({ email_provider_strategy: v })}
-          />
-        </label>
-        <label class="span2">
-          defaultDomains
-          <input
-            value={form.defaultDomains}
-            placeholder="a.com,b.com"
-            onInput={(e) => set({ defaultDomains: e.currentTarget.value })}
-          />
-        </label>
-        <label>
-          cloudflare_api_base
-          <input
-            value={form.cloudflare_api_base}
-            onInput={(e) => set({ cloudflare_api_base: e.currentTarget.value })}
-          />
-        </label>
-        <label>
-          cloudflare_api_key
-          <input
-            type="password"
-            value={form.cloudflare_api_key}
-            placeholder="leave empty to keep"
-            onInput={(e) => set({ cloudflare_api_key: e.currentTarget.value })}
-          />
-        </label>
-        <label>
-          duckmail_api_key
-          <input
-            type="password"
-            value={form.duckmail_api_key}
-            placeholder="leave empty to keep"
-            onInput={(e) => set({ duckmail_api_key: e.currentTarget.value })}
-          />
-        </label>
-        <label>
-          yyds_api_key
-          <input
-            type="password"
-            value={form.yyds_api_key}
-            placeholder="leave empty to keep"
-            onInput={(e) => set({ yyds_api_key: e.currentTarget.value })}
-          />
-        </label>
-        <label>
-          cloudmail_url
-          <input
-            value={form.cloudmail_url}
-            onInput={(e) => set({ cloudmail_url: e.currentTarget.value })}
-          />
-        </label>
-        <label>
-          cloudmail_admin_email
-          <input
-            value={form.cloudmail_admin_email}
-            onInput={(e) =>
-              set({ cloudmail_admin_email: e.currentTarget.value })
-            }
-          />
-        </label>
-        <label>
-          cloudmail_password
-          <input
-            type="password"
-            value={form.cloudmail_password}
-            placeholder="leave empty to keep"
-            onInput={(e) => set({ cloudmail_password: e.currentTarget.value })}
-          />
-        </label>
-        <label>
-          gmail_imap_user
-          <input
-            value={form.gmail_imap_user}
-            onInput={(e) => set({ gmail_imap_user: e.currentTarget.value })}
-          />
-        </label>
-        <label>
-          hotmail_accounts_file
-          <input
-            value={form.hotmail_accounts_file}
-            placeholder="mail_credentials.txt"
-            onInput={(e) =>
-              set({ hotmail_accounts_file: e.currentTarget.value })
-            }
-          />
-        </label>
-        <label class="check span2">
-          <input
-            type="checkbox"
-            checked={!!form.hotmail_allow_plus_alias}
-            onChange={(e) =>
-              set({ hotmail_allow_plus_alias: e.currentTarget.checked })
-            }
-          />{" "}
-          hotmail_allow_plus_alias（生产勿开）
-        </label>
-      </form>
+      <p class="hint">
+        每个 Provider 只显示有意义的字段。全局 <code>defaultDomains</code> 由
+        Cloudflare 勾选 / CloudMail 手填共用（保存空值会清空）；yyds / duckmail
+        域名由各自 API 拉取，不在此配置。链路勾选与策略在
+        <a href="#/settings">设置</a>
+        （与注册页共用 <code>email_providers</code>）。
+        {!hydrated ? (
+          <span class="hint warn"> 配置未加载，保存已禁用。</span>
+        ) : dirty ? (
+          <span class="hint warn"> 有未保存更改。</span>
+        ) : null}
+      </p>
+
+      {panel(
+        "cloudflare",
+        "Cloudflare 临时邮",
+        <>
+          <label>
+            cloudflare_api_base
+            <input
+              value={form.cloudflare_api_base}
+              placeholder="https://mail-api.example.com"
+              onInput={(e) => set({ cloudflare_api_base: e.currentTarget.value })}
+            />
+          </label>
+          <label>
+            cloudflare_api_key
+            <input
+              type="password"
+              value={form.cloudflare_api_key}
+              placeholder="leave empty to keep"
+              onInput={(e) => set({ cloudflare_api_key: e.currentTarget.value })}
+            />
+          </label>
+          <div class="span2">
+            <div class="toolbar wrap">
+              <Button
+                variant="ghost"
+                busy={busy === "cfDomains"}
+                onClick={fetchCfDomains}
+              >
+                从 Worker 拉取域名
+              </Button>
+              <span class="hint tight">
+                {cfMeta
+                  ? `已拉 ${cfMeta.count ?? cfDomains.length} · base=${cfMeta.api_base || "—"} · key=${cfMeta.has_api_key ? "有" : "无"} · 不自动全选`
+                  : "保存 base/key 后再拉；手动勾选写入 defaultDomains（不自动全选）"}
+              </span>
+            </div>
+            <div class="mail-domain-chips" style={{ marginTop: "0.5rem" }}>
+              {(cfDomains.length ? cfDomains : parseDomainList(form.defaultDomains)).map(
+                (d) => (
+                  <label key={d} class="check chip">
+                    <input
+                      type="checkbox"
+                      checked={selectedDomainSet.has(String(d).toLowerCase())}
+                      onChange={() => toggleCfDomain(d)}
+                    />{" "}
+                    {d}
+                  </label>
+                ),
+              )}
+              {!cfDomains.length && !parseDomainList(form.defaultDomains).length ? (
+                <span class="hint">尚无域名 · 拉取或手填下方</span>
+              ) : null}
+            </div>
+          </div>
+          <label class="span2">
+            defaultDomains（全局 · CF 勾选结果 · 可清空）
+            <input
+              value={form.defaultDomains}
+              placeholder="a.com,b.com · 留空保存即清空"
+              onInput={(e) => {
+                const v = e.currentTarget.value;
+                set({ defaultDomains: v });
+                setCfSelected(parseDomainList(v));
+              }}
+            />
+          </label>
+        </>,
+      )}
+
+      {panel(
+        "cloudmail",
+        "CloudMail 自建",
+        <>
+          <label>
+            cloudmail_url
+            <input
+              value={form.cloudmail_url}
+              placeholder="https://mail.example.com"
+              onInput={(e) => set({ cloudmail_url: e.currentTarget.value })}
+            />
+          </label>
+          <label>
+            cloudmail_admin_email
+            <input
+              value={form.cloudmail_admin_email}
+              onInput={(e) => set({ cloudmail_admin_email: e.currentTarget.value })}
+            />
+          </label>
+          <label>
+            cloudmail_password
+            <input
+              type="password"
+              value={form.cloudmail_password}
+              placeholder="leave empty to keep"
+              onInput={(e) => set({ cloudmail_password: e.currentTarget.value })}
+            />
+          </label>
+          <label class="span2">
+            defaultDomains（与 CF 共用全局 · 可清空）
+            <input
+              value={form.defaultDomains}
+              placeholder="a.com,b.com · 留空保存即清空"
+              onInput={(e) => {
+                const v = e.currentTarget.value;
+                set({ defaultDomains: v });
+                setCfSelected(parseDomainList(v));
+              }}
+            />
+          </label>
+        </>,
+      )}
+
+      {panel(
+        "duckmail",
+        "DuckMail",
+        <>
+          <label class="span2">
+            duckmail_api_key
+            <input
+              type="password"
+              value={form.duckmail_api_key}
+              placeholder="leave empty to keep"
+              onInput={(e) => set({ duckmail_api_key: e.currentTarget.value })}
+            />
+          </label>
+          <p class="span2 hint tight">域名由 DuckMail API /domains 自动获取，无需填写 defaultDomains。</p>
+        </>,
+      )}
+
+      {panel(
+        "yyds",
+        "yydsmail",
+        <>
+          <label class="span2">
+            yyds_api_key
+            <input
+              type="password"
+              value={form.yyds_api_key}
+              placeholder="leave empty to keep"
+              onInput={(e) => set({ yyds_api_key: e.currentTarget.value })}
+            />
+          </label>
+          <p class="span2 hint tight">
+            域名由 yyds API 拉取。jwt 若需要请写 .env 的 YYDS_JWT（不在此暴露）。
+          </p>
+        </>,
+      )}
+
+      {panel(
+        "gmail",
+        "Gmail catch-all（IMAP）",
+        <>
+          <p class="span2 hint">
+            表单不写应用密码。在项目 <code>.env</code> 配置{" "}
+            <code>GMAIL_IMAP_USER</code> / <code>GMAIL_IMAP_PASSWORD</code>
+            ；catch-all 域名用上方全局 defaultDomains（CF/CloudMail 面板）。
+          </p>
+          <label>
+            gmail_imap_user（可选提示）
+            <input
+              value={form.gmail_imap_user}
+              placeholder="可选 · 也可只写 .env"
+              onInput={(e) => set({ gmail_imap_user: e.currentTarget.value })}
+            />
+          </label>
+        </>,
+      )}
+
+      {panel(
+        "hotmail",
+        "Hotmail / Outlook",
+        <>
+          <label>
+            hotmail_accounts_file
+            <input
+              value={form.hotmail_accounts_file}
+              placeholder="mail_credentials.txt"
+              onInput={(e) => set({ hotmail_accounts_file: e.currentTarget.value })}
+            />
+          </label>
+          <label class="check span2">
+            <input
+              type="checkbox"
+              checked={!!form.hotmail_allow_plus_alias}
+              onChange={(e) =>
+                set({ hotmail_allow_plus_alias: e.currentTarget.checked })
+              }
+            />{" "}
+            hotmail_allow_plus_alias（生产勿开）
+          </label>
+          <p class="span2 hint tight">
+            凭证格式：<code>邮箱----密码----ClientID----refresh_token</code>
+            。不使用 defaultDomains。下方可批量导入。
+          </p>
+        </>,
+      )}
 
       <div class="card">
         <h2>Hotmail / Outlook 凭证导入</h2>
-        <p class="hint">每行: email----password----clientId----refresh_token</p>
+        <p class="hint">
+          支持四段 <code>email----password----clientId----token</code>、JSON / CSV /
+          管道分隔；append 自动去重。导入结果会显示新增 / 重复 / 无效条数。
+        </p>
         <textarea
           rows={6}
           value={credText}
@@ -498,10 +820,7 @@ export function MailTab() {
         />
         <label class="inline">
           mode{" "}
-          <select
-            value={credMode}
-            onChange={(e) => setCredMode(e.currentTarget.value)}
-          >
+          <select value={credMode} onChange={(e) => setCredMode(e.currentTarget.value)}>
             <option value="append">append</option>
             <option value="replace">replace</option>
           </select>
@@ -514,15 +833,29 @@ export function MailTab() {
       <div class="card mail-probe">
         <h2>邮箱凭据探测（OAuth 刷新）</h2>
         <p class="hint">
-          只测 refresh_token 是否还能换 access_token；成功=好用。仅
-          grant_expired / refresh_invalid / abuse_mode 默认可移出；网络超时标为「不定」不默认勾选。
-          不会返回密码/token。探测成功若 token 旋转会回写主池。
+          只测 refresh_token 是否还能换 access_token；成功=好用。仅 grant_expired /
+          refresh_invalid / abuse_mode 默认可移出；网络超时标为「不定」不默认勾选。不会返回密码/token。
         </p>
 
         <div class="mail-probe-kpis">
           <span>
-            主池 <strong>{pool ? pool.total : "—"}</strong>
+            主池唯一 <strong>{pool ? pool.total : "—"}</strong>
           </span>
+          {pool && pool.raw_lines != null && pool.raw_lines !== pool.total ? (
+            <span>
+              文件行 <strong>{pool.raw_lines}</strong>
+            </span>
+          ) : null}
+          {pool && pool.duplicate_extra ? (
+            <span class="warn">
+              重复多余 <strong>{pool.duplicate_extra}</strong>
+            </span>
+          ) : null}
+          {pool && pool.invalid_lines ? (
+            <span class="warn">
+              无效行 <strong>{pool.invalid_lines}</strong>
+            </span>
+          ) : null}
           <span>
             归档 dead <strong>{pool ? pool.dead_total : "—"}</strong>
           </span>
@@ -568,10 +901,36 @@ export function MailTab() {
             onClick={runProbe}
             disabled={busy === "probe" || !probeDomains.length}
           >
-            开始探测
+            开始探测（验证可用性）
           </Button>
           <Button variant="ghost" onClick={loadPool} disabled={busy === "probe"}>
             刷新统计
+          </Button>
+          <Button
+            variant="ghost"
+            busy={busy === "compact"}
+            onClick={() => doCompact(true)}
+            disabled={busy === "compact" || busy === "probe"}
+          >
+            预览精简
+          </Button>
+          <Button
+            variant="ghost"
+            busy={busy === "compact"}
+            onClick={() => doCompact(false)}
+            disabled={
+              busy === "compact" ||
+              busy === "probe" ||
+              !(pool && (pool.needs_compact || pool.duplicate_extra || pool.invalid_lines))
+            }
+            title={
+              pool && pool.needs_compact
+                ? "按邮箱去重并去掉无效行"
+                : "当前无需精简（无重复/无效行）"
+            }
+          >
+            精简去重
+            {pool && pool.duplicate_extra ? ` (−${pool.duplicate_extra})` : ""}
           </Button>
         </div>
 
@@ -623,14 +982,9 @@ export function MailTab() {
                   {(probeOut.results || []).map((r) => {
                     const q = isQuarantinable(r);
                     const soft = r.status !== "ok" && !q;
-                    const rowClass =
-                      r.status === "ok" ? "ok" : q ? "dead" : "soft";
+                    const rowClass = r.status === "ok" ? "ok" : q ? "dead" : "soft";
                     const badgeClass =
-                      r.status === "ok"
-                        ? "badge ok"
-                        : q
-                          ? "badge bad"
-                          : "badge soft";
+                      r.status === "ok" ? "badge ok" : q ? "badge bad" : "badge soft";
                     return (
                       <tr key={r.email} class={rowClass}>
                         <td>

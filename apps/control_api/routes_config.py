@@ -34,8 +34,12 @@ def put_config(body: ConfigPutIn) -> ConfigPutOut:
 
     Batch supervisors load ``.env``; without this sync the console UI could
     show hotmail while live register_cli still used a stale EMAIL_PROVIDER.
-    Sticky-empty: blank proxy/defaultDomains in the payload do not wipe prior
-    non-empty values in config or ``.env``.
+
+    Sticky-empty (omit / keep prior): blank ``proxy`` and most other ops keys.
+    Clearable empty (intentional wipe): ``email_providers``, ``proxy_list``,
+    ``defaultDomains`` — empty string or empty list writes through to config
+    and ``.env`` (e.g. ``DEFAULT_DOMAINS=``). Callers that must not clear
+    (Register page) simply omit those keys from the put payload.
     """
     root = get_settings().project_root
     result = save_config(root, body.config)

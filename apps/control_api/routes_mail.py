@@ -26,6 +26,12 @@ class MailQuarantineIn(BaseModel):
     reason: str = Field(default="quarantine", max_length=128)
 
 
+class MailCompactIn(BaseModel):
+    dry_run: bool = False
+    drop_invalid: bool = True
+    drop_comments: bool = False
+
+
 def _http_from_exc(exc: Exception) -> HTTPException:
     if isinstance(exc, FileNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
@@ -75,4 +81,30 @@ def api_mail_quarantine(body: MailQuarantineIn) -> dict[str, Any]:
             reason=(body.reason or "quarantine").strip() or "quarantine",
         )
     except (FileNotFoundError, ValueError) as exc:
+        raise _http_from_exc(exc) from exc
+
+
+@router.post("/api/mail/compact")
+def api_mail_compact(body: MailCompactIn | None = None) -> dict[str, Any]:
+    """Dedupe live pool by email (first wins); optional drop invalid/comments."""
+    root = get_settings().project_root
+    body = body or MailCompactIn()
+    try:
+        return mail_ops.compact_mail(
+            root,
+            dry_run=bool(body.dry_run),
+            drop_invalid=bool(body.drop_invalid),
+            drop_comments=bool(body.drop_comments),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise _http_from_exc(exc) from exc
+
+
+@router.get("/api/mail/cloudflare/domains")
+def api_mail_cloudflare_domains() -> dict[str, Any]:
+    """List domains from the configured Cloudflare temp-mail Worker."""
+    root = get_settings().project_root
+    try:
+        return mail_ops.list_cloudflare_domains(root)
+    except (ValueError, RuntimeError) as exc:
         raise _http_from_exc(exc) from exc

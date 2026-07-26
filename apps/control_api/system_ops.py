@@ -93,14 +93,26 @@ def selfcheck(root: Path) -> dict[str, Any]:
     else:
         checks.append(_ok("egress_accounts_xai", False, "skipped: clash down", proxy=proxy))
 
-    # Mail provider hint
+    # Mail provider hint (singleton + multi pool)
     provider = str(cfg.get("email_provider") or os.environ.get("EMAIL_PROVIDER") or "")
+    raw_multi = cfg.get("email_providers")
+    if raw_multi is None or raw_multi == "":
+        raw_multi = os.environ.get("EMAIL_PROVIDERS") or ""
+    if isinstance(raw_multi, (list, tuple, set)):
+        multi = [str(x).strip() for x in raw_multi if str(x).strip()]
+    else:
+        multi = [p.strip() for p in str(raw_multi).replace("，", ",").split(",") if p.strip()]
+    multi_s = ",".join(multi) if multi else ""
     domains = str(cfg.get("defaultDomains") or os.environ.get("DEFAULT_DOMAINS") or "")
     checks.append(
         _ok(
             "email_config",
-            bool(provider),
-            f"provider={provider or '?'} domains={domains or '(empty)'}",
+            bool(provider or multi),
+            (
+                f"provider={provider or '?'} "
+                f"providers={multi_s or '(empty)'} "
+                f"domains={domains or '(empty)'}"
+            ),
         )
     )
 
@@ -142,7 +154,14 @@ def cleanup_orphans(*, dry_run: bool = False) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "detail": f"import tab_pool failed: {exc}", "dry_run": dry_run}
 
-    chrome = cleanup_orphan_drission_chromes(dry_run=dry_run, only_ppid_init=True)
+    chrome = cleanup_orphan_drission_chromes(
+        dry_run=dry_run,
+        only_ppid_init=True,
+        include_self_children=False,
+        kill_related_helpers=True,
+        clean_tmp_dirs=True,
+        tmp_dir_max_age_sec=0 if not dry_run else 0,
+    )
     xvfb = cleanup_orphan_xvfb(dry_run=dry_run, only_ppid_init=True, require_no_children=True)
     return {
         "ok": True,

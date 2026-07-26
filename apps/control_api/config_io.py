@@ -86,11 +86,14 @@ ENV_TO_CONFIG: dict[str, str] = {v: k for k, v in CONFIG_TO_ENV.items()}
 
 # Empty string is a real "clear" for multi-select / free-form lists only.
 # All other operational keys treat "" as "omit / keep existing" so a partial
-# Register save cannot wipe PROXY / DEFAULT_DOMAINS from .env or config.json.
+# Register save cannot wipe PROXY (etc.) from .env or config.json.
+# defaultDomains is clearable so Resources can intentionally empty the domain pool
+# (Register never posts this key — omit keeps prior).
 CLEARABLE_EMPTY_CONFIG_KEYS = frozenset(
     {
         "email_providers",
         "proxy_list",
+        "defaultDomains",
     }
 )
 

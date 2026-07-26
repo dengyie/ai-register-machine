@@ -147,6 +147,52 @@
   align-items: center;
 }
 
+.mail-domain-chips .chip,
+.provider-multi .chip {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.65rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.provider-panel {
+  margin-bottom: 0.75rem;
+}
+
+.provider-panel-summary {
+  list-style: none;
+  cursor: default;
+}
+
+.provider-panel-summary::-webkit-details-marker {
+  display: none;
+}
+
+.provider-panel-toggle {
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+}
+
+.provider-panel-body {
+  margin-top: 0.65rem;
+}
+
+.hint.tight {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+}
+
+.hint.warn {
+  color: #e0a060;
+}
+
 .mail-probe-controls {
   margin: 0.35rem 0 0.75rem;
   gap: 0.55rem;

@@ -208,3 +208,10 @@ export const quarantineMail = (body) =>
     headers: headers(true),
     body: JSON.stringify(body || {}),
   });
+export const compactMail = (body) =>
+  api("/api/mail/compact", {
+    method: "POST",
+    headers: headers(true),
+    body: JSON.stringify(body || {}),
+  });
+export const cloudflareDomains = () => api("/api/mail/cloudflare/domains");

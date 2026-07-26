@@ -1,36 +1,17 @@
 // src/pages/Register/RegForm.jsx
-// Left panel: start parameters. Mirrors legacy register form + advanced knobs.
-// State is lifted to the parent (RegisterPage) so the 4s poll never wipes edits:
-// RegForm only receives initial values once via `initial` (snapshot from config);
-// subsequent props updates are ignored while regFormDirty is true (parent guards).
+// Left panel: start parameters. Email channel is multi-select only —
+// per-provider secrets/domains live on Resources → 邮箱; pipeline pool
+// on Settings. State is lifted to RegisterPage so the 4s poll never wipes edits.
 import { useEffect } from "preact/hooks";
 import { Field, Select } from "../../ui/index.js";
 import { regFormDirty } from "../../store/run.js";
-
-const PROVIDERS = [
-  "cloudflare",
-  "cloudmail",
-  "duckmail",
-  "yyds",
-  "gmail",
-  "hotmail",
-  "outlookmail",
-];
-
-function providerKeyField(provider) {
-  const p = (provider || "").toLowerCase();
-  if (p === "cloudflare") return "cloudflare_api_key";
-  if (p === "duckmail") return "duckmail_api_key";
-  if (p === "yyds") return "yyds_api_key";
-  if (p === "cloudmail") return "cloudmail_password";
-  return null;
-}
+import {
+  EMAIL_PROVIDERS,
+  normalizeProvidersList,
+} from "../../lib/providers.js";
 
 const DEFAULTS = {
-  email_provider: "cloudflare",
-  mailKey: "",
-  mailKeyPlaceholder: "",
-  defaultDomains: "",
+  email_providers: [],
   target: 100,
   threads: 1,
   mode: "ordinary",
@@ -53,55 +34,67 @@ const DEFAULTS = {
   syncMailEnv: true,
 };
 
-export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
-  // Whenever any field changes mark the form dirty so poll won't reload.
+export function RegForm({
+  value,
+  onChange,
+  advancedOpen,
+  onToggleAdvanced,
+  residualPrimary = "",
+}) {
   useEffect(() => {
-    // no-op; dirty handling is done in field onChange below
+    // dirty handling is done in field onChange below
   }, []);
 
   const v = { ...DEFAULTS, ...value };
   const isSupervisor = (v.kind || "grok_supervisor") === "grok_supervisor";
+  const selected = normalizeProvidersList(v.email_providers);
 
   function set(partial) {
     regFormDirty.value = true;
     onChange({ ...v, ...partial });
   }
 
-  // Show provider key placeholder as the redacted saved value, like legacy.
-  const keyField = providerKeyField(v.email_provider);
-  const mailKeyPlaceholder =
-    (keyField && v[`saved_${keyField}`]) ||
-    (keyField && v.savedSecret) ||
-    "按邮箱服务写入对应 key";
+  function toggleProvider(name) {
+    const cur = new Set(selected);
+    if (cur.has(name)) cur.delete(name);
+    else cur.add(name);
+    // preserve EMAIL_PROVIDERS order
+    set({ email_providers: EMAIL_PROVIDERS.filter((p) => cur.has(p)) });
+  }
 
   return (
-    <form
-      class="stack-form"
-      onSubmit={(e) => e.preventDefault()}
-    >
+    <form class="stack-form" onSubmit={(e) => e.preventDefault()}>
       <div class="field-grid">
-        <Field label="邮箱服务">
-          <Select
-            options={PROVIDERS}
-            value={v.email_provider}
-            onChange={(val) => set({ email_provider: val })}
-          />
-        </Field>
-        <Field label="API KEY / 凭证">
-          <input
-            type="password"
-            placeholder={mailKeyPlaceholder}
-            autocomplete="off"
-            value={v.mailKey}
-            onInput={(e) => set({ mailKey: e.currentTarget.value })}
-          />
-        </Field>
-        <Field label="域名" span2>
-          <input
-            placeholder="多域名用英文逗号，如 a.com,b.com"
-            value={v.defaultDomains}
-            onInput={(e) => set({ defaultDomains: e.currentTarget.value })}
-          />
+        <Field label="邮箱服务（可多选）" span2>
+          <div class="provider-multi mail-domain-chips">
+            {EMAIL_PROVIDERS.map((p) => (
+              <label key={p} class="check chip">
+                <input
+                  type="checkbox"
+                  checked={selected.includes(p)}
+                  onChange={() => toggleProvider(p)}
+                />{" "}
+                {p}
+              </label>
+            ))}
+          </div>
+          <p class="hint tight">
+            仅选择本批使用的通道（与设置页共用 <code>email_providers</code>
+            ，有勾选保存会覆盖池）。密钥 / 域名 / 凭证在
+            <a href="#/resources">资源 → 邮箱</a>
+            ；轮询策略 / 清空池在
+            <a href="#/settings">设置</a>
+            。空勾选<strong>不</strong>抹池、<strong>不</strong>把单通道写回 multi。
+          </p>
+          {!selected.length ? (
+            <p class="hint warn tight">
+              至少勾选一个才能启动
+              {residualPrimary
+                ? `（设置页单通道残留：${residualPrimary}；注册页不会自动勾选）`
+                : "；空勾选不会清空已保存的 email_providers"}
+              。
+            </p>
+          ) : null}
         </Field>
         <Field label="数量 target">
           <input
@@ -135,18 +128,12 @@ export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
           />
         </Field>
         <Field label="tag">
-          <input
-            value={v.tag}
-            onInput={(e) => set({ tag: e.currentTarget.value })}
-          />
+          <input value={v.tag} onInput={(e) => set({ tag: e.currentTarget.value })} />
         </Field>
       </div>
 
-      <div class="info-box">
-        默认 disk-first：中途不 tebi 注入。完整日志在「日志」页。
-      </div>
+      <div class="info-box">默认 disk-first：中途不 tebi 注入。完整日志在「日志」页。</div>
 
-      {/* Batch + proxy + advanced merged into ONE advanced drawer (spec IA). */}
       <details class="advanced" open={advancedOpen} onToggle={onToggleAdvanced}>
         <summary>高级启动 · 批参数 / 代理 / kind / product / SKIP_CLASH / NODE_SCORE</summary>
         <div class="field-grid">
@@ -168,14 +155,13 @@ export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
               min="5"
               value={v.turnstile}
               onInput={(e) =>
-                set({ turnstile: e.currentTarget.value === "" ? "" : Number(e.currentTarget.value) })
+                set({
+                  turnstile: e.currentTarget.value === "" ? "" : Number(e.currentTarget.value),
+                })
               }
             />
           </Field>
-          <label
-            class="check muted"
-            title="Supervisor 硬编码 CPA_PROBE_CHAT=false"
-          >
+          <label class="check muted" title="Supervisor 硬编码 CPA_PROBE_CHAT=false">
             <input type="checkbox" checked={false} disabled /> 注册后 chat 探针（强制关）
           </label>
           <label
@@ -195,19 +181,19 @@ export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
               checked={v.batchEndInject}
               disabled={!isSupervisor}
               onChange={(e) => set({ batchEndInject: e.currentTarget.checked })}
-            /> 批边界自动导入 CPA
+            />{" "}
+            批边界自动导入 CPA
           </label>
-          <Field
-            label="CPA_BATCH_IMPORT_EVERY"
-            class={isSupervisor ? "" : "hidden"}
-          >
+          <Field label="CPA_BATCH_IMPORT_EVERY" class={isSupervisor ? "" : "hidden"}>
             <input
               type="number"
               min="1"
               value={v.importEvery}
               disabled={!isSupervisor}
               onInput={(e) =>
-                set({ importEvery: e.currentTarget.value === "" ? "" : Number(e.currentTarget.value) })
+                set({
+                  importEvery: e.currentTarget.value === "" ? "" : Number(e.currentTarget.value),
+                })
               }
             />
           </Field>
@@ -233,10 +219,15 @@ export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
           <Field label="代理池 proxy_list / PROXY_LIST" span2>
             <textarea
               rows="4"
-              placeholder="每行一个代理；可留空走 Clash"
+              placeholder="每行一个代理；非空才写入；清空请去设置页"
               value={v.proxyList}
               onInput={(e) => set({ proxyList: e.currentTarget.value })}
             />
+            <p class="hint tight">
+              本页空白<strong>不会</strong>清空服务端 <code>PROXY_LIST</code>
+              （clearable 清空在
+              <a href="#/settings">设置</a>）。
+            </p>
           </Field>
 
           <Field label="kind">
@@ -264,7 +255,8 @@ export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
               type="checkbox"
               checked={v.skipPreflight}
               onChange={(e) => set({ skipPreflight: e.currentTarget.checked })}
-            /> 跳过 Clash 批前测活
+            />{" "}
+            跳过 Clash 批前测活
           </label>
           <Field label="NODE_SCORE">
             <Select
@@ -277,10 +269,7 @@ export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
               onChange={(val) => set({ nodeScore: val })}
             />
           </Field>
-          <Field
-            label="CPA_BATCH_IMPORT_SIZE"
-            class={isSupervisor ? "" : "hidden"}
-          >
+          <Field label="CPA_BATCH_IMPORT_SIZE" class={isSupervisor ? "" : "hidden"}>
             <input
               type="number"
               min="1"
@@ -290,10 +279,7 @@ export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
               onInput={(e) => set({ importSize: e.currentTarget.value })}
             />
           </Field>
-          <Field
-            label="CPA_BATCH_IMPORT_PAUSE"
-            class={isSupervisor ? "" : "hidden"}
-          >
+          <Field label="CPA_BATCH_IMPORT_PAUSE" class={isSupervisor ? "" : "hidden"}>
             <input
               type="number"
               min="0"
@@ -303,12 +289,16 @@ export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
               onInput={(e) => set({ importPause: e.currentTarget.value })}
             />
           </Field>
-          <label class="check span2" title="启动时把当前邮箱表单同步进 extra_env">
+          <label
+            class="check span2"
+            title="启动时把当前勾选的 EMAIL_PROVIDERS 同步进 extra_env（覆盖 .env 单通道）"
+          >
             <input
               type="checkbox"
               checked={v.syncMailEnv}
               onChange={(e) => set({ syncMailEnv: e.currentTarget.checked })}
-            /> 同步 EMAIL_PROVIDER / DEFAULT_DOMAINS 到 extra_env
+            />{" "}
+            同步 EMAIL_PROVIDERS 到 extra_env
           </label>
         </div>
       </details>

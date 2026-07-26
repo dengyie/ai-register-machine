@@ -136,8 +136,10 @@ DEFAULT_CONFIG = {
     "cpa_allow_device_flow_fallback": True,
     # Email channel: single email_provider, or multi-select email_providers pool.
     # Empty email_providers → fall back to email_provider. Env EMAIL_PROVIDERS wins.
-    # Production default: Cloudflare Worker temp-mail (verified path). Gmail IMAP
-    # is NOT in the multi-select pool (mail_miss RCA 2026-07-20).
+    # Production default: Cloudflare Worker temp-mail (verified path).
+    # gmail IS allowed in _EMAIL_PROVIDER_POOL_KNOWN / console multi-select;
+    # operators still own catch-all → Gmail IMAP same-day OTP miss risk
+    # (mail_miss RCA 2026-07-20).
     "email_provider": "cloudflare",
     "email_providers": [],
     "email_provider_strategy": "round_robin",  # round_robin | random | failover
@@ -174,11 +176,10 @@ _EMAIL_PROVIDER_ALIASES = {
     "cloudflare_worker": "cloudflare",
 }
 # Channels allowed in multi-select EMAIL_PROVIDERS pool.
-# gmail IMAP is intentionally excluded (2026-07-20 mail_miss RCA: CF catch-all
-# → Gmail inbox often has no same-day xAI OTP). Explicit EMAIL_PROVIDER=gmail
-# still works for one-off ops via get_email_provider / dispatch.
+# gmail is allowed in the pool (console multi-select); operators still own
+# the risk that CF catch-all → Gmail IMAP may miss same-day xAI OTP.
 _EMAIL_PROVIDER_POOL_KNOWN = frozenset(
-    {"duckmail", "yyds", "cloudflare", "cloudmail", "hotmail"}
+    {"duckmail", "yyds", "cloudflare", "cloudmail", "hotmail", "gmail"}
 )
 _EMAIL_PROVIDER_STRATEGIES = frozenset({"round_robin", "random", "failover"})
 _hotmail_token_map = {}

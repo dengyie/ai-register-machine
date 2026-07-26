@@ -5,10 +5,10 @@
 // Key behaviors:
 //  - 4s poll of api.currentRun() + api.overview(); never wipes form while
 //    regFormDirty.value === true; form loaded from config only once.
-//  - startRun body keys mirror legacy exactly (kind/product/mode/target/threads/
+//  - startRun body keys mirror legacy (kind/product/mode/target/threads/
 //    tag/extra_env{SUPERVISOR_CHUNK,CPA_BATCH_END_INJECT,CPA_BATCH_IMPORT_*,
-//    CPA_PROBE_CHAT=false,SKIP_CLASH_PREFLIGHT,NODE_SCORE,EMAIL_PROVIDER,
-//    DEFAULT_DOMAINS}).
+//    CPA_PROBE_CHAT=false,SKIP_CLASH_PREFLIGHT,NODE_SCORE,EMAIL_PROVIDERS,
+//    EMAIL_PROVIDER}). Secrets/domains are NOT written from this page.
 //  - stopRun: window.confirm Chinese warning first.
 //  - putConfig wrapped as { config: partial } (backend ConfigPutIn schema).
 //  - 401 → session.authenticated=false (gate shows).
@@ -28,14 +28,14 @@ import {
 import { RegForm } from "./RegForm.jsx";
 import { RunProgress } from "./RunProgress.jsx";
 import { formatApiError as formatApiErrorShared } from "../../lib/format.js";
+import { normalizeProvidersList } from "../../lib/providers.js";
 import "../../styles/run.css";
 
 // Initial form state (also used before config loads). Mirrors legacy defaults.
+// Email: multi-select pool only — secrets/domains on Resources, strategy on Settings.
+// email_providers starts empty until GET /api/config (no singleton pre-fill).
 const initialForm = {
-  email_provider: "cloudflare",
-  mailKey: "",
-  savedSecret: "",
-  defaultDomains: "",
+  email_providers: [],
   target: 100,
   threads: 1,
   mode: "ordinary",
@@ -57,15 +57,6 @@ const initialForm = {
   syncMailEnv: true,
 };
 
-function providerKeyField(provider) {
-  const p = (provider || "").toLowerCase();
-  if (p === "cloudflare") return "cloudflare_api_key";
-  if (p === "duckmail") return "duckmail_api_key";
-  if (p === "yyds") return "yyds_api_key";
-  if (p === "cloudmail") return "cloudmail_password";
-  return null;
-}
-
 function formatApiError(e) {
   if (!e) return "未知错误";
   if (e.status === 409) {
@@ -79,13 +70,13 @@ function formatApiError(e) {
 
 function snapshotFormFromConfig(c, prev) {
   // No prev → first load: apply defaults, then overlay config protocol bits
-  // (email provider/domains/proxy/turnstile — the only fields legacy hydrates)
-  // leaving target/threads/mode/tag/kind/product at their HTML Defaults.
+  // (email pool / proxy / turnstile). Run params stay at HTML defaults.
   // prev → forced refresh: re-hydrate protocol bits but PRESERVE user edits to
-  // run params (matches legacy refreshFn only refilling email/proxy/turnstile).
+  // run params.
+  // Multi-list only — never promote singleton email_provider into chips
+  // (Settings clear-pool must survive Register load/save).
   const f = { ...initialForm, ...(prev || {}) };
-  if (c.email_provider) f.email_provider = c.email_provider;
-  if (c.defaultDomains != null) f.defaultDomains = String(c.defaultDomains);
+  f.email_providers = normalizeProvidersList(c.email_providers);
   if (c.proxy != null) f.proxy = String(c.proxy);
   if (c.proxy_rotate_mode) f.proxyMode = c.proxy_rotate_mode;
   if (c.proxy_list != null) {
@@ -96,19 +87,16 @@ function snapshotFormFromConfig(c, prev) {
     f.turnstile = Number(c.turnstile_stuck_timeout);
   }
   f.probeChat = false; // supervisor hard-forced off
-  const keyField = providerKeyField(c.email_provider);
-  if (keyField && c[keyField] != null) {
-    f.savedSecret = String(c[keyField]);
-  }
   return f;
 }
 
 export function RegisterPage() {
   const [form, setForm] = useState(initialForm);
+  // Residual singleton when multi is empty (Settings single-channel mode).
+  const [primaryProvider, setPrimaryProvider] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [busyKey, setBusyKey] = useState(null); // 'start' | 'stop' | 'save' | 'proxy' | 'refresh'
   const [actionResult, setActionResult] = useState("");
-  const [loadedOnce, setLoadedOnce] = useState(false);
 
   // Load form from /api/config exactly once (and on explicit refresh).
   const loadForm = useCallback(async ({ force = false } = {}) => {
@@ -117,6 +105,7 @@ export function RegisterPage() {
     try {
       const data = await api.getConfig();
       const c = data.config || {};
+      setPrimaryProvider(String(c.email_provider || "").trim().toLowerCase());
       setForm((prev) =>
         snapshotFormFromConfig(c, force ? prev : undefined),
       );
@@ -193,10 +182,15 @@ export function RegisterPage() {
     if (nodeScore !== "") extra_env.NODE_SCORE = nodeScore;
 
     if (v.syncMailEnv) {
-      const prov = (v.email_provider || "").trim();
-      const dom = (v.defaultDomains || "").trim();
-      if (prov) extra_env.EMAIL_PROVIDER = prov;
-      if (dom) extra_env.DEFAULT_DOMAINS = dom;
+      const pool = normalizeProvidersList(v.email_providers);
+      if (pool.length) {
+        extra_env.EMAIL_PROVIDERS = pool.join(",");
+        // Keep single EMAIL_PROVIDER aligned with first pool member for
+        // code paths that still read the singleton.
+        extra_env.EMAIL_PROVIDER = pool[0];
+      }
+      // Empty multi: do NOT inject EMAIL_PROVIDERS (would not clear disk pool
+      // via empty env anyway). Start is blocked unless chips are checked.
     }
 
     return {
@@ -210,66 +204,87 @@ export function RegisterPage() {
     };
   }
 
-  // Build the config partial from the form (save path). Mirrors legacy saveRegisterCfg.
-  // Sticky fields: omit blank proxy/defaultDomains so we never POST "" and wipe
-  // host .env / config values the batch actually uses (backend also guards this).
+  // Build the config partial from the form (save path).
+  // Register only writes email_providers + proxy/turnstile knobs —
+  // never secrets or defaultDomains (those live on Resources).
+  // Empty provider multi-select is OMITTED (not clearable from this page) so a
+  // mis-click cannot wipe the saved EMAIL_PROVIDERS pool.
+  // Empty proxy_list is also OMITTED — intentional clear lives on Settings.
   function buildConfigPartial() {
     const v = form;
-    const provider = v.email_provider;
-    const domains = (v.defaultDomains || "").trim();
+    const providers = normalizeProvidersList(v.email_providers);
     const proxy = (v.proxy || "").trim();
+    const proxyList = String(v.proxyList ?? "").trim();
     const partial = {
-      email_provider: provider,
       proxy_rotate_mode: v.proxyMode,
       turnstile_stuck_timeout: Number(v.turnstile || 150),
       // disk-first mid-mint inject always off; batch-end inject is CPA_BATCH_END_INJECT (extra_env).
       cpa_remote_inject: false,
       cpa_probe_chat: false,
     };
-    if (domains) partial.defaultDomains = domains;
+    if (providers.length) {
+      partial.email_providers = providers;
+      // Primary for UIs / code paths that still read the singleton.
+      partial.email_provider = providers[0];
+    }
     if (proxy) partial.proxy = proxy;
-    // proxy_list is intentionally clearable (multi-line free-form).
-    if (v.proxyList != null) partial.proxy_list = v.proxyList;
-    const key = (v.mailKey || "").trim();
-    const keyField = providerKeyField(provider);
-    if (key && keyField) partial[keyField] = key;
-    return { partial, provider };
+    // Non-empty only: blank must not clear PROXY_LIST via clearable write-through.
+    if (proxyList) partial.proxy_list = v.proxyList;
+    return { partial, providers };
   }
 
   async function saveConfig({ silent = false } = {}) {
+    // Never persist the pre-load default form (would risk proxy_list/provider drift).
+    if (!regFormLoaded.value) {
+      if (!silent) {
+        showOpsFeedback("请先加载配置后再保存", "err", { toast: true, sticky: true });
+      }
+      throw new Error("config not loaded");
+    }
     if (!silent) setBusyKey("save");
     try {
-      const { partial, provider } = buildConfigPartial();
+      const { partial, providers } = buildConfigPartial();
       // Wrap in { config: partial } — backend ConfigPutIn schema.
       const data = await api.putConfig({ config: partial });
       regFormDirty.value = false;
       regFormLoaded.value = true;
-      // Re-hydrate sticky fields from server (may be .env-enriched when form was blank).
+      // Re-hydrate from server multi only (never singleton → chips).
       const saved = data.config || {};
+      if (saved.email_provider != null) {
+        setPrimaryProvider(String(saved.email_provider || "").trim().toLowerCase());
+      }
+      const serverMulti = normalizeProvidersList(saved.email_providers);
       setForm((p) => {
         const next = {
           ...p,
-          mailKey: "",
-          email_provider: saved.email_provider || p.email_provider,
+          // Prefer server multi. Empty form omit leaves disk multi intact →
+          // show server list so UI matches disk (Register cannot clear pool).
+          email_providers: serverMulti.length
+            ? serverMulti
+            : providers.length
+              ? providers
+              : [],
         };
-        if (saved.defaultDomains != null && String(saved.defaultDomains).trim()) {
-          next.defaultDomains = String(saved.defaultDomains);
-        }
         if (saved.proxy != null && String(saved.proxy).trim()) {
           next.proxy = String(saved.proxy);
-        }
-        const keyField = providerKeyField(provider || saved.email_provider);
-        if (keyField && saved[keyField] != null) {
-          next.savedSecret = String(saved[keyField]);
         }
         return next;
       });
       if (!silent) {
-        const prov = saved.email_provider || provider || "—";
-        const dom = (saved.defaultDomains || partial.defaultDomains || "—");
         const envN = (data.changed_env_keys || []).length;
         const envHint = envN ? ` · env×${envN}` : "";
-        showOpsFeedback(`配置已保存 · provider=${prov} · domains=${dom}${envHint}`, "ok");
+        if (!providers.length) {
+          const kept = serverMulti.join(",") || "∅";
+          showOpsFeedback(
+            `配置已保存 · 空勾选未改池 · 服务端 providers=${kept}${envHint}`,
+            "ok",
+          );
+        } else {
+          showOpsFeedback(
+            `配置已保存 · providers=${providers.join(",")}${envHint}`,
+            "ok",
+          );
+        }
       }
       return data;
     } catch (e) {
@@ -324,6 +339,24 @@ export function RegisterPage() {
   }
 
   async function start() {
+    if (!regFormLoaded.value) {
+      showOpsFeedback("请先等待配置加载完成再启动", "err", {
+        toast: true,
+        sticky: true,
+      });
+      return;
+    }
+    const providers = normalizeProvidersList(form.email_providers);
+    if (!providers.length) {
+      showOpsFeedback(
+        primaryProvider
+          ? `请勾选至少一个 Provider 再启动（当前单通道 ${primaryProvider} 仅在设置清空 multi 后由 runtime 使用；注册页不会把 singleton 写回池）`
+          : "请至少勾选一个邮箱 Provider 再启动（空勾选不会清空已保存池，本批也不注入 EMAIL_PROVIDERS）",
+        "err",
+        { toast: true, sticky: true },
+      );
+      return;
+    }
     setBusyKey("start");
     showOpsFeedback("正在保存配置并启动…", "info", { toast: false, sticky: true });
     try {
@@ -457,7 +490,8 @@ export function RegisterPage() {
           <button
             type="button"
             class="btn btn-primary btn-md"
-            disabled={busyKey === "start"}
+            disabled={busyKey === "start" || !regFormLoaded.value}
+            title={!regFormLoaded.value ? "请先加载配置" : undefined}
             onClick={start}
           >
             {busyKey === "start" ? "启动中…" : "开始"}
@@ -494,6 +528,7 @@ export function RegisterPage() {
         <div class="panel form-panel">
           <RegForm
             value={form}
+            residualPrimary={primaryProvider}
             onChange={(next) => setForm(next)}
             advancedOpen={advancedOpen}
             onToggleAdvanced={(e) => setAdvancedOpen(e.currentTarget.open)}
@@ -504,7 +539,8 @@ export function RegisterPage() {
             <button
               type="button"
               class="btn btn-ghost btn-sm"
-              disabled={busyKey === "save"}
+              disabled={busyKey === "save" || !regFormLoaded.value}
+              title={!regFormLoaded.value ? "请先加载配置" : undefined}
               onClick={() => saveConfig().catch(() => {})}
             >
               {busyKey === "save" ? "保存中…" : "保存"}

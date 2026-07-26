@@ -175,7 +175,12 @@ def test_count_product_ok(tmp_path: Path):
 
 
 def test_save_sticky_empty_proxy_does_not_wipe_env(tmp_path: Path):
-    """Register page used to POST proxy=\"\" and blank host PROXY / DEFAULT_DOMAINS."""
+    """Register page used to POST proxy=\"\" and blank host PROXY.
+
+    defaultDomains is intentionally clearable (Resources may empty the pool);
+    blank-only whitespace still clears after strip via _is_blank / clearable path.
+    This test keeps domains out of the wipe-check: only proxy stays sticky.
+    """
     (tmp_path / "config.json").write_text(
         json.dumps(
             {
@@ -197,8 +202,8 @@ def test_save_sticky_empty_proxy_does_not_wipe_env(tmp_path: Path):
         {
             "email_provider": "hotmail",
             "proxy": "",
-            "defaultDomains": "   ",
             "proxy_list": "",  # clearable
+            # omit defaultDomains → sticky keep (Register never posts it)
         },
     )
     data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
@@ -216,6 +221,31 @@ def test_save_sticky_empty_proxy_does_not_wipe_env(tmp_path: Path):
     assert "DEFAULT_DOMAINS" not in result["changed_env_keys"]
 
 
+def test_save_clearable_default_domains(tmp_path: Path):
+    """Resources may intentionally clear defaultDomains (and DEFAULT_DOMAINS=)."""
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "email_provider": "cloudflare",
+                "defaultDomains": "a.com,b.com",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "EMAIL_PROVIDER=cloudflare\nDEFAULT_DOMAINS=a.com,b.com\n",
+        encoding="utf-8",
+    )
+    result = save_config(tmp_path, {"defaultDomains": ""})
+    data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert data["defaultDomains"] == ""
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "DEFAULT_DOMAINS=" in env_text
+    # cleared value should not retain old domains
+    assert "DEFAULT_DOMAINS=a.com,b.com" not in env_text
+    assert "DEFAULT_DOMAINS" in result["changed_env_keys"]
+
+
 def test_config_to_env_map_sticky_empty_skips_proxy():
     m = config_to_env_map(
         {
@@ -227,7 +257,8 @@ def test_config_to_env_map_sticky_empty_skips_proxy():
     )
     assert m["EMAIL_PROVIDER"] == "hotmail"
     assert "PROXY" not in m
-    assert "DEFAULT_DOMAINS" not in m
+    # defaultDomains is clearable → empty emits DEFAULT_DOMAINS=
+    assert m.get("DEFAULT_DOMAINS") == ""
     # multi-select may clear
     assert m.get("EMAIL_PROVIDERS") == ""
 
@@ -318,6 +349,7 @@ def test_config_api_get_enriches_from_env(tmp_path: Path, monkeypatch):
 
 
 def test_config_api_put_sticky_empty_and_enrich(tmp_path: Path, monkeypatch):
+    """proxy stays sticky; defaultDomains empty is intentional clear."""
     monkeypatch.setenv("REGISTER_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("CONTROL_API_TOKEN", "t")
     (tmp_path / "config.json").write_text(
@@ -356,11 +388,13 @@ def test_config_api_put_sticky_empty_and_enrich(tmp_path: Path, monkeypatch):
     body = r.json()
     assert body["config"]["email_provider"] == "hotmail"
     assert body["config"]["proxy"] == "http://old:1"
-    assert body["config"]["defaultDomains"] == "old.com"
+    assert body["config"]["defaultDomains"] == ""
     assert "PROXY" not in body.get("changed_env_keys", [])
+    assert "DEFAULT_DOMAINS" in body.get("changed_env_keys", [])
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "PROXY=http://old:1" in env_text
-    assert "DEFAULT_DOMAINS=old.com" in env_text
+    assert "DEFAULT_DOMAINS=" in env_text
+    assert "DEFAULT_DOMAINS=old.com" not in env_text
     assert "EMAIL_PROVIDER=hotmail" in env_text
 
 
