@@ -149,6 +149,33 @@ jobs:
           echo "OK: no secret runtime paths tracked"
           bash scripts/doctor_secrets.sh || test $? -eq 2
 
+  web-test:
+    name: web-unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No main-only guard: console10 前端测试在 push 和 PR 上都要跑
+    # （package-web 只在 main push 跑，PR 上前端曾经完全没有覆盖）。
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install deps
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Unit tests
+        working-directory: apps/web
+        run: npm test
+
   package-web:
     name: package-console10
     runs-on: ubuntu-latest
@@ -169,6 +196,12 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
+
+      - name: Web unit tests
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm test
 
       - name: Build console10
         run: ./scripts/build_web_console.sh
