@@ -142,11 +142,454 @@ def is_quarantinable(status: str) -> bool:
     return str(status or "") in QUARANTINABLE_STATUSES
 
 
+# Separators vendors use for one-line credential dumps (longest first).
+_CRED_SEPS: tuple[str, ...] = ("----", "||||", "|||", "||", "|", "\t", ";", ",")
+
+# JSON wrapper keys that hold a list/object of accounts
+_JSON_LIST_KEYS: tuple[str, ...] = (
+    "accounts",
+    "account",
+    "data",
+    "list",
+    "items",
+    "result",
+    "results",
+    "records",
+    "rows",
+    "emails",
+    "mails",
+    "credentials",
+    "creds",
+    "payload",
+)
+
+# CSV / header aliases → canonical field
+_HEADER_ALIASES: dict[str, str] = {
+    "email": "email",
+    "mail": "email",
+    "e-mail": "email",
+    "account": "email",
+    "username": "email",
+    "user": "email",
+    "login": "email",
+    "password": "password",
+    "pass": "password",
+    "pwd": "password",
+    "passwd": "password",
+    "clientid": "client_id",
+    "client_id": "client_id",
+    "client-id": "client_id",
+    "cid": "client_id",
+    "appid": "client_id",
+    "app_id": "client_id",
+    "application_id": "client_id",
+    "refreshtoken": "refresh_token",
+    "refresh_token": "refresh_token",
+    "refresh-token": "refresh_token",
+    "token": "refresh_token",
+    "refresh": "refresh_token",
+    "rt": "refresh_token",
+    "oauth_token": "refresh_token",
+    "oauthtoken": "refresh_token",
+    "ms_token": "refresh_token",
+}
+
+
+def _pick_json_field(obj: dict[str, Any], *names: str) -> str:
+    for name in names:
+        if name in obj and obj[name] is not None:
+            val = obj[name]
+            if isinstance(val, (dict, list)):
+                continue
+            return str(val).strip()
+    # case-insensitive fallback
+    lower = {str(k).lower(): v for k, v in obj.items()}
+    for name in names:
+        v = lower.get(name.lower())
+        if v is not None and not isinstance(v, (dict, list)):
+            return str(v).strip()
+    return ""
+
+
+def format_credential_line(
+    email: str,
+    password: str,
+    client_id: str,
+    refresh_token: str,
+) -> str:
+    """Canonical live-pool line (no trailing newline)."""
+    return f"{email}----{password}----{client_id}----{refresh_token}"
+
+
+def _fields_from_parts(parts: list[str]) -> dict[str, str] | None:
+    """Validate 4-tuple email/password/client_id/refresh_token."""
+    if len(parts) < 4:
+        return None
+    email_addr = parts[0].strip().strip('"').strip("'")
+    password = parts[1].strip().strip('"').strip("'")
+    client_id = parts[2].strip().strip('"').strip("'")
+    refresh_token = parts[3].strip().strip('"').strip("'")
+    # dead-archive may append ----reason----ts inside token field
+    if "----" in refresh_token:
+        refresh_token = refresh_token.split("----", 1)[0].strip()
+    if not email_addr or "@" not in email_addr or not client_id or not refresh_token:
+        return None
+    return {
+        "email": email_addr,
+        "password": password,
+        "client_id": client_id,
+        "refresh_token": refresh_token,
+    }
+
+
+def parse_json_credential_obj(obj: Any) -> dict[str, str] | None:
+    """Vendor JSON object → credential fields, or None if incomplete.
+
+    Handles flat keys and mild nesting:
+    ``{"oauth":{"refresh_token":…}}``, ``{"credentials":{…}}``.
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    # Flatten one level of common nested bags
+    bags: list[dict[str, Any]] = [obj]
+    for key in (
+        "credentials",
+        "credential",
+        "oauth",
+        "auth",
+        "token",
+        "tokens",
+        "account",
+        "user",
+        "data",
+        "info",
+    ):
+        nested = obj.get(key)
+        if isinstance(nested, dict):
+            bags.append(nested)
+
+    email_addr = password = client_id = refresh_token = ""
+    for bag in bags:
+        if not email_addr:
+            email_addr = _pick_json_field(
+                bag, "email", "mail", "account", "username", "user", "login", "Email"
+            )
+        if not password:
+            password = _pick_json_field(bag, "password", "pass", "pwd", "passwd", "Password")
+        if not client_id:
+            client_id = _pick_json_field(
+                bag,
+                "clientId",
+                "client_id",
+                "clientid",
+                "cid",
+                "appId",
+                "app_id",
+                "application_id",
+                "ClientId",
+            )
+        if not refresh_token:
+            refresh_token = _pick_json_field(
+                bag,
+                "refreshToken",
+                "refresh_token",
+                "token",
+                "refresh",
+                "rt",
+                "oauth_token",
+                "ms_token",
+                "RefreshToken",
+            )
+
+    # Sometimes email is the only top-level identity and rest nested already tried
+    if not email_addr or "@" not in email_addr or not client_id or not refresh_token:
+        return None
+    return {
+        "email": email_addr,
+        "password": password,
+        "client_id": client_id,
+        "refresh_token": refresh_token,
+    }
+
+
+def _iter_json_credential_objs(data: Any) -> list[Any]:
+    """Unwrap vendor JSON envelopes into a list of candidate account objects."""
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return list(data)
+    if not isinstance(data, dict):
+        return []
+    # Direct account object
+    if parse_json_credential_obj(data) is not None:
+        return [data]
+    # Wrapped list/object under known keys
+    for key in _JSON_LIST_KEYS:
+        if key not in data:
+            # case-insensitive
+            lower_map = {str(k).lower(): k for k in data.keys()}
+            real = lower_map.get(key.lower())
+            if real is None:
+                continue
+            val = data[real]
+        else:
+            val = data[key]
+        if isinstance(val, list):
+            return list(val)
+        if isinstance(val, dict):
+            # single account under account/data
+            return [val]
+    return [data]
+
+
+def _split_delimited_line(s: str) -> list[str] | None:
+    """Try known separators; return 4+ parts or None."""
+    # Prefer multi-char seps first (---- before -)
+    for sep in _CRED_SEPS:
+        if sep not in s:
+            continue
+        if sep == ",":
+            # CSV: only if looks like email,... and >=3 commas OR quoted fields
+            if s.count("@") != 1:
+                continue
+        parts = s.split(sep)
+        # allow >4 (extra junk after token) — take first 4, join rest into token
+        if len(parts) < 4:
+            continue
+        if len(parts) > 4 and sep in ("----", "|", "\t", ";"):
+            head = [p.strip() for p in parts[:3]]
+            tail = sep.join(parts[3:]).strip()
+            parts = head + [tail]
+        elif len(parts) > 4 and sep == ",":
+            # CSV with commas inside token — can't safely join; require exactly 4
+            if len(parts) != 4:
+                continue
+        parts = [p.strip() for p in parts[:4]]
+        if _fields_from_parts(parts):
+            return parts
+    # colon form: email:pass:uuid:token (token may contain ':' rarely — maxsplit 3)
+    if s.count(":") >= 3 and "@" in s.split(":", 1)[0]:
+        parts = s.split(":", 3)
+        if _fields_from_parts(parts):
+            return [p.strip() for p in parts]
+    # whitespace-separated (email pass client_id refresh_token) — 4 fields, email first
+    if "@" in s and "----" not in s and "|" not in s:
+        ws = s.split()
+        if len(ws) == 4 and _fields_from_parts(ws):
+            return ws
+    return None
+
+
+def _parse_csv_block(lines: list[str]) -> tuple[list[str], dict[str, int]] | None:
+    """If first non-empty line is a header row, parse remaining as CSV rows."""
+    import csv
+    from io import StringIO
+
+    nonempty = [ln for ln in lines if ln.strip() and not ln.strip().startswith(("#", "//"))]
+    if len(nonempty) < 2:
+        return None
+    header_raw = nonempty[0].strip().lstrip("﻿")
+    # Must look like a header, not an email line
+    if "@" in header_raw.split(",")[0]:
+        return None
+    try:
+        reader = csv.reader(StringIO("\n".join(nonempty)))
+        rows = list(reader)
+    except csv.Error:
+        return None
+    if not rows:
+        return None
+    headers = [re.sub(r"[^a-z0-9_-]", "", h.strip().lower().replace(" ", "_")) for h in rows[0]]
+    # map headers
+    colmap: dict[str, int] = {}
+    for i, h in enumerate(headers):
+        canon = _HEADER_ALIASES.get(h)
+        if canon and canon not in colmap:
+            colmap[canon] = i
+    if "email" not in colmap or "client_id" not in colmap or "refresh_token" not in colmap:
+        return None
+    out: list[str] = []
+    stats = {
+        "input_lines": len(rows) - 1,
+        "written": 0,
+        "skipped": 0,
+        "json_objects": 0,
+        "csv_rows": 0,
+    }
+    for row in rows[1:]:
+        if not row or all(not str(c).strip() for c in row):
+            stats["skipped"] += 1
+            continue
+
+        def cell(name: str) -> str:
+            idx = colmap.get(name)
+            if idx is None or idx >= len(row):
+                return ""
+            return str(row[idx]).strip()
+
+        fields = _fields_from_parts(
+            [cell("email"), cell("password"), cell("client_id"), cell("refresh_token")]
+        )
+        if not fields:
+            stats["skipped"] += 1
+            continue
+        out.append(
+            format_credential_line(
+                fields["email"],
+                fields["password"],
+                fields["client_id"],
+                fields["refresh_token"],
+            )
+        )
+        stats["written"] += 1
+        stats["csv_rows"] += 1
+    return out, stats
+
+
+def normalize_credential_line(line: str) -> str | None:
+    """Normalize one input line to canonical ``email----…----token`` or None.
+
+    Accepts:
+    - ``email----password----client_id----refresh_token`` (canonical)
+    - ``|`` / ``;`` / tab / ``,`` / ``:`` separated 4-field lines
+    - vendor JSON object line: ``{"email","password","clientId","refreshToken"}``
+    - a JSON array of such objects (returns first valid only — use
+      :func:`normalize_credential_text` for multi)
+    """
+    raw = line.rstrip("\n").lstrip("﻿")
+    s = raw.strip()
+    if not s or s.lstrip().startswith(("#", "//")):
+        return None
+    if s.startswith("{") or s.startswith("["):
+        try:
+            data = json.loads(s)
+        except json.JSONDecodeError:
+            return None
+        for item in _iter_json_credential_objs(data):
+            fields = parse_json_credential_obj(item)
+            if fields:
+                return format_credential_line(
+                    fields["email"],
+                    fields["password"],
+                    fields["client_id"],
+                    fields["refresh_token"],
+                )
+        return None
+    parts = _split_delimited_line(s)
+    if not parts:
+        return None
+    fields = _fields_from_parts(parts)
+    if not fields:
+        return None
+    return format_credential_line(
+        fields["email"],
+        fields["password"],
+        fields["client_id"],
+        fields["refresh_token"],
+    )
+
+
+def normalize_credential_text(content: str) -> tuple[str, dict[str, int]]:
+    """Normalize multi-line / JSON / CSV import text to canonical pool lines.
+
+    Returns ``(text_with_trailing_newline, stats)``.
+    ``stats`` keys: ``input_lines``, ``written``, ``skipped``, ``json_objects``
+    (plus ``csv_rows`` when CSV header path used).
+    """
+    text = (content or "").lstrip("﻿")
+    stripped = text.strip()
+    stats: dict[str, int] = {
+        "input_lines": 0,
+        "written": 0,
+        "skipped": 0,
+        "json_objects": 0,
+    }
+    out: list[str] = []
+
+    # Whole-body JSON array / object (common paste from vendors, pretty-printed OK)
+    if stripped.startswith("[") or stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            data = None
+        if data is not None:
+            items = _iter_json_credential_objs(data)
+            stats["input_lines"] = max(len(items), 1)
+            for item in items:
+                fields = parse_json_credential_obj(item)
+                if not fields:
+                    stats["skipped"] += 1
+                    continue
+                out.append(
+                    format_credential_line(
+                        fields["email"],
+                        fields["password"],
+                        fields["client_id"],
+                        fields["refresh_token"],
+                    )
+                )
+                stats["written"] += 1
+                stats["json_objects"] += 1
+            body = "\n".join(out)
+            if body and not body.endswith("\n"):
+                body += "\n"
+            return body, stats
+
+    # CSV with header row
+    lines = text.splitlines()
+    csv_hit = _parse_csv_block(lines)
+    if csv_hit is not None:
+        rows, csv_stats = csv_hit
+        if csv_stats.get("written", 0) > 0 or csv_stats.get("input_lines", 0) > 0:
+            body = "\n".join(rows)
+            if body and not body.endswith("\n"):
+                body += "\n"
+            return body, csv_stats
+
+    for raw in lines:
+        stats["input_lines"] += 1
+        s = raw.strip()
+        if not s or s.lstrip().startswith(("#", "//")):
+            if s.startswith(("#", "//")):
+                out.append(s)
+            else:
+                stats["skipped"] += 1
+            continue
+        was_json = s.startswith("{") or s.startswith("[")
+        norm = normalize_credential_line(raw)
+        if not norm:
+            stats["skipped"] += 1
+            continue
+        out.append(norm)
+        stats["written"] += 1
+        if was_json:
+            stats["json_objects"] += 1
+    body = "\n".join(out)
+    if body and not body.endswith("\n"):
+        body += "\n"
+    return body, stats
+
+
 def parse_credential_line(line: str, line_no: int = 0) -> Credential | None:
-    """Parse ``email----password----client_id----refresh_token`` (first 4 fields)."""
+    """Parse dash form or vendor JSON object line into a Credential."""
     raw = line.rstrip("\n")
     if not raw.strip() or raw.lstrip().startswith(("#", "//")):
         return None
+    # JSON object / one-element handling via normalize
+    if raw.strip().startswith("{") or raw.strip().startswith("["):
+        norm = normalize_credential_line(raw)
+        if not norm:
+            return None
+        parts = norm.split("----", 3)
+        return Credential(
+            email=parts[0],
+            password=parts[1],
+            client_id=parts[2],
+            refresh_token=parts[3],
+            line_no=line_no,
+            raw_line=raw if raw.endswith("\n") else raw + "\n",
+        )
     # maxsplit=3 keeps refresh_token intact even if it contains ---- (unlikely)
     # dead-archive 6-field lines: extra reason/ts stay inside field 4 → still parseable
     # for identity; refresh_token may be dirty if reading dead file as live — don't.
@@ -218,6 +661,196 @@ def load_pool(path: Path | str) -> list[Credential]:
     return accounts
 
 
+def scan_pool_file(path: Path | str) -> dict[str, Any]:
+    """Scan live file for raw/unique/duplicate/invalid counts (no secrets)."""
+    p = Path(path)
+    if not p.is_file():
+        return {
+            "raw_lines": 0,
+            "parsed_lines": 0,
+            "unique": 0,
+            "duplicate_extra": 0,
+            "invalid_lines": 0,
+            "comment_or_blank": 0,
+            "needs_compact": False,
+        }
+    raw_lines = 0
+    parsed_lines = 0
+    invalid_lines = 0
+    comment_or_blank = 0
+    seen: set[str] = set()
+    duplicate_extra = 0
+    text = p.read_text(encoding="utf-8-sig", errors="replace")
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            comment_or_blank += 1
+            continue
+        if s.startswith(("#", "//")):
+            comment_or_blank += 1
+            continue
+        raw_lines += 1
+        item = parse_credential_line(raw)
+        if not item:
+            invalid_lines += 1
+            continue
+        parsed_lines += 1
+        key = item.email.strip().lower()
+        if key in seen:
+            duplicate_extra += 1
+            continue
+        seen.add(key)
+    unique = len(seen)
+    return {
+        "raw_lines": raw_lines,
+        "parsed_lines": parsed_lines,
+        "unique": unique,
+        "duplicate_extra": duplicate_extra,
+        "invalid_lines": invalid_lines,
+        "comment_or_blank": comment_or_blank,
+        "needs_compact": bool(duplicate_extra or invalid_lines),
+    }
+
+
+def compact_pool(
+    live_path: Path | str,
+    *,
+    dry_run: bool = False,
+    drop_invalid: bool = True,
+    drop_comments: bool = False,
+) -> dict[str, Any]:
+    """Rewrite live pool: keep first line per email, drop dups (and optional junk).
+
+    - First occurrence wins (same rule as ``load_pool``).
+    - Surviving credentials are rewritten in canonical
+      ``email----password----clientId----refreshToken`` form.
+    - ``drop_invalid`` (default True): remove non-comment unparseable lines.
+    - ``drop_comments`` (default False): keep ``#`` / blank lines in place order
+      only when they appear before the first dropped region is not attempted;
+      when True, strip all comments/blanks for a pure credential file.
+    - Always backups before write (unless dry_run or nothing changes).
+    - Never returns secrets.
+    """
+    live = Path(live_path)
+    if not live.is_file():
+        raise FileNotFoundError(f"mail credentials file not found: {live}")
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    with _file_lock:
+        text = live.read_text(encoding="utf-8-sig", errors="replace")
+        lines = text.splitlines(keepends=True)
+        keep: list[str] = []
+        seen: set[str] = set()
+        kept_emails: list[str] = []
+        before_parsed = 0
+        duplicate_extra = 0
+        invalid_dropped = 0
+        comments_kept = 0
+        comments_dropped = 0
+
+        for raw in lines:
+            body = raw[:-1] if raw.endswith("\n") else raw
+            if body.endswith("\r"):
+                body = body[:-1]
+            s = body.strip()
+            if not s or s.startswith(("#", "//")):
+                if drop_comments:
+                    comments_dropped += 1
+                else:
+                    keep.append(body + "\n")
+                    comments_kept += 1
+                continue
+            item = parse_credential_line(body)
+            if not item:
+                if drop_invalid:
+                    invalid_dropped += 1
+                else:
+                    keep.append(body + "\n")
+                continue
+            before_parsed += 1
+            key = item.email.strip().lower()
+            if key in seen:
+                duplicate_extra += 1
+                continue
+            seen.add(key)
+            keep.append(
+                format_credential_line(
+                    item.email,
+                    item.password,
+                    item.client_id,
+                    item.refresh_token,
+                )
+                + "\n"
+            )
+            kept_emails.append(item.email)
+
+        unique = len(seen)
+        changed = bool(duplicate_extra or invalid_dropped or comments_dropped)
+        # also rewrite if any kept line was non-canonical (normalized form always)
+        # Compare normalized body to original non-comment credential content size
+        if not changed and before_parsed:
+            # detect non-canonical original lines (e.g. JSON still on disk)
+            orig_cred_bodies = []
+            for raw in lines:
+                body = raw[:-1] if raw.endswith("\n") else raw
+                if body.endswith("\r"):
+                    body = body[:-1]
+                s = body.strip()
+                if not s or s.startswith(("#", "//")):
+                    continue
+                if parse_credential_line(body):
+                    orig_cred_bodies.append(body)
+            canon_bodies = [
+                ln[:-1] if ln.endswith("\n") else ln
+                for ln in keep
+                if parse_credential_line(ln)
+            ]
+            if orig_cred_bodies != canon_bodies:
+                changed = True
+
+        backup_path = None
+        if not dry_run and changed:
+            bak = live.with_name(live.name + f".bak-compact-{stamp}")
+            shutil.copy2(live, bak)
+            backup_path = str(bak)
+            tmp = live.with_name(live.name + f".tmp-compact-{os.getpid()}-{stamp}")
+            tmp.write_text("".join(keep), encoding="utf-8")
+            os.replace(tmp, live)
+
+        after_unique = unique
+        summary_bits = [
+            f"唯一 {after_unique}",
+            f"去掉重复 {duplicate_extra}",
+        ]
+        if invalid_dropped:
+            summary_bits.append(f"去掉无效 {invalid_dropped}")
+        if comments_dropped:
+            summary_bits.append(f"去掉注释/空行 {comments_dropped}")
+        if dry_run:
+            head = "预览精简" if changed else "无需精简"
+        else:
+            head = "已精简" if changed else "无需精简"
+        summary = f"{head} · " + " · ".join(summary_bits)
+
+        return {
+            "ok": True,
+            "dry_run": bool(dry_run),
+            "changed": changed,
+            "path": str(live),
+            "backup_path": backup_path,
+            "before_parsed": before_parsed,
+            "unique": after_unique,
+            "duplicate_extra": duplicate_extra,
+            "invalid_dropped": invalid_dropped,
+            "comments_kept": comments_kept,
+            "comments_dropped": comments_dropped,
+            "after_lines": sum(1 for ln in keep if parse_credential_line(ln)),
+            "summary": summary,
+            # sample only — emails are not secrets
+            "sample_kept": kept_emails[:5],
+        }
+
+
 def pool_stats(path: Path | str, *, dead_path: Path | str | None = None) -> dict[str, Any]:
     """Return pool totals / by_domain counts (no secrets)."""
     live = Path(path)
@@ -242,9 +875,16 @@ def pool_stats(path: Path | str, *, dead_path: Path | str | None = None) -> dict
             )
         except OSError:
             dead_total = 0
+    scan = scan_pool_file(live) if live.is_file() else scan_pool_file("")
     return {
         "path": str(live),
         "total": len(accounts),
+        "unique": len(accounts),
+        "raw_lines": int(scan.get("raw_lines") or 0),
+        "parsed_lines": int(scan.get("parsed_lines") or 0),
+        "duplicate_extra": int(scan.get("duplicate_extra") or 0),
+        "invalid_lines": int(scan.get("invalid_lines") or 0),
+        "needs_compact": bool(scan.get("needs_compact")),
         "by_domain": dict(sorted(by_domain.items(), key=lambda kv: (-kv[1], kv[0]))),
         "dead_path": str(dead),
         "dead_total": dead_total,

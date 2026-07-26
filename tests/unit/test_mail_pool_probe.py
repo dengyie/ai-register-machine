@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -42,12 +43,124 @@ def test_parse_credential_line_ok():
     assert c.domain == "hotmail.com"
 
 
+def test_parse_credential_line_json_object():
+    from mail_pool_probe import normalize_credential_line, normalize_credential_text
+
+    raw = (
+        '{"email":"KanodeShapleigh20@outlook.com","password":"Di5VBneA",'
+        '"clientId":"9e5f9abc-0000-0000-0000-000000000001",'
+        '"refreshToken":"M.C501_BAY.0.U.-refresh"}'
+    )
+    c = parse_credential_line(raw, line_no=7)
+    assert c is not None
+    assert c.email == "KanodeShapleigh20@outlook.com"
+    assert c.password == "Di5VBneA"
+    assert c.client_id.startswith("9e5f9abc")
+    assert c.refresh_token.startswith("M.C501")
+    assert c.domain == "outlook.com"
+    norm = normalize_credential_line(raw)
+    assert norm == (
+        "KanodeShapleigh20@outlook.com----Di5VBneA----"
+        "9e5f9abc-0000-0000-0000-000000000001----M.C501_BAY.0.U.-refresh"
+    )
+    text, stats = normalize_credential_text(raw)
+    assert stats["written"] == 1 and stats["json_objects"] == 1
+    assert text.strip() == norm
+
+
 def test_parse_credential_line_rejects_bad():
     assert parse_credential_line("") is None
     assert parse_credential_line("# comment") is None
     assert parse_credential_line("only----two") is None
     assert parse_credential_line("notanemail----p----c----r") is None
     assert parse_credential_line("a@b.com----p---- ----r") is None
+    assert parse_credential_line('{"email":"x","password":"p"}') is None
+
+
+def test_normalize_alt_delimiters_and_csv():
+    from mail_pool_probe import normalize_credential_line, normalize_credential_text
+
+    pipe = "a@outlook.com|pw1|cid-aaaa|rt-bbbbbbbb"
+    assert normalize_credential_line(pipe) == "a@outlook.com----pw1----cid-aaaa----rt-bbbbbbbb"
+
+    colon = "b@hotmail.com:pw2:cid-bbbb:rt-cccccccc"
+    assert normalize_credential_line(colon) == "b@hotmail.com----pw2----cid-bbbb----rt-cccccccc"
+
+    tab = "c@live.com\tpw3\tcid-cccc\trt-dddddddd"
+    assert normalize_credential_line(tab) == "c@live.com----pw3----cid-cccc----rt-dddddddd"
+
+    # wrapped JSON list
+    wrapped = json.dumps(
+        {
+            "data": [
+                {
+                    "email": "w@outlook.com",
+                    "password": "p",
+                    "client_id": "cid-wrap1",
+                    "refresh_token": "rt-wrap111",
+                }
+            ]
+        }
+    )
+    text, stats = normalize_credential_text(wrapped)
+    assert stats["written"] == 1 and stats["json_objects"] == 1
+    assert "w@outlook.com----p----cid-wrap1----rt-wrap111" in text
+
+    # CSV with header
+    csv_body = (
+        "Email,Password,ClientId,RefreshToken\n"
+        "h@outlook.com,ph,cid-csv01,rt-csv0001\n"
+        "bad,no,at,sign\n"
+        "i@hotmail.com,pi,cid-csv02,rt-csv0002\n"
+    )
+    text2, stats2 = normalize_credential_text(csv_body)
+    assert stats2["written"] == 2
+    assert stats2.get("csv_rows") == 2
+    assert "h@outlook.com----ph----cid-csv01----rt-csv0001" in text2
+    assert "i@hotmail.com----pi----cid-csv02----rt-csv0002" in text2
+
+
+def test_normalize_alt_delimiters_and_csv():
+    from mail_pool_probe import normalize_credential_line, normalize_credential_text
+
+    pipe = "a@outlook.com|pw1|cid-aaaa|rt-bbbbbbbb"
+    assert normalize_credential_line(pipe) == "a@outlook.com----pw1----cid-aaaa----rt-bbbbbbbb"
+
+    colon = "b@hotmail.com:pw2:cid-bbbb:rt-cccccccc"
+    assert normalize_credential_line(colon) == "b@hotmail.com----pw2----cid-bbbb----rt-cccccccc"
+
+    tab = "c@live.com\tpw3\tcid-cccc\trt-dddddddd"
+    assert normalize_credential_line(tab) == "c@live.com----pw3----cid-cccc----rt-dddddddd"
+
+    # wrapped JSON list
+    wrapped = json.dumps(
+        {
+            "data": [
+                {
+                    "email": "w@outlook.com",
+                    "password": "p",
+                    "client_id": "cid-wrap1",
+                    "refresh_token": "rt-wrap111",
+                }
+            ]
+        }
+    )
+    text, stats = normalize_credential_text(wrapped)
+    assert stats["written"] == 1 and stats["json_objects"] == 1
+    assert "w@outlook.com----p----cid-wrap1----rt-wrap111" in text
+
+    # CSV with header
+    csv_body = (
+        "Email,Password,ClientId,RefreshToken\n"
+        "h@outlook.com,ph,cid-csv01,rt-csv0001\n"
+        "bad,no,at,sign\n"
+        "i@hotmail.com,pi,cid-csv02,rt-csv0002\n"
+    )
+    text2, stats2 = normalize_credential_text(csv_body)
+    assert stats2["written"] == 2
+    assert stats2.get("csv_rows") == 2
+    assert "h@outlook.com----ph----cid-csv01----rt-csv0001" in text2
+    assert "i@hotmail.com----pi----cid-csv02----rt-csv0002" in text2
 
 
 def test_load_pool_dedupes(tmp_path: Path):
@@ -65,6 +178,126 @@ def test_load_pool_dedupes(tmp_path: Path):
     assert accs[0].email == "A@Hotmail.com"
     assert accs[0].password == "p1"
     assert accs[1].email == "b@outlook.com"
+
+
+def test_scan_and_compact_pool(tmp_path: Path):
+    from mail_pool_probe import compact_pool, pool_stats, scan_pool_file
+
+    p = tmp_path / "mail_credentials.txt"
+    p.write_text(
+        _line("A@Hotmail.com", "p1", "c1", "r1")
+        + _line("a@hotmail.com", "p2", "c2", "r2")  # dup
+        + _line("b@outlook.com", "p3", "c3", "r3")
+        + "# keep-me\n"
+        + "not-a-cred\n"
+        + _line("B@Outlook.com", "p4", "c4", "r4")  # case dup of b
+        + "\n",
+        encoding="utf-8",
+    )
+    scan = scan_pool_file(p)
+    assert scan["parsed_lines"] == 4
+    assert scan["unique"] == 2
+    assert scan["duplicate_extra"] == 2
+    assert scan["invalid_lines"] == 1
+    assert scan["needs_compact"] is True
+
+    st = pool_stats(p)
+    assert st["total"] == 2
+    assert st["duplicate_extra"] == 2
+    assert st["needs_compact"] is True
+    assert "p1" not in str(st)
+
+    preview = compact_pool(p, dry_run=True)
+    assert preview["dry_run"] is True
+    assert preview["changed"] is True
+    assert preview["duplicate_extra"] == 2
+    assert preview["invalid_dropped"] == 1
+    assert preview["unique"] == 2
+    assert preview["backup_path"] is None
+    # dry_run must not rewrite
+    assert "not-a-cred" in p.read_text(encoding="utf-8")
+    assert p.read_text(encoding="utf-8").count("hotmail.com") >= 1
+
+    out = compact_pool(p, dry_run=False, drop_invalid=True, drop_comments=False)
+    assert out["changed"] is True
+    assert out["backup_path"]
+    assert Path(out["backup_path"]).is_file()
+    text = p.read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    # first wins + comment kept + invalid gone
+    assert "A@Hotmail.com----p1----c1----r1" in text
+    assert "b@outlook.com----p3----c3----r3" in text
+    assert "a@hotmail.com----p2" not in text
+    assert "not-a-cred" not in text
+    assert "# keep-me" in text
+    assert "p2" not in text  # dup dropped
+    assert out["unique"] == 2
+    assert "已精简" in out["summary"]
+
+    again = compact_pool(p, dry_run=False)
+    assert again["changed"] is False
+    assert again["duplicate_extra"] == 0
+    assert "无需精简" in again["summary"]
+
+
+def test_scan_and_compact_pool(tmp_path: Path):
+    from mail_pool_probe import compact_pool, pool_stats, scan_pool_file
+
+    p = tmp_path / "mail_credentials.txt"
+    p.write_text(
+        _line("A@Hotmail.com", "p1", "c1", "r1")
+        + _line("a@hotmail.com", "p2", "c2", "r2")  # dup
+        + _line("b@outlook.com", "p3", "c3", "r3")
+        + "# keep-me\n"
+        + "not-a-cred\n"
+        + _line("B@Outlook.com", "p4", "c4", "r4")  # case dup of b
+        + "\n",
+        encoding="utf-8",
+    )
+    scan = scan_pool_file(p)
+    assert scan["parsed_lines"] == 4
+    assert scan["unique"] == 2
+    assert scan["duplicate_extra"] == 2
+    assert scan["invalid_lines"] == 1
+    assert scan["needs_compact"] is True
+
+    st = pool_stats(p)
+    assert st["total"] == 2
+    assert st["duplicate_extra"] == 2
+    assert st["needs_compact"] is True
+    assert "p1" not in str(st)
+
+    preview = compact_pool(p, dry_run=True)
+    assert preview["dry_run"] is True
+    assert preview["changed"] is True
+    assert preview["duplicate_extra"] == 2
+    assert preview["invalid_dropped"] == 1
+    assert preview["unique"] == 2
+    assert preview["backup_path"] is None
+    # dry_run must not rewrite
+    assert "not-a-cred" in p.read_text(encoding="utf-8")
+    assert p.read_text(encoding="utf-8").count("hotmail.com") >= 1
+
+    out = compact_pool(p, dry_run=False, drop_invalid=True, drop_comments=False)
+    assert out["changed"] is True
+    assert out["backup_path"]
+    assert Path(out["backup_path"]).is_file()
+    text = p.read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    # first wins + comment kept + invalid gone
+    assert "A@Hotmail.com----p1----c1----r1" in text
+    assert "b@outlook.com----p3----c3----r3" in text
+    assert "a@hotmail.com----p2" not in text
+    assert "not-a-cred" not in text
+    assert "# keep-me" in text
+    assert "p2" not in text  # dup dropped
+    assert out["unique"] == 2
+    assert "已精简" in out["summary"]
+
+    again = compact_pool(p, dry_run=False)
+    assert again["changed"] is False
+    assert again["duplicate_extra"] == 0
+    assert "无需精简" in again["summary"]
 
 
 def test_filter_by_domains_and_sample():
