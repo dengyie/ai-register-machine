@@ -91,13 +91,9 @@ def test_parse_email_providers_list() -> None:
         raise AssertionError("expected fixed to fail")
     except Exception as exc:
         assert "fixed" in str(exc).lower()
-    # gmail intentionally not in multi-select pool (still valid as EMAIL_PROVIDER single)
-    try:
-        m.parse_email_providers_list("gmail,cloudflare")
-        raise AssertionError("expected gmail in EMAIL_PROVIDERS to fail")
-    except Exception as exc:
-        assert "gmail" in str(exc).lower() or "未知" in str(exc)
-    assert "gmail" not in m._EMAIL_PROVIDER_POOL_KNOWN
+    # gmail is allowed in multi-select pool (operators own IMAP miss risk).
+    assert m.parse_email_providers_list("gmail,cloudflare") == ["gmail", "cloudflare"]
+    assert "gmail" in m._EMAIL_PROVIDER_POOL_KNOWN
     print("PASS parse_email_providers_list")
 
 
