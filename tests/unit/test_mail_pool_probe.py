@@ -322,6 +322,121 @@ def test_filter_by_domains_and_sample():
     assert sample_accounts(accs, 0) == []
 
 
+def test_sample_accounts_sequential_offset():
+    from mail_pool_probe import Credential
+
+    accs = [Credential(f"u{i}@hotmail.com", "p", "c", "r") for i in range(10)]
+    # Stable slice: no shuffle when offset is set
+    s0 = sample_accounts(accs, 3, offset=0)
+    assert [a.email for a in s0] == [
+        "u0@hotmail.com",
+        "u1@hotmail.com",
+        "u2@hotmail.com",
+    ]
+    s3 = sample_accounts(accs, 3, offset=3)
+    assert [a.email for a in s3] == [
+        "u3@hotmail.com",
+        "u4@hotmail.com",
+        "u5@hotmail.com",
+    ]
+    # Past end → empty
+    assert sample_accounts(accs, 3, offset=10) == []
+    assert sample_accounts(accs, 3, offset=99) == []
+    # Partial last page
+    last = sample_accounts(accs, 5, offset=8)
+    assert [a.email for a in last] == ["u8@hotmail.com", "u9@hotmail.com"]
+    # Full multi-wave cover without overlap / gap
+    seen: list[str] = []
+    off = 0
+    while True:
+        wave = sample_accounts(accs, 4, offset=off)
+        if not wave:
+            break
+        seen.extend(a.email for a in wave)
+        off += len(wave)
+    assert seen == [f"u{i}@hotmail.com" for i in range(10)]
+
+
+def test_probe_sample_sequential_paging(tmp_path: Path):
+    p = tmp_path / "mail_credentials.txt"
+    lines = "".join(
+        _line(f"u{i}@hotmail.com", f"p{i}", f"c{i}", f"r{i}") for i in range(7)
+    )
+    p.write_text(lines, encoding="utf-8")
+
+    def refresh(acc):
+        return True, "", None
+
+    w0 = probe_sample(
+        p,
+        domains=["hotmail.com"],
+        limit=3,
+        offset=0,
+        concurrency=2,
+        refresh_fn=refresh,
+        writeback_rotated=False,
+    )
+    assert w0["mode"] == "sequential"
+    assert w0["offset"] == 0
+    assert w0["next_offset"] == 3
+    assert w0["done"] is False
+    assert w0["pool_filtered_total"] == 7
+    assert w0["probed"] == 3
+    assert w0["limit"] == 3
+    assert [r["email"] for r in w0["results"]] == [
+        "u0@hotmail.com",
+        "u1@hotmail.com",
+        "u2@hotmail.com",
+    ]
+
+    w1 = probe_sample(
+        p,
+        domains=["hotmail.com"],
+        limit=3,
+        offset=w0["next_offset"],
+        concurrency=2,
+        refresh_fn=refresh,
+        writeback_rotated=False,
+    )
+    assert w1["offset"] == 3
+    assert w1["next_offset"] == 6
+    assert w1["done"] is False
+    assert [r["email"] for r in w1["results"]] == [
+        "u3@hotmail.com",
+        "u4@hotmail.com",
+        "u5@hotmail.com",
+    ]
+
+    w2 = probe_sample(
+        p,
+        domains=["hotmail.com"],
+        limit=3,
+        offset=w1["next_offset"],
+        concurrency=2,
+        refresh_fn=refresh,
+        writeback_rotated=False,
+    )
+    assert w2["offset"] == 6
+    assert w2["next_offset"] == 7
+    assert w2["done"] is True
+    assert w2["probed"] == 1
+    assert [r["email"] for r in w2["results"]] == ["u6@hotmail.com"]
+
+    # Empty page past end
+    w3 = probe_sample(
+        p,
+        domains=["hotmail.com"],
+        limit=3,
+        offset=7,
+        concurrency=1,
+        refresh_fn=refresh,
+        writeback_rotated=False,
+    )
+    assert w3["probed"] == 0
+    assert w3["next_offset"] == 7
+    assert w3["done"] is True
+
+
 def test_classify_error_mapping():
     assert classify_error("AADSTS700082: The refresh token has expired") == STATUS_GRANT_EXPIRED
     assert classify_error("grant is expired") == STATUS_GRANT_EXPIRED

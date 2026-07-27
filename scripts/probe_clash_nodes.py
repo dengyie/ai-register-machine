@@ -53,6 +53,9 @@ REPORT_DIR = Path(
 )
 DEFAULT_URL = "http://www.gstatic.com/generate_204"
 DEFAULT_TIMEOUT_MS = 5000
+# 每族 .pre-health-* 备份保留份数。不清理会无界增长: 每轮写 2 份,
+# 曾累积 1300+ 份 / 343MB 把 /personal/clash 撑到 579MB。
+_BAK_RETAIN = int(os.environ.get("CLASH_BAK_RETAIN") or 20)
 GROUP_TYPES = {
     "Selector",
     "URLTest",
@@ -231,6 +234,14 @@ def _backup_and_dump(cfg_path: Path, text: str, data: dict, header_note: str) ->
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     bak = cfg_path.with_suffix(cfg_path.suffix + f".pre-health-{ts}")
     bak.write_text(text, encoding="utf-8")
+    # 每轮 --apply-config 写 2 份备份 (config.yaml + merged), 不清理会无界增长:
+    # 曾在 /personal/clash 累积 1300+ 份 / 343MB。只删同族(.pre-health-)最旧的。
+    try:
+        fam = sorted(cfg_path.parent.glob(cfg_path.name + ".pre-health-*"))
+        for stale in fam[:-_BAK_RETAIN]:
+            stale.unlink()
+    except OSError:
+        pass
 
     class NoAliasDumper(yaml.SafeDumper):
         def ignore_aliases(self, data):  # type: ignore[no-untyped-def]

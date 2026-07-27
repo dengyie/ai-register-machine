@@ -74,3 +74,6 @@ output/
 
 # console10 (Vite + Preact) local deps
 apps/web/node_modules/
+
+# local Claude session/scratch (never commit)
+.claude/

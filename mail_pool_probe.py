@@ -86,6 +86,10 @@ _MS_ERROR_MAX = 200
 _DEFAULT_DEAD_NAME = "mail_credentials.dead.txt"
 _DEFAULT_PER_ACCOUNT_TIMEOUT = 20.0
 _DEFAULT_WALL_SECONDS = 90.0
+# Per HTTP/CLI wave caps. Full-pool scan is client/CLI multi-wave via ``offset``.
+_PROBE_LIMIT_MAX = 500
+_PROBE_CONCURRENCY_MAX = 8
+_PROBE_WALL_SECONDS_MAX = 600.0
 # terminal IdP errors: stop trying remaining endpoints for this account
 _TERMINAL_ERROR_RE = re.compile(
     r"aadsts\d+|invalid_grant|unauthorized_client|invalid_client|"
@@ -911,11 +915,22 @@ def sample_accounts(
     limit: int,
     *,
     seed: int | None = None,
+    offset: int | None = None,
 ) -> list[Credential]:
-    """Sample up to ``limit`` accounts. Deterministic if seed set."""
+    """Pick up to ``limit`` accounts.
+
+    - ``offset is not None`` → stable sequential slice ``[offset:offset+limit]``
+      (file/filter order; no shuffle). Used for full-pool multi-wave scans.
+    - else shuffle; deterministic if ``seed`` set.
+    """
     if limit <= 0 or not accounts:
         return []
     pool = list(accounts)
+    if offset is not None:
+        start = max(0, int(offset))
+        if start >= len(pool):
+            return []
+        return pool[start : start + min(int(limit), len(pool) - start)]
     if seed is not None:
         rng = random.Random(int(seed))
         rng.shuffle(pool)
@@ -1218,6 +1233,7 @@ def probe_sample(
     domains: list[str] | None = None,
     limit: int = 30,
     seed: int | None = None,
+    offset: int | None = None,
     concurrency: int = 4,
     refresh_fn: RefreshFn | None = None,
     writeback_rotated: bool = True,
@@ -1225,18 +1241,23 @@ def probe_sample(
 ) -> dict[str, Any]:
     """Sample + concurrent OAuth probe. Never returns secrets.
 
-    - concurrency hard-capped at 8
-    - limit hard-capped at 200
+    - concurrency hard-capped at ``_PROBE_CONCURRENCY_MAX`` (8)
+    - limit hard-capped at ``_PROBE_LIMIT_MAX`` (500) per wave
     - wall_seconds caps total wait (remaining futures cancelled; partial results kept)
     - process-global lock: only one probe wave at a time in this process
+    - ``offset`` set → sequential full-pool paging (stable order, no shuffle);
+      response includes ``next_offset`` / ``done`` / ``pool_filtered_total``
     """
-    limit = max(1, min(int(limit), 200))
-    concurrency = max(1, min(int(concurrency), 8))
-    wall = max(5.0, float(wall_seconds or _DEFAULT_WALL_SECONDS))
+    limit = max(1, min(int(limit), _PROBE_LIMIT_MAX))
+    concurrency = max(1, min(int(concurrency), _PROBE_CONCURRENCY_MAX))
+    wall = max(5.0, min(float(wall_seconds or _DEFAULT_WALL_SECONDS), _PROBE_WALL_SECONDS_MAX))
     live = Path(path)
     accounts = load_pool(live)
     filtered = filter_by_domains(accounts, domains)
-    sample = sample_accounts(filtered, limit, seed=seed)
+    pool_filtered_total = len(filtered)
+    sequential = offset is not None
+    off = max(0, int(offset)) if sequential else None
+    sample = sample_accounts(filtered, limit, seed=None if sequential else seed, offset=off)
 
     results: list[ProbeResult | None] = [None] * len(sample)
     timed_out = False
@@ -1307,7 +1328,7 @@ def probe_sample(
         if r.quarantinable:
             quarantinable_n += 1
     dead_n = len(final) - ok_n
-    return {
+    out: dict[str, Any] = {
         "probed": len(final),
         "ok": ok_n,
         "dead": dead_n,
@@ -1315,7 +1336,23 @@ def probe_sample(
         "by_status": by_status,
         "timed_out": timed_out,
         "results": [r.to_public_dict() for r in final],
+        "limit": limit,
+        "pool_filtered_total": pool_filtered_total,
     }
+    if sequential:
+        # Advance by requested window even if wall-clock left some as network_error,
+        # so multi-wave scans do not re-hit the same slice forever.
+        next_offset = int(off or 0) + len(sample)
+        out["offset"] = int(off or 0)
+        out["next_offset"] = next_offset
+        out["done"] = next_offset >= pool_filtered_total
+        out["mode"] = "sequential"
+    else:
+        out["offset"] = None
+        out["next_offset"] = None
+        out["done"] = None
+        out["mode"] = "sample"
+    return out
 
 
 def wait_done(futures: set, timeout: float):

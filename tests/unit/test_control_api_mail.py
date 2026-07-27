@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 
 import pytest
@@ -74,6 +76,8 @@ def test_probe_mail_uses_injectable_via_core(tmp_path: Path, monkeypatch):
     assert out["probed"] == 4
     assert out["ok"] + out["dead"] == 4
     assert "quarantinable" in out
+    assert out.get("mode") == "sample"
+    assert out.get("offset") is None
     for row in out["results"]:
         assert set(row.keys()) == {
             "email",
@@ -88,6 +92,58 @@ def test_probe_mail_uses_injectable_via_core(tmp_path: Path, monkeypatch):
             assert row["quarantinable"] is False
         if row["status"] == "grant_expired":
             assert row["quarantinable"] is True
+
+
+def test_probe_mail_sequential_offset(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HOTMAIL_ACCOUNTS_FILE", raising=False)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    pool = tmp_path / "mail_credentials.txt"
+    _write_pool(pool, 5)
+
+    import mail_pool_probe as core
+
+    monkeypatch.setattr(core, "_default_refresh", lambda acc: (True, "", None))
+
+    w0 = mail_ops.probe_mail(
+        tmp_path,
+        domains=["hotmail.com"],
+        limit=2,
+        offset=0,
+        concurrency=2,
+    )
+    assert w0["mode"] == "sequential"
+    assert w0["offset"] == 0
+    assert w0["next_offset"] == 2
+    assert w0["done"] is False
+    assert w0["pool_filtered_total"] == 5
+    assert [r["email"] for r in w0["results"]] == [
+        "u0@hotmail.com",
+        "u1@hotmail.com",
+    ]
+
+    w1 = mail_ops.probe_mail(
+        tmp_path,
+        domains=["hotmail.com"],
+        limit=2,
+        offset=w0["next_offset"],
+        concurrency=2,
+    )
+    assert w1["offset"] == 2
+    assert w1["next_offset"] == 4
+    assert w1["done"] is False
+
+    w2 = mail_ops.probe_mail(
+        tmp_path,
+        domains=["hotmail.com"],
+        limit=2,
+        offset=w1["next_offset"],
+        concurrency=2,
+    )
+    assert w2["offset"] == 4
+    assert w2["next_offset"] == 5
+    assert w2["done"] is True
+    assert w2["probed"] == 1
 
 
 def test_quarantine_mail(tmp_path: Path, monkeypatch):
@@ -219,6 +275,34 @@ def test_routes_http_errors(tmp_path: Path, monkeypatch):
     assert r.status_code == 200
     assert r.json()["unique"] == 2
 
+    # sequential offset probe (injectable refresh, no network)
+    import mail_pool_probe as core
+
+    monkeypatch.setattr(core, "_default_refresh", lambda acc: (True, "", None))
+    r = client.post(
+        "/api/mail/probe",
+        json={
+            "domains": ["hotmail.com"],
+            "limit": 1,
+            "offset": 0,
+            "concurrency": 1,
+            "wall_seconds": 30,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "sequential"
+    assert body["offset"] == 0
+    assert body["next_offset"] == 1
+    assert body["done"] is False
+    assert body["pool_filtered_total"] == 2
+    assert body["probed"] == 1
+    # validation: limit > 500 / negative offset rejected by pydantic
+    r = client.post("/api/mail/probe", json={"limit": 501, "offset": 0})
+    assert r.status_code == 422
+    r = client.post("/api/mail/probe", json={"limit": 1, "offset": -1})
+    assert r.status_code == 422
+
 
 def test_list_cloudflare_domains_requires_base(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -253,9 +337,11 @@ def test_list_cloudflare_domains_parses_and_redacts(tmp_path: Path, monkeypatch)
 
     def _fake_urlopen(req, timeout=15):
         assert str(req.full_url).startswith("https://mail.example/domains")
-        auth = req.headers.get("Authorization") or req.get_header("Authorization")
-        # urllib may title-case
-        assert auth is None or "sekret" in str(req.headers) or True
+        # Browser UA required to avoid CF Error 1010
+        ua = req.headers.get("User-agent") or req.headers.get("User-Agent") or ""
+        if not ua and hasattr(req, "get_header"):
+            ua = req.get_header("User-agent") or req.get_header("User-Agent") or ""
+        assert "Mozilla" in str(ua)
         return _Resp()
 
     monkeypatch.setattr(mail_ops, "urlopen", _fake_urlopen)
@@ -263,5 +349,71 @@ def test_list_cloudflare_domains_parses_and_redacts(tmp_path: Path, monkeypatch)
     assert out["domains"] == ["a.com", "b.com", "c.com"]
     assert out["selected"] == ["a.com"]
     assert out["has_api_key"] is True
+    assert out["path"] == "/domains"
     blob = str(out)
     assert "sekret1234" not in blob
+
+
+def test_list_cloudflare_domains_falls_back_open_settings(tmp_path: Path, monkeypatch):
+    """cloudflare_temp_email: /api/domains needs address JWT → 401; open_api/settings is public."""
+    from urllib.error import HTTPError
+    from io import BytesIO
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "cloudflare_api_base": "https://temp-mail.example",
+                "cloudflare_path_domains": "/api/domains",
+                "cloudflare_auth_mode": "none",
+                "defaultDomains": "keep.me",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _Ok:
+        status = 200
+
+        def read(self):
+            return (
+                b'{"title":"CF","domains":["mangoqwq.com","mangoq.ccwu.cc"],'
+                b'"defaultDomains":["mangoqwq.com"]}'
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    calls: list[str] = []
+
+    def _fake_urlopen(req, timeout=15):
+        url = str(req.full_url)
+        calls.append(url)
+        ua = req.headers.get("User-agent") or req.headers.get("User-Agent") or ""
+        assert "Mozilla" in str(ua)
+        if url.endswith("/api/domains"):
+            raise HTTPError(
+                url,
+                401,
+                "Unauthorized",
+                hdrs=None,  # type: ignore[arg-type]
+                fp=BytesIO(b"Invalid address credential"),
+            )
+        if url.endswith("/open_api/settings"):
+            # Public path: no Authorization
+            auth = req.headers.get("Authorization") or req.headers.get("authorization")
+            assert not auth
+            return _Ok()
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(mail_ops, "urlopen", _fake_urlopen)
+    out = mail_ops.list_cloudflare_domains(tmp_path)
+    assert out["domains"] == ["mangoqwq.com", "mangoq.ccwu.cc"]
+    assert out["path"] == "/open_api/settings"
+    assert out["selected"] == ["keep.me"]
+    assert out["count"] == 2
+    assert any(u.endswith("/api/domains") for u in calls)
+    assert any(u.endswith("/open_api/settings") for u in calls)

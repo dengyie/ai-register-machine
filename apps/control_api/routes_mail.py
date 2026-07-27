@@ -15,10 +15,15 @@ router = APIRouter(tags=["mail"])
 
 class MailProbeIn(BaseModel):
     domains: list[str] = Field(default_factory=list)
-    limit: int = Field(default=30, ge=1, le=200)
+    # Per-wave cap (full pool = multi-wave via offset). 500 keeps one request
+    # under control_api request time without a job queue.
+    limit: int = Field(default=30, ge=1, le=500)
     seed: int | None = None
+    # Sequential full-pool paging. When set, order is stable (no shuffle) and
+    # response carries next_offset/done for the UI/CLI to loop.
+    offset: int | None = Field(default=None, ge=0)
     concurrency: int = Field(default=4, ge=1, le=8)
-    wall_seconds: float = Field(default=90.0, ge=5.0, le=180.0)
+    wall_seconds: float = Field(default=90.0, ge=5.0, le=600.0)
 
 
 class MailQuarantineIn(BaseModel):
@@ -61,6 +66,7 @@ def api_mail_probe(body: MailProbeIn) -> dict[str, Any]:
             domains=domains,
             limit=body.limit,
             seed=body.seed,
+            offset=body.offset,
             concurrency=body.concurrency,
             wall_seconds=body.wall_seconds,
         )
