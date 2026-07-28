@@ -37,6 +37,7 @@ _lock = threading.RLock()
 _store: dict[str, Any] | None = None
 _path: Path | None = None
 _enabled: bool | None = None
+_corr_enabled = None  # test/programmatic override for EMAIL_IP_CORRELATION
 
 
 def _truthy(val: Any, default: bool = True) -> bool:
@@ -75,6 +76,28 @@ def set_enabled(flag: bool | None) -> None:
     """Test helper. Pass None to clear override."""
     global _enabled
     _enabled = None if flag is None else bool(flag)
+
+
+def set_correlation_enabled(value):
+    """Override the correlation master switch (None clears the override)."""
+    global _corr_enabled
+    _corr_enabled = value
+
+
+def correlation_enabled(cfg=None):
+    """Master switch for email×IP correlation (layers ①②③). Default OFF.
+
+    Precedence mirrors scoring_enabled:
+    env EMAIL_IP_CORRELATION -> cfg email_ip_correlation -> _corr_enabled -> False.
+    """
+    env = os.environ.get("EMAIL_IP_CORRELATION")
+    if env is not None and str(env).strip() != "":
+        return _truthy(env, default=False)
+    if isinstance(cfg, dict) and "email_ip_correlation" in cfg:
+        return _truthy(cfg.get("email_ip_correlation"), default=False)
+    if _corr_enabled is not None:
+        return bool(_corr_enabled)
+    return False
 
 
 def score_path(cfg: dict | None = None) -> Path:
