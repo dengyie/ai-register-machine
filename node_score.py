@@ -441,3 +441,91 @@ def record_domain(domain: str, kind: str, *, cfg: dict | None = None,
         except Exception:
             pass
     return out
+
+
+def _pair_key(domain: str, node: str) -> str:
+    return f"{domain}|{node}"
+
+
+def _pair_entry(store: dict, domain: str, node: str) -> dict:
+    pairs = store.get("pairs")
+    if not isinstance(pairs, dict):
+        pairs = {}
+        store["pairs"] = pairs
+    key = _pair_key(domain, node)
+    ent = pairs.get(key)
+    if not isinstance(ent, dict):
+        ent = {"score": DEFAULT_SCORE, "cool_until": 0.0, "ok": 0,
+               "fail_ts": 0, "fail_boot": 0, "updated": 0.0}
+        pairs[key] = ent
+    for k, d in (("score", DEFAULT_SCORE), ("cool_until", 0.0), ("ok", 0),
+                 ("fail_ts", 0), ("fail_boot", 0), ("updated", 0.0)):
+        ent.setdefault(k, d)
+    return ent
+
+
+def get_pair(domain: str, node: str, *, cfg: dict | None = None) -> dict:
+    if not domain or not node or not correlation_enabled(cfg):
+        return {}
+    try:
+        _, store = _get_store(cfg)
+        pairs = store.get("pairs")
+        if not isinstance(pairs, dict):
+            return {}
+        ent = pairs.get(_pair_key(str(domain).strip().lower(), str(node).strip()))
+        return ent if isinstance(ent, dict) else {}
+    except Exception:
+        return {}
+
+
+def pair_is_cooled(domain: str, node: str, *, now: float | None = None,
+                   cfg: dict | None = None) -> bool:
+    if not domain or not node or not correlation_enabled(cfg):
+        return False
+    ent = get_pair(domain, node, cfg=cfg)
+    if not ent:
+        return False
+    t = time.time() if now is None else now
+    try:
+        return float(ent.get("cool_until") or 0) > t
+    except Exception:
+        return False
+
+
+def record_pair(domain: str, node: str, kind: str, *,
+                cfg: dict | None = None, log: Any = None) -> dict[str, Any]:
+    if not domain or not node or not correlation_enabled(cfg):
+        return {"ok": False, "reason": "disabled"}
+    domain = str(domain).strip().lower()
+    node = str(node).strip()
+    if not domain or not node:
+        return {"ok": False, "reason": "disabled"}
+    kind_l = str(kind or "").strip().lower()
+    path, store = _get_store(cfg)
+    with _lock:
+        ent = _pair_entry(store, domain, node)
+        now = time.time()
+        delta, cool = _kind_effect(kind_l, ent)
+        if delta > 0:
+            ent["ok"] = int(ent.get("ok") or 0) + 1
+            ent["cool_until"] = 0.0
+        elif kind_l in {"turnstile", "turnstile_fail", "cf", "token_len_0"}:
+            ent["fail_ts"] = int(ent.get("fail_ts") or 0) + 1
+        elif kind_l in {"browser_boot", "boot", "connection"}:
+            ent["fail_boot"] = int(ent.get("fail_boot") or 0) + 1
+        ent["score"] = _clamp(int(ent.get("score") or DEFAULT_SCORE) + delta)
+        if cool > 0:
+            ent["cool_until"] = max(float(ent.get("cool_until") or 0), now + cool)
+        ent["updated"] = now
+        ent["last_kind"] = kind_l
+        _save(path, store)
+        out = {"ok": True, "pair": _pair_key(domain, node), "kind": kind_l,
+               "score": ent["score"], "cool_until": ent.get("cool_until") or 0,
+               "delta": delta}
+    if log:
+        try:
+            log(f"[pair_score] {out['pair']!r} kind={kind_l} delta={delta} "
+                f"score={out['score']}")
+        except Exception:
+            pass
+    return out

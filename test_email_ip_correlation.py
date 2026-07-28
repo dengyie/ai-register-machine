@@ -186,3 +186,72 @@ def test_record_domain_double_cool_on_second_consecutive_turnstile(tmp_path):
     assert dom["fail_ts"] == 2
     # doubled == 2 x COOL_TURNSTILE_S beyond now (within epsilon)
     assert dom["cool_until"] > time.time() + ns.COOL_TURNSTILE_S + 60
+
+
+def test_get_pair_disabled_returns_empty(tmp_path):
+    os.environ["NODE_SCORE_PATH"] = str(tmp_path / "s.json")
+    assert ns.get_pair("a.com", "n1") == {}
+
+
+def test_record_pair_disabled_noop_no_file(tmp_path):
+    os.environ["NODE_SCORE_PATH"] = str(tmp_path / "s.json")
+    out = ns.record_pair("a.com", "n1", "turnstile")
+    assert out["ok"] is False
+    assert not (tmp_path / "s.json").exists()
+
+
+def test_record_pair_ok_creates_pairs_and_rewards(tmp_path):
+    os.environ["NODE_SCORE_PATH"] = str(tmp_path / "s.json")
+    ns.set_correlation_enabled(True)
+    out = ns.record_pair("a.com", "n1", "mint_ok")
+    assert out["ok"] is True
+    assert out["pair"] == "a.com|n1"
+    assert out["score"] == ns.DEFAULT_SCORE + ns.SUCCESS_MINT
+    import json
+    data = json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))
+    assert "pairs" in data and "a.com|n1" in data["pairs"]
+    assert data["nodes"] == {} and data.get("domains", {}) == {}
+
+
+def test_pair_is_cooled_respects_switch(tmp_path):
+    import json, time
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({
+        "version": 1, "nodes": {},
+        "pairs": {"a.com|n1": {"score": 40, "cool_until": time.time() + 600,
+                                "ok": 0, "fail_ts": 1}},
+    }), encoding="utf-8")
+    os.environ["NODE_SCORE_PATH"] = str(p)
+    # OFF -> never cooled (correlation not active)
+    assert ns.pair_is_cooled("a.com", "n1") is False
+    ns.set_correlation_enabled(True)
+    assert ns.pair_is_cooled("a.com", "n1") is True
+    assert ns.pair_is_cooled("a.com", "n1", now=time.time() + 99999) is False
+
+
+def test_record_pair_fail_then_cool_and_recover(tmp_path):
+    os.environ["NODE_SCORE_PATH"] = str(tmp_path / "s.json")
+    ns.set_correlation_enabled(True)
+    ns.record_pair("a.com", "n1", "turnstile")
+    assert ns.pair_is_cooled("a.com", "n1") is True
+    # a success clears the cool
+    ns.record_pair("a.com", "n1", "reg_ok")
+    assert ns.pair_is_cooled("a.com", "n1") is False
+
+
+def test_corrupt_pairs_key_degrades_to_empty(tmp_path):
+    import json
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"version": 1, "nodes": {"x": {"score": 80}},
+                            "pairs": "NOT-A-DICT"}), encoding="utf-8")
+    os.environ["NODE_SCORE_PATH"] = str(p)
+    ns.set_correlation_enabled(True)
+    # reads degrade cleanly
+    assert ns.get_pair("a.com", "n1") == {}
+    assert ns.pair_is_cooled("a.com", "n1") is False
+    # and a fresh write repairs the key without dropping nodes
+    out = ns.record_pair("a.com", "n1", "reg_ok")
+    assert out["ok"] is True
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["nodes"] == {"x": {"score": 80}}
+    assert "a.com|n1" in data["pairs"]
