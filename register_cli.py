@@ -1272,6 +1272,11 @@ def register_one(
                         log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
                     )
                     try:
+                        from proxy_rotate import set_registration_domain
+                        set_registration_domain(email)
+                    except Exception:
+                        pass
+                    try:
                         provider_now = reg.get_email_provider()
                     except Exception:
                         provider_now = "?"
@@ -1355,6 +1360,11 @@ def register_one(
                     return {"ok": False, "error": msg, "idx": idx, "kind": kind}
 
             _clear_mail_provider_bind()
+            try:
+                from proxy_rotate import clear_registration_domain
+                clear_registration_domain()
+            except Exception:
+                pass
             if not mail_ok:
                 return {"ok": False, "error": "mail stage failed", "idx": idx}
 

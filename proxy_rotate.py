@@ -644,6 +644,10 @@ class ProxyRotator:
         # While any hold is active, rotate will not leave that node so concurrent
         # register fail-fast cannot steal the mixed-port leaf mid-mint.
         self._mint_holds: dict[str, int] = {}
+        # Layer ③ hint: the email domain of the in-flight registration, so
+        # the scored-pick block can soft-prefer a node with a known good pair.
+        # Empty when EMAIL_IP_CORRELATION is off or no registration running.
+        self._registration_domain: str = ""
 
     def configure(self, cfg: dict | None) -> None:
         cfg = cfg if isinstance(cfg, dict) else {}
@@ -941,13 +945,32 @@ class ProxyRotator:
             try:
                 import node_score as _ns
 
-                if _ns.scoring_enabled(cfg):
-                    nxt = _ns.pick_next(
-                        self.list_pool, prev or self.list_pool[0], cfg=cfg
-                    )
-                    pick_reason = "node_score"
+                if _ns.correlation_enabled(cfg):
+                    dom = (self._registration_domain or "").strip().lower()
+                    if dom:
+                        cand = _ns.preferred_node_for(
+                            dom, self.list_pool, prev or self.list_pool[0], cfg=cfg
+                        )
+                        if cand and cand in self.list_pool:
+                            nxt = cand
+                            pick_reason = "pair_affinity"
             except Exception:
                 nxt = ""
+                pick_reason = "round_robin"
+            if not nxt or nxt not in self.list_pool:
+                try:
+                    import node_score as _ns
+
+                    if _ns.scoring_enabled(cfg):
+                        nxt = _ns.pick_next(
+                            self.list_pool, prev or self.list_pool[0], cfg=cfg
+                        )
+                        if pick_reason != "pair_affinity":
+                            pick_reason = "node_score"
+                    else:
+                        raise RuntimeError("use round_robin")
+                except Exception:
+                    nxt = ""
             if nxt and nxt in self.list_pool:
                 self.list_index = self.list_pool.index(nxt)
                 proxy = nxt
@@ -1079,17 +1102,35 @@ class ProxyRotator:
                 "holds": self._active_mint_holds_locked(),
             }
 
-        # Prefer scored pick (NODE_SCORE / node_score_enabled); fall back round-robin.
+        # Layer ③ pair-affinity nudge (soft): if the in-flight reg domain has a
+        # good, non-cooled pair node, prefer it. OFF / no pair / cooled -> fall
+        # through to scored pick / round-robin unchanged.
         nxt = ""
         pick_reason = "round_robin"
         try:
             import node_score as _ns  # local module; optional at runtime
 
-            if _ns.scoring_enabled(cfg):
-                nxt = _ns.pick_next(nodes, now, cfg=cfg)
-                pick_reason = "node_score"
+            if _ns.correlation_enabled(cfg):
+                dom = (self._registration_domain or "").strip().lower()
+                if dom:
+                    cand = _ns.preferred_node_for(dom, nodes, now, cfg=cfg)
+                    if cand and cand in nodes:
+                        nxt = cand
+                        pick_reason = "pair_affinity"
         except Exception:
             nxt = ""
+        if not nxt or nxt not in nodes:
+            try:
+                import node_score as _ns
+
+                if _ns.scoring_enabled(cfg):
+                    got = _ns.pick_next(nodes, now, cfg=cfg)
+                    if got and got in nodes:
+                        nxt = got
+                        if pick_reason != "pair_affinity":
+                            pick_reason = "node_score"
+            except Exception:
+                nxt = ""
         if not nxt or nxt not in nodes:
             try:
                 idx = nodes.index(now)
@@ -1276,6 +1317,27 @@ def configure_proxy_rotation(cfg: dict | None, log: LogFn = None) -> ProxyRotato
                 f"donor={st['clash_donor_group']}（不改主策略组）",
             )
         return _rotator
+
+
+def set_registration_domain(domain: str) -> None:
+    """Layer ③ hint: record the in-flight registration email domain on the
+    rotator so the scored-pick block can soft-prefer a good pair node.
+
+    Normalized to lower-case; empty string clears. No-op cost when the
+    EMAIL_IP_CORRELATION switch is off (the hint is simply never consulted).
+    """
+    with _rotator._lock:
+        raw = str(domain or "").strip().lower()
+        # Accept raw email ("user@Host.com") or bare domain; pair keys use host.
+        if raw and "@" in raw:
+            host = raw.split("@")[-1].strip()
+            raw = host or raw
+        _rotator._registration_domain = raw
+
+
+def clear_registration_domain() -> None:
+    with _rotator._lock:
+        _rotator._registration_domain = ""
 
 
 def maybe_rotate_proxy(
