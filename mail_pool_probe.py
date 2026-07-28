@@ -916,12 +916,18 @@ def sample_accounts(
     *,
     seed: int | None = None,
     offset: int | None = None,
+    cfg: dict | None = None,
 ) -> list[Credential]:
     """Pick up to ``limit`` accounts.
 
     - ``offset is not None`` → stable sequential slice ``[offset:offset+limit]``
       (file/filter order; no shuffle). Used for full-pool multi-wave scans.
     - else shuffle; deterministic if ``seed`` set.
+
+    Layer ② (EMAIL_IP_CORRELATION on, multi-domain, no seed/offset): weighted
+    sampling *without* replacement via Efraimidis–Spirakis keys. With uniform
+    weights this is distributionally equivalent to ``random.shuffle``, so the
+    single-domain / OFF paths stay byte-for-byte current behavior.
     """
     if limit <= 0 or not accounts:
         return []
@@ -931,6 +937,31 @@ def sample_accounts(
         if start >= len(pool):
             return []
         return pool[start : start + min(int(limit), len(pool) - start)]
+
+    weighted = False
+    weights = None
+    if seed is None:
+        try:
+            import node_score as _ns
+
+            if _ns.correlation_enabled(cfg):
+                doms = {a.domain for a in pool if a.domain}
+                if len({d.strip().lower() for d in doms if d}) > 1:
+                    weights = _ns.domain_weights(
+                        [a.domain for a in pool], cfg=cfg
+                    )
+                    weighted = bool(weights)
+        except Exception:
+            weighted = False
+            weights = None
+
+    if weighted and weights and len(weights) == len(pool):
+        # Efraimidis–Spirakis: key = U**(1/w); sort desc; take top limit.
+        u = [random.random() for _ in range(len(pool))]
+        keys = [pow(u[i], 1.0 / float(weights[i])) for i in range(len(pool))]
+        order = sorted(range(len(pool)), key=lambda i: keys[i], reverse=True)
+        return [pool[i] for i in order[: min(int(limit), len(pool))]]
+
     if seed is not None:
         rng = random.Random(int(seed))
         rng.shuffle(pool)

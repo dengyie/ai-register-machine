@@ -663,3 +663,28 @@ def test_quarantine_rejects_empty_emails(tmp_path: Path):
         quarantine(live, [])
     with pytest.raises(ValueError):
         quarantine(live, ["", "  "])
+
+
+def test_sample_accounts_off_keeps_shuffle_intact():
+    import os
+    import random as _r
+    import node_score as ns
+    from mail_pool_probe import Credential
+
+    for k in ("EMAIL_IP_CORRELATION", "NODE_SCORE", "NODE_SCORE_ENABLED",
+              "NODE_SCORE_PATH"):
+        os.environ.pop(k, None)
+    ns.set_correlation_enabled(None)
+    accs = [
+        Credential("a@hotmail.com", "p", "c", "r"),
+        Credential("b@outlook.com", "p", "c", "r"),
+        Credential("c@live.com", "p", "c", "r"),
+    ]
+    _r.seed(99)
+    want = list(accs)
+    _r.shuffle(want)
+    want = want[:3]
+    # Reseed so sample_accounts starts from the same global RNG state as want.
+    _r.seed(99)
+    got = sample_accounts(list(accs), 3, cfg={})  # OFF path
+    assert got == want
