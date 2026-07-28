@@ -879,6 +879,21 @@ def _record_correlation_domain(email, kind, *, cfg=None):
         return {"ok": False, "reason": "error"}
 
 
+def _clear_registration_domain_hint() -> None:
+    """Layer ③: drop the rotator's in-flight registration-domain hint.
+
+    The hint lives on the process-global rotator, so it must be cleared whenever
+    we leave an account — otherwise a later rotate for a *different* account can
+    soft-prefer this account's pair node. Never raises.
+    """
+    try:
+        from proxy_rotate import clear_registration_domain
+
+        clear_registration_domain()
+    except Exception:
+        pass
+
+
 def _record_correlation_pair(email, node, kind, *, cfg=None):
     """Soft: record the (domain, node) outcome for layer ③ affinity. OFF → no-op."""
     try:
@@ -1238,12 +1253,7 @@ def register_one(
             def _clear_reg_domain_hint() -> None:
                 # Layer ③: drop the rotator hint so a later rotate for another
                 # account never soft-prefers this account's domain pair.
-                try:
-                    from proxy_rotate import clear_registration_domain
-
-                    clear_registration_domain()
-                except Exception:
-                    pass
+                _clear_registration_domain_hint()
 
             def _reset_mail_provider_attempt_state() -> None:
                 # New account (or fresh mail stage): failover index must not leak
@@ -1303,6 +1313,7 @@ def register_one(
                     break
                 except AccountRetryNeeded:
                     _clear_mail_provider_bind()
+                    _clear_reg_domain_hint()
                     raise
                 except Exception as exc:
                     msg = str(exc)
@@ -1708,6 +1719,9 @@ def register_one(
             log(worker_id, f"! slot 重试耗尽 ({max_slot_retry}): {exc}")
             traceback.print_exc()
             _inc("reg_fail")
+            # correlation ③: leaving this account for good — drop the domain hint
+            # so the next account's rotate cannot inherit this domain's affinity.
+            _clear_registration_domain_hint()
             _hard_recycle_browser(worker_id)
             return {
                 "ok": False,
@@ -1723,6 +1737,9 @@ def register_one(
                 _mark_email_stage_error(email, str(exc)[:120])
             traceback.print_exc()
             _inc("reg_fail")
+            # correlation ③: leaving this account — the hint is process-global, so
+            # clear it here too (mail-loop exit normally already did).
+            _clear_registration_domain_hint()
             try:
                 reg.restart_browser(log_callback=lambda m: log(worker_id, m))
             except Exception:
