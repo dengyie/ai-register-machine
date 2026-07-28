@@ -1235,6 +1235,16 @@ def register_one(
                 except Exception:
                     pass
 
+            def _clear_reg_domain_hint() -> None:
+                # Layer ③: drop the rotator hint so a later rotate for another
+                # account never soft-prefers this account's domain pair.
+                try:
+                    from proxy_rotate import clear_registration_domain
+
+                    clear_registration_domain()
+                except Exception:
+                    pass
+
             def _reset_mail_provider_attempt_state() -> None:
                 # New account (or fresh mail stage): failover index must not leak
                 # from a previous account that already advanced through the pool.
@@ -1305,6 +1315,7 @@ def register_one(
                         _record_correlation_domain(
                             email, "other_fail", cfg=getattr(reg, "config", None)
                         )
+                        _clear_reg_domain_hint()
                         request_fatal_stop(msg)
                         raise FatalRegisterError(msg) from exc
                     if kind == "mail_miss" and mail_try < max_mail_retry:
@@ -1333,6 +1344,7 @@ def register_one(
                             f"! 验证码阶段推进失败(slot 重试, 不换邮箱): {msg}",
                         )
                         _clear_mail_provider_bind()
+                        _clear_reg_domain_hint()
                         raise AccountRetryNeeded(
                             f"progress_fail: {msg}", email=email
                         ) from exc
@@ -1344,6 +1356,7 @@ def register_one(
                         # conservative: do not dock domain (mailbox not burned here).
                         log(worker_id, f"! 浏览器/表单瞬态失败({kind}): {msg}")
                         _clear_mail_provider_bind()
+                        _clear_reg_domain_hint()
                         raise AccountRetryNeeded(
                             f"browser_boot: {msg}", email=email
                         ) from exc
@@ -1356,15 +1369,12 @@ def register_one(
                     traceback.print_exc()
                     _inc("reg_fail")
                     _clear_mail_provider_bind()
+                    _clear_reg_domain_hint()
                     _hard_recycle_browser(worker_id)
                     return {"ok": False, "error": msg, "idx": idx, "kind": kind}
 
             _clear_mail_provider_bind()
-            try:
-                from proxy_rotate import clear_registration_domain
-                clear_registration_domain()
-            except Exception:
-                pass
+            _clear_reg_domain_hint()
             if not mail_ok:
                 return {"ok": False, "error": "mail stage failed", "idx": idx}
 
