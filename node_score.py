@@ -529,3 +529,62 @@ def record_pair(domain: str, node: str, kind: str, *,
         except Exception:
             pass
     return out
+
+
+def domain_weights(domains: list[str], *, cfg: dict | None = None) -> list[float]:
+    """Layer ② weights, same order as *domains*. Uniform when disabled or <=1 domain.
+
+    OFF or a single distinct domain -> ``[1.0]*len(domains)`` so layer ②
+    degrades to equal-weight = ``random.shuffle``. A weight is
+    ``get_domain_score(d) + 1.0`` floored at 0.1; unknown domains score as
+    ``DEFAULT_SCORE`` -> equal weight to a fresh known domain. Never raises.
+    """
+    if not domains:
+        return []
+    if not correlation_enabled(cfg):
+        return [1.0 for _ in domains]
+    uniq = {str(d).strip().lower() for d in domains if str(d).strip()}
+    if len(uniq) <= 1:
+        return [1.0 for _ in domains]
+    out = []
+    for d in domains:
+        s = get_domain_score(str(d).strip().lower(), cfg=cfg)
+        out.append(max(0.1, float(s) + 1.0))
+    return out
+
+
+def preferred_node_for(domain: str, nodes: list[str], now: str,
+                       *, cfg: dict | None = None) -> str | None:
+    """Layer ③ scout: a good, non-cooled pair node != now, or None.
+
+    'good' = pair exists with ``ok >= 1`` and ``score >= DEFAULT_SCORE``.
+    Picks the highest-scoring such node; ties broken by pool order (the
+    first qualifying node encountered at the top score wins). Returns
+    ``None`` when the switch is OFF, *nodes* is empty, no good pair exists,
+    or every candidate is cooled — the caller must then fall back silently
+    to ①②. Never raises.
+    """
+    if not domain or not nodes or not correlation_enabled(cfg):
+        return None
+    domain = str(domain).strip().lower()
+    if not domain:
+        return None
+    best = None
+    best_score = -1
+    for n in nodes:
+        if not n or str(n) == str(now):
+            continue
+        if pair_is_cooled(domain, n, cfg=cfg):
+            continue
+        ent = get_pair(domain, n, cfg=cfg)
+        if not ent:
+            continue
+        try:
+            ok = int(ent.get("ok") or 0)
+            score = int(ent.get("score") or DEFAULT_SCORE)
+        except Exception:
+            continue
+        if ok >= 1 and score >= DEFAULT_SCORE and score > best_score:
+            best = n
+            best_score = score
+    return best

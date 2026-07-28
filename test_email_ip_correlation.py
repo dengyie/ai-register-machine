@@ -1,6 +1,8 @@
 # test_email_ip_correlation.py
 import os
 
+import pytest
+
 import node_score as ns
 
 
@@ -255,3 +257,73 @@ def test_corrupt_pairs_key_degrades_to_empty(tmp_path):
     data = json.loads(p.read_text(encoding="utf-8"))
     assert data["nodes"] == {"x": {"score": 80}}
     assert "a.com|n1" in data["pairs"]
+
+
+def test_domain_weights_disabled_uniform(tmp_path):
+    os.environ["NODE_SCORE_PATH"] = str(tmp_path / "s.json")
+    _seed_domains_store(tmp_path, {"a.com": {"score": 90}, "b.com": {"score": 10}})
+    ns.set_correlation_enabled(False)
+    w = ns.domain_weights(["a.com", "b.com"])
+    assert w == [1.0, 1.0]
+
+
+def test_domain_weights_single_domain_uniform():
+    ns.set_correlation_enabled(True)
+    assert ns.domain_weights(["only.com"]) == [1.0]
+    assert ns.domain_weights([]) == []
+
+
+def test_domain_weights_skews_by_score(tmp_path):
+    _seed_domains_store(tmp_path, {"a.com": {"score": 90, "ok": 1},
+                                    "b.com": {"score": 10, "ok": 0}})
+    os.environ["NODE_SCORE_PATH"] = str(tmp_path / "s.json")
+    ns.set_correlation_enabled(True)
+    w = ns.domain_weights(["a.com", "b.com"])
+    assert w[0] > w[1]
+    assert w[0] == pytest.approx(91.0)
+    assert w[1] == pytest.approx(11.0)
+
+
+def test_domain_weights_unknown_domain_gets_default():
+    ns.set_correlation_enabled(True)
+    w = ns.domain_weights(["never.example", "also.unknown"])
+    assert w[0] == w[1] == pytest.approx(ns.DEFAULT_SCORE + 1.0)
+
+
+def test_preferred_node_returns_none_when_disabled(tmp_path):
+    os.environ["NODE_SCORE_PATH"] = str(tmp_path / "s.json")
+    ns.set_correlation_enabled(False)
+    assert ns.preferred_node_for("a.com", ["n1", "n2"], "n1") is None
+
+
+def test_preferred_node_picks_good_uncooled_not_now(tmp_path):
+    import json
+    _seed_domains_store(tmp_path, {})
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"version": 1, "nodes": {},
+        "pairs": {"a.com|n1": {"score": 80, "ok": 2, "cool_until": 0.0},
+                  "a.com|n2": {"score": 70, "ok": 1, "cool_until": 0.0}}}),
+                 encoding="utf-8")
+    os.environ["NODE_SCORE_PATH"] = str(p)
+    ns.set_correlation_enabled(True)
+    # now=n1 -> must avoid n1, pick n2 (best remaining good node)
+    assert ns.preferred_node_for("a.com", ["n1", "n2", "n3"], "n1") == "n2"
+    # now=n2 -> pick n1 (highest-scoring good node != now)
+    assert ns.preferred_node_for("a.com", ["n1", "n2", "n3"], "n2") == "n1"
+
+
+def test_preferred_node_none_when_all_cooled(tmp_path):
+    import json, time
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"version": 1, "nodes": {},
+        "pairs": {"a.com|n1": {"score": 80, "ok": 2,
+                                "cool_until": time.time() + 600}}}),
+                 encoding="utf-8")
+    os.environ["NODE_SCORE_PATH"] = str(p)
+    ns.set_correlation_enabled(True)
+    assert ns.preferred_node_for("a.com", ["n1", "n2"], "n2") is None
+
+
+def test_preferred_node_none_when_no_pair():
+    ns.set_correlation_enabled(True)
+    assert ns.preferred_node_for("a.com", ["n1", "n2"], "n1") is None
