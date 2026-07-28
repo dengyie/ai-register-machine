@@ -349,3 +349,95 @@ def current_label_from_rotate_result(result: dict | None) -> str:
         if v and str(v).strip() and str(v).strip() not in {"-", "(none)", "off"}:
             return str(v).strip()
     return ""
+
+
+def _kind_effect(kind: str, entry: dict) -> tuple[int, float]:
+    """Pure kind -> (delta, cool_seconds). Does NOT mutate *entry*.
+
+    Same mapping as IP ``record``; extracted so domain/pair recorders stay in
+    sync with IP-side semantics without touching IP ``record`` (intentional
+    duplication — protects the §5.F IP non-regression guard).
+    """
+    kind_l = str(kind or "").strip().lower()
+    if kind_l in {"mint_ok", "mint_success", "product_ok"}:
+        return SUCCESS_MINT, 0.0
+    if kind_l in {"reg_ok", "register_ok", "turnstile_pass"}:
+        return SUCCESS_REG, 0.0
+    if kind_l in {"turnstile", "turnstile_fail", "cf", "token_len_0"}:
+        cool = COOL_TURNSTILE_S
+        if int(entry.get("fail_ts") or 0) + 1 >= 2 and int(entry.get("ok") or 0) == 0:
+            cool = COOL_TURNSTILE_S * 2
+        return -PENALTY_TURNSTILE, cool
+    if kind_l in {"browser_boot", "boot", "connection"}:
+        return -PENALTY_BOOT, COOL_BOOT_S
+    return -PENALTY_OTHER, COOL_OTHER_S
+
+
+def _domain_entry(store: dict, domain: str) -> dict:
+    domains = store.get("domains")
+    if not isinstance(domains, dict):
+        domains = {}
+        store["domains"] = domains
+    ent = domains.get(domain)
+    if not isinstance(ent, dict):
+        ent = {"score": DEFAULT_SCORE, "cool_until": 0.0, "ok": 0,
+               "fail_ts": 0, "fail_boot": 0, "updated": 0.0}
+        domains[domain] = ent
+    for k, d in (("score", DEFAULT_SCORE), ("cool_until", 0.0), ("ok", 0),
+                 ("fail_ts", 0), ("fail_boot", 0), ("updated", 0.0)):
+        ent.setdefault(k, d)
+    return ent
+
+
+def get_domain_score(domain: str, *, cfg: dict | None = None) -> int:
+    if not domain or not correlation_enabled(cfg):
+        return DEFAULT_SCORE
+    try:
+        _, store = _get_store(cfg)
+        domains = store.get("domains")
+        if not isinstance(domains, dict):
+            return DEFAULT_SCORE
+        ent = domains.get(str(domain).strip().lower())
+        if not isinstance(ent, dict):
+            return DEFAULT_SCORE
+        return int(ent.get("score") or DEFAULT_SCORE)
+    except Exception:
+        return DEFAULT_SCORE
+
+
+def record_domain(domain: str, kind: str, *, cfg: dict | None = None,
+                  log: Any = None) -> dict[str, Any]:
+    if not domain or not correlation_enabled(cfg):
+        return {"ok": False, "reason": "disabled"}
+    domain = str(domain).strip().lower()
+    if not domain:
+        return {"ok": False, "reason": "disabled"}
+    kind_l = str(kind or "").strip().lower()
+    path, store = _get_store(cfg)
+    with _lock:
+        ent = _domain_entry(store, domain)
+        now = time.time()
+        delta, cool = _kind_effect(kind_l, ent)
+        if delta > 0:
+            ent["ok"] = int(ent.get("ok") or 0) + 1
+            ent["cool_until"] = 0.0
+        elif kind_l in {"turnstile", "turnstile_fail", "cf", "token_len_0"}:
+            ent["fail_ts"] = int(ent.get("fail_ts") or 0) + 1
+        elif kind_l in {"browser_boot", "boot", "connection"}:
+            ent["fail_boot"] = int(ent.get("fail_boot") or 0) + 1
+        ent["score"] = _clamp(int(ent.get("score") or DEFAULT_SCORE) + delta)
+        if cool > 0:
+            ent["cool_until"] = max(float(ent.get("cool_until") or 0), now + cool)
+        ent["updated"] = now
+        ent["last_kind"] = kind_l
+        _save(path, store)
+        out = {"ok": True, "domain": domain, "kind": kind_l,
+               "score": ent["score"], "cool_until": ent.get("cool_until") or 0,
+               "delta": delta}
+    if log:
+        try:
+            log(f"[domain_score] {domain!r} kind={kind_l} delta={delta} "
+                f"score={out['score']}")
+        except Exception:
+            pass
+    return out
