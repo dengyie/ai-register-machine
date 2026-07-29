@@ -856,6 +856,59 @@ def _ensure_browser(worker_id: int, force_recycle: bool = False):
         reg.start_browser(log_callback=lambda m: log(worker_id, m))
 
 
+def _registration_domain_of(email: str) -> str:
+    """Lowercased email host (or the whole address if no ``@``). Never raises."""
+    try:
+        e = str(email or "").strip()
+        if not e:
+            return ""
+        dom = e.split("@")[-1].strip().lower()
+        return dom or e.lower()
+    except Exception:
+        return ""
+
+
+def _record_correlation_domain(email, kind, *, cfg=None):
+    """Soft: dock the email DOMAIN (not IP) for a pre-code failure. OFF → no-op."""
+    try:
+        import node_score as _ns
+        if not _ns.correlation_enabled(cfg):
+            return {"ok": False, "reason": "disabled"}
+        return _ns.record_domain(_registration_domain_of(email), kind, cfg=cfg)
+    except Exception:
+        return {"ok": False, "reason": "error"}
+
+
+def _clear_registration_domain_hint() -> None:
+    """Layer ③: drop the rotator's in-flight registration-domain hint.
+
+    The hint lives on the process-global rotator, so it must be cleared whenever
+    we leave an account — otherwise a later rotate for a *different* account can
+    soft-prefer this account's pair node. Never raises.
+    """
+    try:
+        from proxy_rotate import clear_registration_domain
+
+        clear_registration_domain()
+    except Exception:
+        pass
+
+
+def _record_correlation_pair(email, node, kind, *, cfg=None):
+    """Soft: record the (domain, node) outcome for layer ③ affinity. OFF → no-op."""
+    try:
+        import node_score as _ns
+        if not _ns.correlation_enabled(cfg):
+            return {"ok": False, "reason": "disabled"}
+        dom = _registration_domain_of(email)
+        nd = str(node or "").strip()
+        if not dom or not nd:
+            return {"ok": False, "reason": "empty"}
+        return _ns.record_pair(dom, nd, kind, cfg=cfg)
+    except Exception:
+        return {"ok": False, "reason": "error"}
+
+
 def classify_email_stage_failure(msg: str) -> str:
     """Classify email/code stage failure for retry policy.
 
@@ -1197,6 +1250,11 @@ def register_one(
                 except Exception:
                     pass
 
+            def _clear_reg_domain_hint() -> None:
+                # Layer ③: drop the rotator hint so a later rotate for another
+                # account never soft-prefers this account's domain pair.
+                _clear_registration_domain_hint()
+
             def _reset_mail_provider_attempt_state() -> None:
                 # New account (or fresh mail stage): failover index must not leak
                 # from a previous account that already advanced through the pool.
@@ -1234,6 +1292,11 @@ def register_one(
                         log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
                     )
                     try:
+                        from proxy_rotate import set_registration_domain
+                        set_registration_domain(email)
+                    except Exception:
+                        pass
+                    try:
                         provider_now = reg.get_email_provider()
                     except Exception:
                         provider_now = "?"
@@ -1250,6 +1313,7 @@ def register_one(
                     break
                 except AccountRetryNeeded:
                     _clear_mail_provider_bind()
+                    _clear_reg_domain_hint()
                     raise
                 except Exception as exc:
                     msg = str(exc)
@@ -1258,12 +1322,21 @@ def register_one(
                         log(worker_id, f"! 致命错误，停止整批（不空转）: {msg}")
                         _inc("reg_fail")
                         _clear_mail_provider_bind()
+                        # correlation ①: pre-code fatal → dock the DOMAIN (not IP)
+                        _record_correlation_domain(
+                            email, "other_fail", cfg=getattr(reg, "config", None)
+                        )
+                        _clear_reg_domain_hint()
                         request_fatal_stop(msg)
                         raise FatalRegisterError(msg) from exc
                     if kind == "mail_miss" and mail_try < max_mail_retry:
                         log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
                         # mail_miss = burn (mailbox didn't deliver); not Turnstile class.
                         _mark_email_stage_error(email, msg)
+                        # correlation ①: pre-code failure → dock the DOMAIN (not IP)
+                        _record_correlation_domain(
+                            email, "mail_miss", cfg=getattr(reg, "config", None)
+                        )
                         _advance_mail_provider_on_miss()
                         # 收码失败通常不是浏览器崩溃；优先软回收避免进程爆炸
                         _soft_recycle_browser(worker_id)
@@ -1275,11 +1348,14 @@ def register_one(
                         # and owns mailbox burn (OTP consumed → burn). Do NOT mark here
                         # (would double-write emails_error with the ARN handler).
                         # Do NOT force_rotate here (would double-rotate with ARN handler).
+                        # correlation ①: ambiguous boundary (code may be filled) —
+                        # conservative: do not dock domain (mailbox not burned here).
                         log(
                             worker_id,
                             f"! 验证码阶段推进失败(slot 重试, 不换邮箱): {msg}",
                         )
                         _clear_mail_provider_bind()
+                        _clear_reg_domain_hint()
                         raise AccountRetryNeeded(
                             f"progress_fail: {msg}", email=email
                         ) from exc
@@ -1287,20 +1363,29 @@ def register_one(
                         # Chromium / chrome-error / dead Clash / transient form mount.
                         # Raise ARN only; outer slot handler owns rotate + hard recycle
                         # and release-without-burn for the mailbox.
+                        # correlation ①: ambiguous boundary (pre-code, transient) —
+                        # conservative: do not dock domain (mailbox not burned here).
                         log(worker_id, f"! 浏览器/表单瞬态失败({kind}): {msg}")
                         _clear_mail_provider_bind()
+                        _clear_reg_domain_hint()
                         raise AccountRetryNeeded(
                             f"browser_boot: {msg}", email=email
                         ) from exc
                     log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
                     _mark_email_stage_error(email, msg)
+                    # correlation ①: pre-code fall-through → dock the DOMAIN (not IP)
+                    _record_correlation_domain(
+                        email, "other_fail", cfg=getattr(reg, "config", None)
+                    )
                     traceback.print_exc()
                     _inc("reg_fail")
                     _clear_mail_provider_bind()
+                    _clear_reg_domain_hint()
                     _hard_recycle_browser(worker_id)
                     return {"ok": False, "error": msg, "idx": idx, "kind": kind}
 
             _clear_mail_provider_bind()
+            _clear_reg_domain_hint()
             if not mail_ok:
                 return {"ok": False, "error": "mail stage failed", "idx": idx}
 
@@ -1462,6 +1547,14 @@ def register_one(
                 )
             except Exception:
                 pass
+            # correlation ①③: record the winning (domain, node) pair + reward domain.
+            _record_correlation_domain(
+                email, "reg_ok", cfg=getattr(reg, "config", None)
+            )
+            _record_correlation_pair(
+                email, current_egress_label() or "", "reg_ok",
+                cfg=getattr(reg, "config", None),
+            )
             password = profile.get("password", "") or ""
             line = format_account_line(email, password, sso)
             with open(accounts_file, "a", encoding="utf-8") as f:
@@ -1626,6 +1719,9 @@ def register_one(
             log(worker_id, f"! slot 重试耗尽 ({max_slot_retry}): {exc}")
             traceback.print_exc()
             _inc("reg_fail")
+            # correlation ③: leaving this account for good — drop the domain hint
+            # so the next account's rotate cannot inherit this domain's affinity.
+            _clear_registration_domain_hint()
             _hard_recycle_browser(worker_id)
             return {
                 "ok": False,
@@ -1641,6 +1737,9 @@ def register_one(
                 _mark_email_stage_error(email, str(exc)[:120])
             traceback.print_exc()
             _inc("reg_fail")
+            # correlation ③: leaving this account — the hint is process-global, so
+            # clear it here too (mail-loop exit normally already did).
+            _clear_registration_domain_hint()
             try:
                 reg.restart_browser(log_callback=lambda m: log(worker_id, m))
             except Exception:
@@ -1756,6 +1855,13 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
                 )
             except Exception:
                 pass
+            # correlation ①③: record the winning (domain, node) pair + reward domain.
+            _record_correlation_domain(
+                email, "mint_ok", cfg=config,
+            )
+            _record_correlation_pair(
+                email, reg_egress, "mint_ok", cfg=config,
+            )
             # Inject counters only when remote inject is part of this run.
             # inject=false (disk-first) must not inflate skip/fail from export payload.
             if inject_on and not result.get("remote_inject_disabled"):
