@@ -259,6 +259,116 @@ def _parse_summary_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _iter_summary_json(text: str) -> list[dict[str, Any]]:
+    """Every SUMMARY_JSON object in `text`, in file order.
+
+    The supervisor log accumulates one SUMMARY_JSON line per finished sub
+    (register_cli copies its summary on exit). Aggregating them gives real
+    batch-level failure stats rather than a single sub snapshot.
+    """
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if "SUMMARY_JSON" not in line:
+            continue
+        s = line.strip()
+        m = _SUMMARY_RE.search(s)
+        blob = None
+        if m:
+            blob = m.group(1)
+        else:
+            idx = s.find("{")
+            if idx >= 0:
+                blob = s[idx:]
+        if not blob:
+            continue
+        try:
+            obj = json.loads(blob)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and obj.get("event") == "register_cli_summary":
+            out.append(obj)
+    return out
+
+
+def _int(v: Any) -> int:
+    try:
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
+def build_batch_failures(sup_text: str, sub_text: str) -> dict[str, Any] | None:
+    """Aggregate per-sub SUMMARY_JSON into batch-level failure stats.
+
+    Returns None when no summaries are present yet (batch just started), so
+    the UI can hide the card instead of showing an all-zero panel.
+    """
+    subs = _iter_summary_json(sup_text)
+    # The live worker's own summary is only in the worker tail until it exits
+    # and the supervisor copies it. Include it so the freshest sub counts too.
+    worker = _iter_summary_json(sub_text)
+    if worker:
+        subs = subs + worker[-1:]
+    if not subs:
+        return None
+
+    agg = {
+        "subs": len(subs),
+        "reg_success": 0,
+        "reg_fail": 0,
+        "mint_fail": 0,
+        "mint_skip": 0,
+        "chat_denied": 0,
+        "chat_fail": 0,
+        "remote_inject_fail": 0,
+        "remote_live_fail": 0,
+        "fatal_subs": 0,
+    }
+    # Failure taxonomy buckets for the breakdown chart.
+    mint_reasons: dict[str, int] = {}
+    fatal_reasons: dict[str, int] = {}
+    for s in subs:
+        agg["reg_success"] += _int(s.get("reg_success"))
+        agg["reg_fail"] += _int(s.get("reg_fail"))
+        agg["mint_fail"] += _int(s.get("mint_fail"))
+        agg["mint_skip"] += _int(s.get("mint_skip"))
+        agg["chat_denied"] += _int(s.get("chat_denied"))
+        agg["chat_fail"] += _int(s.get("chat_fail"))
+        agg["remote_inject_fail"] += _int(s.get("remote_inject_fail"))
+        agg["remote_live_fail"] += _int(s.get("remote_live_fail"))
+        if s.get("fatal"):
+            agg["fatal_subs"] += 1
+            fr = str(s.get("fatal_reason") or "fatal").strip()[:80]
+            if fr:
+                fatal_reasons[fr] = fatal_reasons.get(fr, 0) + 1
+        mr = str(s.get("mint_fail_reason") or "").strip()[:80]
+        if mr and _int(s.get("mint_fail")):
+            mint_reasons[mr] = mint_reasons.get(mr, 0) + _int(s.get("mint_fail"))
+
+    attempts = agg["reg_success"] + agg["reg_fail"]
+    total_fail = (
+        agg["reg_fail"]
+        + agg["mint_fail"]
+        + agg["chat_fail"]
+        + agg["remote_inject_fail"]
+        + agg["remote_live_fail"]
+    )
+    agg["attempts"] = attempts
+    agg["total_fail"] = total_fail
+    agg["fail_rate"] = round(agg["reg_fail"] / attempts, 4) if attempts else 0.0
+
+    # Top-N breakdowns as sorted [label, count] lists for the UI.
+    def _top(d: dict[str, int], n: int = 5) -> list[list[Any]]:
+        return [[k, v] for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:n]]
+
+    agg["mint_fail_reasons"] = _top(mint_reasons)
+    agg["fatal_reasons"] = _top(fatal_reasons)
+    # Per-sub reg_fail series for a trend sparkline.
+    agg["reg_fail_series"] = [_int(s.get("reg_fail")) for s in subs][-30:]
+    agg["reg_success_series"] = [_int(s.get("reg_success")) for s in subs][-30:]
+    return agg
+
+
 def _parse_counters(text: str) -> dict[str, Any]:
     complete = None
     zero = None
@@ -533,6 +643,7 @@ def build_progress(root: Path, *, sup_log: Path | None) -> dict[str, Any]:
         "stuck": stuck,
         "stuck_reason": stuck_reason,
         "summary": summary,
+        "batch_failures": build_batch_failures(sup_text, sub_text),
         "steps": steps,
         "timeline": build_timeline(sup_text, sub_text),
         "supervisor_log": str(sup_log) if sup_log else None,

@@ -76,6 +76,7 @@ def run_status(root: Path) -> dict[str, Any] | None:
         "steps": progress.get("steps") or [],
         "timeline": progress.get("timeline") or [],
         "summary": progress.get("summary"),
+        "batch_failures": progress.get("batch_failures"),
         "sub": progress.get("sub"),
         "chunk": progress.get("chunk"),
         "target": progress.get("target"),

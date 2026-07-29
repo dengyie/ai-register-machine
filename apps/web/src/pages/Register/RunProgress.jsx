@@ -16,6 +16,7 @@ import {
   statusCard,
   recentWrites,
   timeline,
+  failureStats,
 } from "./progressRender.jsx";
 import "../../styles/run-progress.css";
 
@@ -38,6 +39,7 @@ export function RunProgress({ onGotoLogs }) {
   const sc = statusCard(run);
   const writes = recentWrites(run && run.recent_writes);
   const tl = timeline(run && run.timeline);
+  const fstats = failureStats(run);
 
   return (
     <div class="run-progress">
@@ -119,6 +121,8 @@ export function RunProgress({ onGotoLogs }) {
         <pre class="status-body">{sc.body}</pre>
       </div>
 
+      {fstats ? <FailureStats stats={fstats} /> : null}
+
       {writes.length > 0 ? (
         <details
           class="writes-wrap"
@@ -175,4 +179,114 @@ export function RunProgress({ onGotoLogs }) {
 
 function fmtN(v) {
   return v == null || v === "" ? "—" : String(v);
+}
+
+// Batch failure statistics card. Renders only when run.batch_failures has data.
+function FailureStats({ stats }) {
+  const { kpis, breakdown, reasons, series } = stats;
+  return (
+    <div class="failure-stats">
+      <div class="failure-stats-head">
+        <span class="failure-stats-title">批次失败统计</span>
+        <span class="hint">{stats.subs} 个子批聚合</span>
+      </div>
+
+      <div class="failure-kpis">
+        {kpis.map((k, i) => (
+          <div key={i} class={`failure-kpi ${k.cls || ""}`}>
+            <div class="failure-kpi-value">{k.value}</div>
+            <div class="failure-kpi-label">{k.label}</div>
+            {k.hint ? <div class="failure-kpi-hint hint">{k.hint}</div> : null}
+          </div>
+        ))}
+      </div>
+
+      {breakdown.length > 0 ? (
+        <div class="failure-breakdown">
+          <div class="failure-breakdown-bar">
+            {breakdown.map((s, i) => (
+              <div
+                key={i}
+                class={`fseg fseg-${s.cls}`}
+                style={{ width: `${s.pct.toFixed(1)}%` }}
+                title={`${s.label}: ${s.value}`}
+              />
+            ))}
+          </div>
+          <div class="failure-legend">
+            {breakdown.map((s, i) => (
+              <span key={i} class="failure-legend-item">
+                <span class={`fdot fseg-${s.cls}`} />
+                {s.label} <b>{s.value}</b>
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p class="hint failure-empty">本批暂无失败记录 ✓</p>
+      )}
+
+      {series.fail.length > 1 ? (
+        <FailureSparkline fail={series.fail} success={series.success} />
+      ) : null}
+
+      {reasons.map((r, i) => (
+        <div key={i} class="failure-reasons">
+          <div class="failure-reasons-title">{r.title}</div>
+          {r.rows.map((row, j) => (
+            <div key={j} class="failure-reason-row">
+              <span class="failure-reason-label" title={row.label}>
+                {row.label}
+              </span>
+              <span class="failure-reason-count">{row.count}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Compact per-sub reg fail/success trend. Pure SVG, no chart lib.
+function FailureSparkline({ fail, success }) {
+  const n = fail.length;
+  const totals = fail.map((f, i) => f + (success[i] || 0));
+  const max = Math.max(1, ...totals);
+  const W = 100;
+  const H = 28;
+  const bw = W / n;
+  return (
+    <div class="failure-spark">
+      <div class="failure-spark-title hint">每子批 失败/成功 趋势</div>
+      <svg viewBox={`0 0 ${W} ${H}`} class="failure-spark-svg" preserveAspectRatio="none">
+        {fail.map((f, i) => {
+          const ok = success[i] || 0;
+          const total = f + ok;
+          const x = i * bw;
+          const failH = (f / max) * H;
+          const okH = (ok / max) * H;
+          return (
+            <g key={i}>
+              <rect
+                x={x + bw * 0.15}
+                y={H - okH}
+                width={bw * 0.7}
+                height={okH}
+                class="spark-ok"
+              />
+              <rect
+                x={x + bw * 0.15}
+                y={H - okH - failH}
+                width={bw * 0.7}
+                height={failH}
+                class="spark-fail"
+              >
+                <title>{`sub#${i + 1}: fail=${f} ok=${ok}`}</title>
+              </rect>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
 }

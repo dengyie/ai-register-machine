@@ -187,3 +187,190 @@ button.linkish:hover {
 
 /* 窄屏 .kpi-grid 收成两列由 base.css 的 @media (max-width: 900px) 负责
    （同名同值、后加载），这里不再重复。 */
+
+/* ── 批次失败统计卡片 ──────────────────────────────────────────────── */
+.failure-stats {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.failure-stats-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+
+.failure-stats-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.failure-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+
+.failure-kpi {
+  padding: 0.45rem 0.5rem;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  text-align: center;
+}
+
+.failure-kpi-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.failure-kpi-label {
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+}
+
+.failure-kpi-hint {
+  font-size: 0.62rem;
+  margin-top: 0.1rem;
+}
+
+.failure-kpi.warn .failure-kpi-value {
+  color: var(--warn);
+}
+
+.failure-kpi.danger .failure-kpi-value {
+  color: var(--danger);
+}
+
+.failure-kpi.ok .failure-kpi-value {
+  color: var(--ok);
+}
+
+.failure-breakdown {
+  margin-bottom: 0.6rem;
+}
+
+.failure-breakdown-bar {
+  display: flex;
+  width: 100%;
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.fseg {
+  height: 100%;
+}
+
+.fseg-err {
+  background: var(--danger);
+}
+
+.fseg-warn {
+  background: var(--warn);
+}
+
+.fseg-ok {
+  background: var(--ok);
+}
+
+.failure-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.7rem;
+  margin-top: 0.4rem;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.failure-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.failure-legend-item b {
+  color: var(--text);
+}
+
+.fdot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.failure-empty {
+  margin: 0.3rem 0;
+  color: var(--ok);
+}
+
+.failure-spark {
+  margin: 0.5rem 0 0.6rem;
+}
+
+.failure-spark-title {
+  font-size: 0.62rem;
+  margin-bottom: 0.2rem;
+}
+
+.failure-spark-svg {
+  width: 100%;
+  height: 32px;
+  display: block;
+}
+
+.spark-ok {
+  fill: var(--ok);
+  opacity: 0.55;
+}
+
+.spark-fail {
+  fill: var(--danger);
+}
+
+.failure-reasons {
+  margin-top: 0.55rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+
+.failure-reasons-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.failure-reason-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  padding: 0.12rem 0;
+}
+
+.failure-reason-label {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failure-reason-count {
+  color: var(--danger);
+  font-weight: 600;
+  flex: 0 0 auto;
+}

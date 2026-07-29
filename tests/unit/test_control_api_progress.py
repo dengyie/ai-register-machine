@@ -4,7 +4,89 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from apps.control_api.progress import build_progress, detect_phase, _parse_counters
+from apps.control_api.progress import (
+    build_progress,
+    detect_phase,
+    _parse_counters,
+    build_batch_failures,
+)
+
+
+def _summary(**kw) -> str:
+    import json
+
+    obj = {"event": "register_cli_summary"}
+    obj.update(kw)
+    return "SUMMARY_JSON " + json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def test_build_batch_failures_none_when_empty():
+    assert build_batch_failures("", "") is None
+    assert build_batch_failures("[supervisor] boot\nnothing here", "") is None
+
+
+def test_build_batch_failures_aggregates_multiple_subs():
+    sup = "\n".join(
+        [
+            "[supervisor] sub=1 start",
+            _summary(reg_success=3, reg_fail=1, mint_fail=1,
+                     mint_fail_reason="invalid_grant", chat_fail=0),
+            "[supervisor] sub=2 start",
+            _summary(reg_success=2, reg_fail=2, mint_fail=1,
+                     mint_fail_reason="invalid_grant", fatal=True,
+                     fatal_reason="Turnstile 卡住"),
+            "[supervisor] sub=3 start",
+            _summary(reg_success=4, reg_fail=0, remote_live_fail=1),
+        ]
+    )
+    bf = build_batch_failures(sup, "")
+    assert bf is not None
+    assert bf["subs"] == 3
+    assert bf["reg_success"] == 9
+    assert bf["reg_fail"] == 3
+    assert bf["mint_fail"] == 2
+    assert bf["remote_live_fail"] == 1
+    assert bf["fatal_subs"] == 1
+    assert bf["attempts"] == 12  # 9 + 3
+    # total_fail = reg_fail + mint_fail + chat_fail + inject_fail + live_fail
+    assert bf["total_fail"] == 3 + 2 + 0 + 0 + 1
+    assert bf["fail_rate"] == round(3 / 12, 4)
+    # taxonomy breakdowns
+    assert bf["mint_fail_reasons"][0] == ["invalid_grant", 2]
+    assert bf["fatal_reasons"][0] == ["Turnstile 卡住", 1]
+    # trend series
+    assert bf["reg_fail_series"] == [1, 2, 0]
+    assert bf["reg_success_series"] == [3, 2, 4]
+
+
+def test_build_batch_failures_includes_live_worker_summary():
+    sup = _summary(reg_success=2, reg_fail=1)
+    # Worker tail holds the freshest sub whose summary is not yet in supervisor.
+    sub = _summary(reg_success=1, reg_fail=3)
+    bf = build_batch_failures(sup, sub)
+    assert bf["subs"] == 2
+    assert bf["reg_fail"] == 4
+
+
+def test_build_progress_surfaces_batch_failures(tmp_path: Path):
+    sup = tmp_path / "logs" / "run.supervisor.log"
+    sup.parent.mkdir(parents=True, exist_ok=True)
+    sup.write_text(
+        "\n".join(
+            [
+                "[supervisor] sub=1 start",
+                _summary(reg_success=1, reg_fail=2, mint_fail=1,
+                         mint_fail_reason="Access denied"),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    prog = build_progress(tmp_path, sup_log=sup)
+    bf = prog.get("batch_failures")
+    assert bf is not None
+    assert bf["reg_fail"] == 2
+    assert bf["mint_fail_reasons"][0] == ["Access denied", 1]
 
 
 def test_detect_phase_otp_over_older_browser():

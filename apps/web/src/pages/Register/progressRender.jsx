@@ -155,6 +155,90 @@ export function recentWrites(writes) {
   });
 }
 
+// ── Failure stats ─────────────────────────────────────────────────────────────
+// Aggregated batch-level failures from run.batch_failures (control_api parses
+// every per-sub SUMMARY_JSON in the supervisor log). Returns null when there is
+// nothing to show yet so the card can hide entirely.
+// returns { subs, kpis:[{label,value,cls,hint}], breakdown:[{label,value,cls}],
+//           reasons:[{title, rows:[{label,count}]}], series:{fail,success} } | null
+export function failureStats(run) {
+  const bf = run && run.batch_failures;
+  if (!bf || !bf.subs) return null;
+
+  const regFail = Number(bf.reg_fail || 0);
+  const attempts = Number(bf.attempts || 0);
+  const rate = attempts ? (regFail / attempts) * 100 : 0;
+  const rateCls = rate >= 50 ? "danger" : rate >= 20 ? "warn" : rate > 0 ? "" : "ok";
+  const totalFail = Number(bf.total_fail || 0);
+
+  const kpis = [
+    {
+      label: "注册失败率",
+      value: attempts ? `${rate.toFixed(0)}%` : "—",
+      hint: attempts ? `${regFail} / ${attempts} 次尝试` : "无尝试记录",
+      cls: rateCls,
+    },
+    {
+      label: "失败总数",
+      value: String(totalFail),
+      hint: `${bf.subs} 个子批聚合`,
+      cls: totalFail > 0 ? "warn" : "ok",
+    },
+    {
+      label: "fatal 子批",
+      value: String(bf.fatal_subs || 0),
+      hint: bf.fatal_subs ? "见下方致命原因" : "无",
+      cls: bf.fatal_subs > 0 ? "danger" : "ok",
+    },
+  ];
+
+  // Failure-type distribution (stacked/segmented bar).
+  const segRaw = [
+    { label: "注册", value: regFail, cls: "err" },
+    { label: "Mint", value: Number(bf.mint_fail || 0), cls: "warn" },
+    { label: "Chat拒绝", value: Number(bf.chat_denied || 0), cls: "warn" },
+    { label: "Chat失败", value: Number(bf.chat_fail || 0), cls: "err" },
+    { label: "注入", value: Number(bf.remote_inject_fail || 0), cls: "err" },
+    { label: "Live", value: Number(bf.remote_live_fail || 0), cls: "warn" },
+  ];
+  const segTotal = segRaw.reduce((a, s) => a + s.value, 0) || 1;
+  const breakdown = segRaw
+    .filter((s) => s.value > 0)
+    .map((s) => ({
+      label: s.label,
+      value: s.value,
+      pct: (s.value / segTotal) * 100,
+      cls: s.cls,
+    }));
+
+  const reasons = [];
+  const mintReasons = Array.isArray(bf.mint_fail_reasons) ? bf.mint_fail_reasons : [];
+  if (mintReasons.length) {
+    reasons.push({
+      title: "Mint 失败原因",
+      rows: mintReasons.map(([label, count]) => ({ label: String(label), count })),
+    });
+  }
+  const fatalReasons = Array.isArray(bf.fatal_reasons) ? bf.fatal_reasons : [];
+  if (fatalReasons.length) {
+    reasons.push({
+      title: "致命 (fatal) 原因",
+      rows: fatalReasons.map(([label, count]) => ({ label: String(label), count })),
+    });
+  }
+
+  const failSeries = Array.isArray(bf.reg_fail_series) ? bf.reg_fail_series : [];
+  const okSeries = Array.isArray(bf.reg_success_series) ? bf.reg_success_series : [];
+
+  return {
+    subs: bf.subs,
+    kpis,
+    breakdown,
+    reasons,
+    series: { fail: failSeries, success: okSeries },
+  };
+}
+
 // ── Timeline ──────────────────────────────────────────────────────────────────
 // returns [{ src, title, line }] (last ≤6)
 export function timeline(items) {
