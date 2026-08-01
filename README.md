@@ -784,6 +784,16 @@ GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 
 [MIT](LICENSE) © 2026 dengyie
 
+### Outlook registration attribution
+
+The Outlook registration, recovery, and OAuth flow is adapted from
+`daimon3332/OutlookRegister` (daimon3332, MIT License):
+https://github.com/daimon3332/OutlookRegister
+
+This is the grok-register-side attribution. The independent slidex package
+carries its own Hold-solver attribution for the same upstream source so both
+repositories retain a separate MIT mark.
+
 ---
 
 ## 相关
