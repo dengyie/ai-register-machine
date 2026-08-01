@@ -168,3 +168,67 @@ def test_nudge_list_off_round_robins_unchanged(tmp_path, monkeypatch):
     assert rot.list_index == 2
     # and a leaked hint was never consulted (no pair_affinity)
     assert res.get("pick") != "pair_affinity"
+
+
+def test_sweep_stale_mint_holds_reaps_leaked_pin():
+    """A mint hold whose release never decremented (mint killed before finally,
+    or release raised) must not pin the leaf forever. Sweep drops holds older
+    than MINT_HOLD_TTL_SEC; fresh holds survive."""
+    import time as _t
+    rot = proxy_rotate.get_rotator()
+    with rot._lock:
+        rot._mint_holds.clear()
+        rot._mint_hold_since.clear()
+        # leaked: stamped older than TTL
+        rot._mint_holds["dead_node"] = 1
+        rot._mint_hold_since["dead_node"] = _t.monotonic() - proxy_rotate.MINT_HOLD_TTL_SEC - 5
+        # live: just created
+        rot._mint_holds["live_node"] = 2
+        rot._mint_hold_since["live_node"] = _t.monotonic()
+        reaped = rot._sweep_stale_mint_holds_locked()
+    assert reaped == 1
+    holds = rot._active_mint_holds_locked()
+    assert "dead_node" not in holds
+    assert holds["live_node"] == 2
+    # since-timestamp for dead cleared so a re-acquire stamps fresh
+    assert "dead_node" not in rot._mint_hold_since
+
+
+def test_force_advance_leaves_dead_leaf(monkeypatch):
+    """Regression: when pick_next returns the CURRENT node (the sole non-cooled
+    leaf because every other node is cooled), a force_advance rotate used to
+    return single_or_same_node and silently keep the dead leaf — defeating the
+    whole fail-fast zero-gain path. Now force_advance forces the best OTHER
+    node, or signals force_advance_reload_needed when the pool has no other."""
+    rot = proxy_rotate.get_rotator()
+    rot.mode = "clash"
+    rot._started = True
+    rot.clash_setup_done = True
+    rot._mint_holds.clear()
+    rot._mint_hold_since.clear()
+    rot.current_label = "cur"
+    monkeypatch.setattr(proxy_rotate, "clash_list_nodes",
+                        lambda *a, **k: (["cur", "low1", "low2"], "cur", {}))
+    switched = {}
+    def _fake_switch(api, group, node, *, secret="", flush=True):
+        switched["node"] = node
+        return {"ok": True}
+    monkeypatch.setattr(proxy_rotate, "clash_switch_node", _fake_switch)
+    # force pick_next to return the current node (the failing condition)
+    monkeypatch.setattr(ns, "pick_next", lambda nodes, now, **k: "cur")
+    monkeypatch.setattr(ns, "preferred_node_for", lambda *a, **k: "")
+    monkeypatch.setattr(ns, "correlation_enabled", lambda cfg=None: False)
+    monkeypatch.setattr(ns, "scoring_enabled", lambda cfg=None: True)
+    monkeypatch.setattr(ns, "get_score", lambda n, cfg=None: {"low1": 10, "low2": 20}.get(n, 0))
+    res = rot._rotate_clash_locked(force_advance=True, cfg={})
+    assert res["rotated"] is True, res
+    assert res["node"] == "low2", res          # best-scored other
+    assert res.get("pick") == "force_advance_best_other", res
+    assert switched["node"] == "low2"
+
+    # single-node pool → reload signal, not a silent no-op
+    monkeypatch.setattr(proxy_rotate, "clash_list_nodes",
+                        lambda *a, **k: (["cur"], "cur", {}))
+    res2 = rot._rotate_clash_locked(force_advance=True, cfg={})
+    assert res2["rotated"] is False
+    assert res2["reason"] == "force_advance_reload_needed", res2

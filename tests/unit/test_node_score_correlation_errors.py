@@ -78,3 +78,43 @@ def test_record_writes_survive_error_path(tmp_path):
     # _save swallows -> the call returns ok=True despite the failed persist
     assert out["ok"] is True
     assert not (tmp_path / "blocker" / "x.json").exists()
+
+
+def test_concurrent_record_no_score_loss(tmp_path):
+    """Regression: _save used a fixed `scores.json.tmp` name with no lock. Two
+    record() calls on different nodes racing through _save would open the SAME
+    tmp and one would overwrite the other's bytes mid-write — losing a node's
+    score delta. Now _save takes _lock and the tmp name carries pid+tid, so
+    concurrent records each land their own delta."""
+    import threading
+    os.environ["NODE_SCORE_PATH"] = str(tmp_path / "s.json")
+    ns.set_correlation_enabled(True)
+    ns.reset_cache()
+    threads = []
+    errors = []
+
+    def _hit(node):
+        for _ in range(60):
+            try:
+                ns.record_domain(f"{node}.com", "turnstile", cfg={})
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    for i in range(8):
+        threads.append(threading.Thread(target=_hit, args=(f"node{i}",)))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"record raised: {errors[:3]}"
+    store = ns._load(tmp_path / "s.json")
+    # record_domain stores under store["domains"]; all 8 entries present + counted
+    domains = store.get("domains", {})
+    assert set(domains) == {f"node{i}.com" for i in range(8)}, f"missing: {set(domains)}"
+    # each recorded turnstile 60x -> fail_ts counted
+    for d in domains.values():
+        assert int(d.get("fail_ts") or 0) == 60, d
+    # no tmp leftovers from the old fixed-name path
+    leftovers = list(tmp_path.glob("s.json.tmp.*"))
+    assert not leftovers, f"stray tmp: {leftovers}"

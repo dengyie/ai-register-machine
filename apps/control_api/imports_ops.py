@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -12,6 +13,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from apps.control_api.config_io import load_config
+
+
+# Cap on the *uncompressed* bytes an upload zip may emit. save_upload caps the
+# compressed upload at max_upload_bytes, but a zip bomb (quadratic/quine) can
+# explode to many GB from a tiny payload — so the extraction path needs its own
+# ceiling independent of the upload size.
+DEFAULT_MAX_ZIP_EXTRACT_BYTES = 256 * 1024 * 1024
 
 
 def staging_dir(root: Path) -> Path:
@@ -40,6 +48,76 @@ def save_upload(root: Path, filename: str, data: bytes, max_bytes: int) -> Path:
     dest = staging_dir(root) / f"{int(time.time())}_{safe}"
     dest.write_bytes(data)
     return ensure_under(root, dest)
+
+
+def safe_extract_zip(
+    zf: zipfile.ZipFile,
+    dest: Path,
+    *,
+    max_bytes: int = DEFAULT_MAX_ZIP_EXTRACT_BYTES,
+) -> int:
+    """Extract ``zf`` into ``dest`` with three upload-zip defenses:
+
+    1. path traversal — reject absolute / drive-prefixed names and any ".."
+       segment (zip-slip), and re-verify each resolved path stays under dest.
+    2. symlink/hardlink entries — skip. A link inside an uploaded zip can
+       point anywhere on disk; a later import walking the tree would follow it
+       out of the staging dir. Only regular files and dirs are written.
+    3. decompression bomb — cap total uncompressed bytes at ``max_bytes``,
+       counting real bytes read from the stream (not the declared header size,
+       which a crafted archive can underreport).
+
+    Returns the number of entries written (files + dirs). Raises ValueError on
+    the first unsafe entry or overflow.
+    """
+    dest = dest.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    total = 0
+    written = 0
+    for info in zf.infolist():
+        name = info.filename
+        # Zip-slip: absolute, drive-prefixed ("C:\\x"), or parent-escaping.
+        if (
+            name.startswith("/")
+            or name.startswith("\\")
+            or (len(name) > 1 and name[1] == ":")
+            or ".." in Path(name).parts
+        ):
+            raise ValueError(f"unsafe zip entry: {name!r}")
+
+        # Symlink/hardlink: unix mode lives in the high 16 bits of
+        # external_attr. S_IFLNK = 0xA000 — drop, never materialize.
+        mode = (info.external_attr >> 16) & 0xFFFF
+        if (mode & 0xF000) == stat.S_IFLNK:
+            continue
+
+        target = (dest / name).resolve()
+        if target != dest and dest not in target.parents:
+            raise ValueError(f"zip entry escapes dest: {name!r}")
+
+        if info.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            written += 1
+            continue
+
+        # Regular file: stream through ourselves so the cumulative cap counts
+        # REAL decompressed bytes, defeating a header that lies about its size.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(info, "r") as src, open(target, "wb") as out:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise ValueError(
+                        f"zip exceeds max uncompressed bytes ({max_bytes}): {name!r}"
+                    )
+                out.write(chunk)
+        written += 1
+    return written
 
 
 def import_nodes(
@@ -306,11 +384,7 @@ def import_pack(root: Path, zip_path: Path, *, apply: bool = False) -> dict[str,
     extract_to = staging_dir(root) / f"pack_{int(time.time())}"
     extract_to.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zpath, "r") as zf:
-        for info in zf.infolist():
-            name = info.filename
-            if name.startswith("/") or ".." in Path(name).parts:
-                raise ValueError(f"unsafe zip entry: {name}")
-        zf.extractall(extract_to)
+        safe_extract_zip(zf, extract_to)
 
     found = {
         "config": next(extract_to.rglob("config.json"), None),

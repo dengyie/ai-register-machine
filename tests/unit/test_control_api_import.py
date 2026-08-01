@@ -13,6 +13,7 @@ from apps.control_api.imports_ops import (
     import_mail,
     import_nodes,
     import_pack,
+    safe_extract_zip,
     save_upload,
 )
 
@@ -217,3 +218,101 @@ def test_import_pack_plan_and_apply(tmp_path: Path):
     applied = import_pack(tmp_path, z2, apply=True)
     assert (tmp_path / "config.json").is_file()
     assert "config" in applied["applied"]
+
+
+# ── zip extraction hardening (symlink skip + bomb + traversal) ────────────────
+
+
+def _make_symlink_zip(path: Path, linkname: str, target: str) -> None:
+    """Build a zip whose member is a Unix symlink (S_IFLNK in external_attr)."""
+    with zipfile.ZipFile(path, "w") as zf:
+        zi = zipfile.ZipInfo(linkname)
+        # high 16 bits = unix st_mode; 0o120000 = S_IFLNK
+        zi.external_attr = (0o120000 << 16) | 0o777
+        zf.writestr(zi, target)
+
+
+def test_safe_extract_skips_symlink_entry(tmp_path: Path):
+    """A symlink entry in an upload zip must not be materialized at all.
+
+    The link could point anywhere on disk; a later import walking the tree
+    would follow it out of the staging dir. safe_extract_zip drops it.
+    """
+    z = tmp_path / "links.zip"
+    _make_symlink_zip(z, "escape.txt", "/etc/passwd")
+    out = tmp_path / "out"
+    with zipfile.ZipFile(z, "r") as zf:
+        written = safe_extract_zip(zf, out)
+    assert written == 0
+    assert not (out / "escape.txt").exists()
+    assert not list(out.rglob("*")) or all(p.is_dir() for p in out.rglob("*"))
+
+
+def test_safe_extract_rejects_zip_slip(tmp_path: Path):
+    """A ``..`` traversal entry must raise before anything is written."""
+    z = tmp_path / "slip.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("../outside.txt", "pwn")
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="unsafe zip entry"), zipfile.ZipFile(z, "r") as zf:
+        safe_extract_zip(zf, out)
+    # nothing landed outside the dest
+    assert not (tmp_path / "outside.txt").exists()
+
+
+def test_safe_extract_rejects_absolute_entry(tmp_path: Path):
+    z = tmp_path / "abs.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("/abs.txt", "pwn")
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="unsafe zip entry"), zipfile.ZipFile(z, "r") as zf:
+        safe_extract_zip(zf, out)
+
+
+def test_safe_extract_rejects_decompression_bomb(tmp_path: Path):
+    """A stream that exceeds max_bytes (real decompressed bytes) is refused mid-read.
+
+    The cap counts bytes actually read from the stream, so a header that lies
+    about its size cannot slip an oversized payload through.
+    """
+    z = tmp_path / "bomb.zip"
+    big = b"A" * (1024 * 100)  # 100 KiB body
+    with zipfile.ZipFile(z, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("bin", big)
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="max uncompressed bytes"), zipfile.ZipFile(z, "r") as zf:
+        safe_extract_zip(zf, out, max_bytes=4096)
+    # partial file must be gone — we unlink on overflow
+    assert not (out / "bin").exists()
+
+
+def test_safe_extract_normal_archive_unaffected(tmp_path: Path):
+    """A benign zip with nested dirs extracts fully under dest."""
+    z = tmp_path / "ok.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("a/b/c.txt", "hello")
+        zf.writestr("d.txt", "world")
+    out = tmp_path / "out"
+    with zipfile.ZipFile(z, "r") as zf:
+        written = safe_extract_zip(zf, out)
+    # two file entries; intermediate dirs (a/, a/b/) created via mkdir, not counted
+    assert written == 2
+    assert (out / "a" / "b" / "c.txt").read_text() == "hello"
+    assert (out / "d.txt").read_text() == "world"
+
+
+def test_import_pack_skips_symlink_entry(tmp_path: Path):
+    """import_pack routes through safe_extract_zip, so a symlinked member is
+    dropped — no config.json is found and no link is materialized on disk."""
+    staging = tmp_path / "output" / "web_uploads"
+    staging.mkdir(parents=True)
+    z = staging / "pack.zip"
+    _make_symlink_zip(z, "config.json", "/etc/passwd")
+    out = import_pack(tmp_path, z)
+    assert out["ok"] is True
+    # nothing usable in the plan — the symlink was skipped, not followed
+    assert out["plan"]["config"] is None
+    # and no symlink / file named config.json exists in the extraction dir
+    extract_root = Path(out["extract_to"])
+    assert not (extract_root / "config.json").is_symlink()
+    assert not any(p.name == "config.json" for p in extract_root.rglob("*") if p.is_symlink())

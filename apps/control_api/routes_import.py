@@ -13,6 +13,7 @@ from apps.control_api.imports_ops import (
     import_mail,
     import_nodes,
     import_pack,
+    safe_extract_zip,
     save_upload,
     staging_dir,
 )
@@ -66,10 +67,7 @@ async def post_import_auths(
             shutil.rmtree(extract)
         extract.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(path, "r") as zf:
-            for info in zf.infolist():
-                if info.filename.startswith("/") or ".." in Path(info.filename).parts:
-                    raise ValueError(f"unsafe zip entry: {info.filename}")
-            zf.extractall(extract)
+            safe_extract_zip(zf, extract)
         src_dir = extract
     else:
         # single file → put in a dir

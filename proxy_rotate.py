@@ -28,6 +28,7 @@ import os
 import re
 import socket
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,6 +58,12 @@ DEFAULT_GROK_DOMAINS = (
     "grok.x.ai",
     "assets.grok.com",
 )
+
+# A single mint job (browser mint of one account) finishes well under this. Any
+# mint hold older than MINT_HOLD_TTL_SEC is a leaked hold (mint killed before its
+# release ran, e.g. a release that threw) and is reaped on the next acquire/rotate.
+# Conservative so a legitimately slow mint never loses its pin mid-flight.
+MINT_HOLD_TTL_SEC = 60 * 10
 
 # Meta/group names + personal dog VPS (35.212.179.13 / mango9502 AnyTLS+TUIC)
 # and P1024 leaves that hairpin via dialer-proxy through that VPS.
@@ -643,7 +650,13 @@ class ProxyRotator:
         # Refcount of mint jobs that must keep a specific clash leaf (same IP as reg).
         # While any hold is active, rotate will not leave that node so concurrent
         # register fail-fast cannot steal the mixed-port leaf mid-mint.
+        # _mint_holds is in-memory only; a leaked hold (mint job killed without
+        # running its release) pins the leaf until process restart. To survive a
+        # release that threw before decrementing, each hold also records the
+        # wall-clock it was created; acquire/sweep drops any hold older than
+        # MINT_HOLD_TTL_SEC (a real mint job is over long before this).
         self._mint_holds: dict[str, int] = {}
+        self._mint_hold_since: dict[str, float] = {}
         # Layer ③ hint: the email domain of the in-flight registration, so
         # the scored-pick block can soft-prefer a node with a known good pair.
         # Empty when EMAIL_IP_CORRELATION is off or no registration running.
@@ -738,6 +751,7 @@ class ProxyRotator:
             self.clash_setup_done = False
             self._last_error = ""
             self._mint_holds = {}
+            self._mint_hold_since = {}
 
             if mode == "clash" and self.clash_restore_on_exit and not self._atexit_registered:
                 atexit.register(_atexit_restore_clash)
@@ -782,6 +796,25 @@ class ProxyRotator:
     def _active_mint_holds_locked(self) -> dict[str, int]:
         return {k: int(v) for k, v in self._mint_holds.items() if int(v) > 0}
 
+    def _sweep_stale_mint_holds_locked(self, log: LogFn = None) -> int:
+        """Drop mint holds older than MINT_HOLD_TTL_SEC. Caller holds self._lock.
+
+        Reaps a leaked hold whose release never decremented (mint job killed
+        before its finally ran, or release itself raised). Returns count reaped.
+        """
+        now_t = time.monotonic()
+        stale: list[str] = []
+        for node, since in self._mint_hold_since.items():
+            cur = int(self._mint_holds.get(node, 0) or 0)
+            if cur > 0 and (now_t - float(since)) > MINT_HOLD_TTL_SEC:
+                stale.append(node)
+        for node in stale:
+            self._mint_holds.pop(node, None)
+            self._mint_hold_since.pop(node, None)
+        if stale:
+            _log(log, f"[!] mint_hold swept stale (>{MINT_HOLD_TTL_SEC}s): {stale}")
+        return len(stale)
+
     def _primary_mint_hold_locked(self) -> str:
         holds = self._active_mint_holds_locked()
         if not holds:
@@ -793,6 +826,7 @@ class ProxyRotator:
         """Pin clash leaf for a mint job so reg rotate cannot change egress mid-mint."""
         target = str(node or "").strip()
         with self._lock:
+            self._sweep_stale_mint_holds_locked(log=log)
             if self.mode != "clash":
                 # list/off: no shared leaf switch; mint uses its own proxy URL if any
                 return {
@@ -819,6 +853,7 @@ class ProxyRotator:
             if target not in nodes:
                 # Soft: still record hold on label for scoring; cannot pin missing leaf
                 self._mint_holds[target] = int(self._mint_holds.get(target, 0) or 0) + 1
+                self._mint_hold_since.setdefault(target, time.monotonic())
                 self.current_label = now or self.current_label
                 _log(
                     log,
@@ -855,6 +890,7 @@ class ProxyRotator:
                     }
             self.current_label = target
             self._mint_holds[target] = int(self._mint_holds.get(target, 0) or 0) + 1
+            self._mint_hold_since.setdefault(target, time.monotonic())
             holds = self._active_mint_holds_locked()
             _log(
                 log,
@@ -875,11 +911,13 @@ class ProxyRotator:
         """Drop one mint hold; when all holds clear, reg rotate may switch leaf again."""
         target = str(node or "").strip()
         with self._lock:
+            self._sweep_stale_mint_holds_locked(log=log)
             if not target:
                 return {"ok": False, "reason": "empty_node"}
             cur = int(self._mint_holds.get(target, 0) or 0)
             if cur <= 1:
                 self._mint_holds.pop(target, None)
+                self._mint_hold_since.pop(target, None)
             else:
                 self._mint_holds[target] = cur - 1
             holds = self._active_mint_holds_locked()
@@ -1069,6 +1107,7 @@ class ProxyRotator:
 
         # Mint holds freeze the leaf so concurrent reg fail-fast cannot steal
         # the shared mixed-port egress while a mint browser/token-poll runs.
+        self._sweep_stale_mint_holds_locked(log=log)
         hold = self._primary_mint_hold_locked()
         if hold and hold in nodes:
             if hold != now:
@@ -1141,16 +1180,52 @@ class ProxyRotator:
                     nxt = nodes[1]
             pick_reason = "round_robin"
         if nxt == now:
-            self.current_label = now
-            return {
-                "rotated": False,
-                "mode": "clash",
-                "label": now,
-                "node": now,
-                "reason": "single_or_same_node",
-                "group": self.clash_group,
-                "scope": "domain_rules_only",
-            }
+            # force_advance (fail-fast zero-gain path) MUST leave the current
+            # leaf — staying on it defeats the whole point. pick_next returns
+            # `now` only when every other node is cooled and `now` is the sole
+            # active one. In that case force-pick the *least bad* other node
+            # (cooled is better than the same known-dead leaf); if the pool
+            # literally has no other node, signal the caller to reload rather
+            # than silently keep the dead leaf.
+            if force_advance:
+                others = [n for n in nodes if n != now]
+                if not others:
+                    _log(
+                        log,
+                        "[!] force_advance: pool has no node other than "
+                        f"{now!r}; requesting clash reload",
+                    )
+                    self.current_label = now
+                    return {
+                        "rotated": False,
+                        "mode": "clash",
+                        "label": now,
+                        "node": now,
+                        "reason": "force_advance_reload_needed",
+                        "group": self.clash_group,
+                        "pool_size": len(nodes),
+                        "scope": "domain_rules_only",
+                    }
+                try:
+                    import node_score as _ns
+                    nxt = max(
+                        others,
+                        key=lambda n: _ns.get_score(n, cfg=cfg),
+                    )
+                except Exception:
+                    nxt = others[0]
+                pick_reason = "force_advance_best_other"
+            else:
+                self.current_label = now
+                return {
+                    "rotated": False,
+                    "mode": "clash",
+                    "label": now,
+                    "node": now,
+                    "reason": "single_or_same_node",
+                    "group": self.clash_group,
+                    "scope": "domain_rules_only",
+                }
         clash_switch_node(
             self.clash_api,
             self.clash_group,

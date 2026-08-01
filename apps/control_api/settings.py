@@ -13,6 +13,14 @@ import secrets
 SESSION_SECRET_FILENAME = ".control_api_session_secret"
 TOKEN_FILENAME = ".control_api_token"
 
+# Hard ceiling on session cookie / token lifetime, independent of the
+# operator-tunable CONTROL_API_SESSION_TTL. Even if an operator raises the TTL
+# env (it is clamped to [MIN_SESSION_TTL_SECONDS, MAX_SESSION_TTL_SECONDS] in
+# get_settings), a signed token can never outlive this bound: read_session_token
+# re-validates the ttl baked into the payload against this constant.
+MIN_SESSION_TTL_SECONDS = 300
+MAX_SESSION_TTL_SECONDS = 7 * 24 * 3600
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -104,6 +112,13 @@ def get_settings() -> Settings:
         session_secret_source = "missing"
 
     ttl = int(os.environ.get("CONTROL_API_SESSION_TTL", str(12 * 3600)))
+    # Clamp to a safe band: never below the min floor (5 min) and never above the
+    # hard ceiling (7 days). The cookie max_age AND the signed-token ttl both
+    # derive from this, so a runaway TTL env can't mint effectively-immortal
+    # sessions. read_session_token additionally re-validates the ttl in the
+    # payload against MAX_SESSION_TTL_SECONDS, so a token minted before a
+    # re-clamp can't slip a longer-lived ttl through either.
+    ttl = max(MIN_SESSION_TTL_SECONDS, min(MAX_SESSION_TTL_SECONDS, ttl))
     cookie_secure = os.environ.get("CONTROL_API_COOKIE_SECURE", "").strip().lower() in {
         "1",
         "true",
@@ -135,7 +150,7 @@ def get_settings() -> Settings:
         token=token,
         max_upload_bytes=max_upload,
         session_secret=session_secret,
-        session_ttl_seconds=max(300, ttl),
+        session_ttl_seconds=ttl,
         cookie_secure=cookie_secure,
         password_login_enabled=password_login_enabled,
         bootstrap_user=bootstrap_user,

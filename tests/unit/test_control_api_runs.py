@@ -38,6 +38,33 @@ def test_extra_env_allowlist():
     }
 
 
+def test_extra_env_rejects_lf_injection():
+    """A value containing a newline could inject a following line when the env
+    is re-serialized (.env / shell sourcing / log lines). Refuse NUL/CR/LF
+    (and vertical-tab/form-feed/DEL) outright — the actual line terminator
+    family."""
+    with pytest.raises(ValueError, match="control char"):
+        filter_extra_env({"EMAIL_PROVIDER": "cloudflare\nEVIL=1"})
+    with pytest.raises(ValueError, match="control char"):
+        filter_extra_env({"EMAIL_PROVIDER": "a\rb"})
+    with pytest.raises(ValueError, match="control char"):
+        filter_extra_env({"EMAIL_PROVIDER": "a\x00b"})
+    # tab and space are NOT line terminators and must survive (common in values)
+    assert filter_extra_env({"CPA_BATCH_IMPORT_SIZE": "100\t200"})[
+        "CPA_BATCH_IMPORT_SIZE"
+    ] == "100\t200"
+
+
+def test_extra_env_rejects_overlong_value():
+    """Cap value length so a multi-KB value cannot bloat env/logs indefinitely."""
+    from apps.control_api.runs import EXTRA_ENV_VALUE_MAX_LEN
+
+    ok = "x" * EXTRA_ENV_VALUE_MAX_LEN
+    assert filter_extra_env({"CPA_BATCH_IMPORT_SIZE": ok})["CPA_BATCH_IMPORT_SIZE"] == ok
+    with pytest.raises(ValueError, match="too long"):
+        filter_extra_env({"CPA_BATCH_IMPORT_SIZE": "x" * (EXTRA_ENV_VALUE_MAX_LEN + 1)})
+
+
 def test_start_409_when_registry_active(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "scripts").mkdir()

@@ -134,14 +134,22 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def _save(path: Path, data: dict[str, Any]) -> None:
+    # Thread-safe + collision-proof. Callers already hold _lock for the in-mem
+    # mutation, but _save is also called from paths that re-enter; _lock is an
+    # RLock so re-acquisition is safe. A fixed ".tmp" name let two concurrent
+    # record() calls on different nodes open the SAME tmp and overwrite each
+    # other's bytes mid-write, losing one node's score delta — so the tmp name
+    # also carries pid+tid. os.replace is atomic per-file so a stray tmp from a
+    # crashed run can never corrupt the live scores.json.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        with _lock:
+            tmp = path.with_name(path.name + f".tmp.{os.getpid()}.{threading.get_ident()}")
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            tmp.replace(path)
     except Exception:
         # Never break registration on score write failure.
         pass

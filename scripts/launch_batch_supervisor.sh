@@ -40,6 +40,52 @@ if command -v python3 >/dev/null 2>&1; then
 fi
 echo $$ > "${LOCK}.pid"
 
+# ── Process-tree cleanup ────────────────────────────────────────────────
+# A manually/externally launched supervisor is NOT a session leader (pid != pgid),
+# so `kill -- -$$` does not reach the xvfb/Xvfb/python/clash children. SIGTERM from
+# the control plane (or Ctrl-C) used to orphan those children — they kept ports
+# 7897/9090/display bound and poisoned the next sub. Track the active foreground
+# child PID (set by `run_child`) and on TERM/INT kill its whole process group,
+# lenient of ESRCH (modeled on apps/control_api/process_registry._signal_tree).
+ACTIVE_CHILD=""
+kill_child_group() {
+  local pid="$1" sig="${2:-TERM}" pgid
+  [[ -z "$pid" ]] && return 0
+  if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+  if [[ -n "$pgid" && "$pgid" != "$$" ]]; then
+    kill "-$sig" -- -"$pgid" 2>/dev/null && return 0
+  fi
+  # ESRCH/bad pgid fallthrough → single pid
+  kill "-$sig" "$pid" 2>/dev/null || true
+}
+supervisor_cleanup() {
+  if [[ -n "$ACTIVE_CHILD" ]]; then
+    kill_child_group "$ACTIVE_CHILD" TERM
+    local i
+    for ((i = 0; i < 25; i++)); do          # ~5s grace for graceful browser quit
+      kill -0 "$ACTIVE_CHILD" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$ACTIVE_CHILD" 2>/dev/null; then
+      kill_child_group "$ACTIVE_CHILD" KILL
+    fi
+  fi
+  rm -f "${LOCK}.pid" 2>/dev/null || true
+}
+trap 'supervisor_cleanup; trap - EXIT; exit 130' INT
+trap 'supervisor_cleanup; trap - EXIT; exit 143' TERM
+trap 'supervisor_cleanup' EXIT
+# Run a foreground child via xvfb-run / python and remember its pid for cleanup.
+# Caller sets ACTIVE_CHILD="" again after the child has exited on its own.
+run_child() {
+  "$@" &
+  ACTIVE_CHILD=$!
+  wait "$ACTIVE_CHILD"; local rc=$?
+  ACTIVE_CHILD=""
+  return $rc
+}
+
 TS0=$(date +%Y%m%d_%H%M%S)
 RUN_TAG=${TAG_PREFIX}_${MODE}_${TARGET}_${TS0}
 SUP_LOG=logs/${RUN_TAG}.supervisor.log
@@ -163,7 +209,7 @@ run_batch_end_cpa_import() {
   set +e
   # --remote: force live/inventory inject even if production config keeps cpa_remote_inject=false
   # (mint path must stay inject-off; import is the only place that pushes tebi).
-  .venv/bin/python -u "$import_py" \
+  run_child .venv/bin/python -u "$import_py" \
     --src cpa_auths \
     --out-dir cpa_auths \
     --config "$cfg" \
@@ -241,7 +287,7 @@ run_clash_preflight() {
   fi
   echo "[supervisor] preflight-clash-nodes why=$why ..." | tee -a "$SUP_LOG"
   set +e
-  bash "$ROOT/preflight-clash-nodes.sh" >>"$SUP_LOG" 2>&1
+  run_child bash "$ROOT/preflight-clash-nodes.sh" >>"$SUP_LOG" 2>&1
   local pc=$?
   set -e
   if [[ $pc -ne 0 ]]; then
@@ -302,6 +348,26 @@ if not nxt or nxt not in nodes:
     except ValueError:
         nxt = nodes[0]
     pick = "round_robin"
+# force_advanced UPSTREAM helper: keep parity with proxy_rotate._rotate_clash_locked
+# force_advance branch — NEVER stay on the current leaf. pick_next returns `now`
+# only when every other node is cooled and `now` is the sole active one; in that
+# case pick the least-bad other node (cooled still beats the same known-dead
+# leaf). Exit 3 signals the supervisor loop that the pool needs a reload rather
+# than a silent no-op keeping the dead leaf.
+def _force_advance(nodes, now, cfg):
+    try:
+        import node_score as _ns
+        return max([n for n in nodes if n != now], key=lambda n: _ns.get_score(n, cfg=cfg))
+    except Exception:
+        return None
+
+if nxt == now:
+    others = [n for n in nodes if n != now]
+    if not others:
+        print(f"[supervisor] force_clash_next: pool has no node other than {now}; reload_needed", flush=True)
+        raise SystemExit(3)
+    nxt = _force_advance(nodes, now, cfg) or others[0]
+    pick = "force_advance_best_other"
 if nxt == now:
     print(f"[supervisor] force_clash_next: single node {now}")
     raise SystemExit(0)
@@ -434,6 +500,10 @@ while true; do
         run_clash_preflight "ordinary_batch_start"
       else
         force_clash_next_node
+        if (( $? == 3 )); then
+          echo "[supervisor] force_clash_next reload_needed → preflight" | tee -a "$SUP_LOG"
+          run_clash_preflight "force_advance_reload_sub${attempt}"
+        fi
       fi
     fi
     echo "[supervisor] sub=$attempt chunk=$chunk mode=ordinary clash_rotate zero=$consecutive_zero" | tee -a "$SUP_LOG"
@@ -470,7 +540,7 @@ while true; do
   if [[ "$FP_MODE" == "anon" ]]; then
     RECYCLE_MODE=hard
   fi
-  xvfb-run -a -s "-screen 0 1280x900x24 -ac +extension GLX +render -noreset" \
+  run_child xvfb-run -a -s "-screen 0 1280x900x24 -ac +extension GLX +render -noreset" \
     python -u register_cli.py --extra "$chunk" --threads "$THREADS" --no-headless --fast \
       --account-slot-retry "$SLOT_RETRY" \
       --browser-recycle-mode "$RECYCLE_MODE" \
@@ -507,6 +577,10 @@ while true; do
       run_clash_preflight "post_sub_zero${consecutive_zero}"
     else
       force_clash_next_node
+      if (( $? == 3 )); then
+        echo "[supervisor] post_sub_zero${consecutive_zero} force_clash_next reload_needed → preflight" | tee -a "$SUP_LOG"
+        run_clash_preflight "post_sub_zero_reload${consecutive_zero}"
+      fi
     fi
   fi
   if (( consecutive_zero >= 8 )); then

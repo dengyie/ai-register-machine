@@ -24,6 +24,34 @@ from apps.control_api.schemas import StartRunRequest
 # Request extra_env may only set allowlisted operational keys (same set as .env sync).
 EXTRA_ENV_ALLOWLIST = frozenset(ENV_ALLOWLIST)
 
+# Max length and accepted charset for an extra_env VALUE. Values flow into the
+# supervisor subprocess env (and from there can be re-serialized into .env lines
+# or glued into log/config strings), so reject control characters — especially
+# LF/CR, which would let a single value inject or corrupt a following line — and
+# cap total length to bound log/stack growth. Keys are already allowlisted.
+EXTRA_ENV_VALUE_MAX_LEN = 4096
+
+
+def _sanitize_extra_env_value(key: str, value: str) -> str:
+    """Validate a single extra_env value; raise ValueError on anything unsafe.
+
+    Keeps printable ASCII + common printable Unicode (letters/digits/punct and
+    whitespace OTHER than the line terminators NUL/CR/LF). NUL/CR/LF/vtab/FF and
+    the DEL byte are refused outright — these are the characters that break
+    line-oriented .env parsing and shell sourcing, the actual injection vector.
+    """
+    v = str(value)
+    if len(v) > EXTRA_ENV_VALUE_MAX_LEN:
+        raise ValueError(
+            f"extra_env value too long for {key!r} "
+            f"({len(v)} > {EXTRA_ENV_VALUE_MAX_LEN})"
+        )
+    for ch in v:
+        o = ord(ch)
+        if o == 0 or o in (0x0A, 0x0D, 0x0B, 0x0C) or o == 0x7F:
+            raise ValueError(f"extra_env value for {key!r} contains control char")
+    return v
+
 
 def filter_extra_env(extra: dict[str, str] | None) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -31,7 +59,7 @@ def filter_extra_env(extra: dict[str, str] | None) -> dict[str, str]:
         key = str(k)
         if key not in EXTRA_ENV_ALLOWLIST:
             raise ValueError(f"extra_env key not allowed: {key}")
-        out[key] = str(v)
+        out[key] = _sanitize_extra_env_value(key, v)
     return out
 
 
