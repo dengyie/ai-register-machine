@@ -570,7 +570,59 @@ _META_NAME_MARKERS = (
     "reset",
     "website",
     "官网地址",
+    # Airport "error as fake node" banners (良心云 / 常见机场超限文案)
+    "设备数量",
+    "在线设备",
+    "超过套餐",
+    "允许值",
+    "重新导入",
+    "新订阅",
+    "获取新订阅",
+    "复制新订阅",
+    "请更新",
+    "请重新",
+    "套餐不允许",
+    "无可用节点",
+    "节点已用尽",
+    "连接数",
+    "device limit",
+    "too many",
+    "renew",
+    "outdated",
 )
+
+# Dummy endpoints airports inject when the token is invalid / over device quota.
+_PLACEHOLDER_SERVERS = frozenset(
+    {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "0.0.0.0",
+        "10.0.0.0",
+        "10.0.0.1",
+        "192.168.0.1",
+        "example.com",
+        "www.example.com",
+        "invalid",
+        "null",
+        "none",
+    }
+)
+_PLACEHOLDER_PORTS = frozenset({0, 65535})
+
+
+class SubscriptionFilterError(RuntimeError):
+    """Raised when a subscription parses but yields zero importable proxies.
+
+    ``code`` is a stable machine token for the UI; ``message`` is human-readable
+    (Chinese) and is safe to show in the console toast.
+    """
+
+    def __init__(self, code: str, message: str, info: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = (code or "no_importable_proxies").strip() or "no_importable_proxies"
+        self.message = (message or "").strip() or str(self)
+        self.info: dict[str, Any] = dict(info or {})
 
 
 def _clash_dir() -> Path:
@@ -635,6 +687,94 @@ def _is_meta_proxy_name(name: str) -> bool:
     return False
 
 
+def _proxy_port(proxy: dict[str, Any]) -> int | None:
+    raw = proxy.get("port")
+    if raw is None or raw is False:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _is_placeholder_server(server: str) -> bool:
+    s = (server or "").strip().lower().rstrip(".")
+    if not s:
+        return True
+    if s in _PLACEHOLDER_SERVERS:
+        return True
+    # bracketed IPv6 loopback
+    if s in {"[::1]", "[0:0:0:0:0:0:0:1]"}:
+        return True
+    return False
+
+
+def _is_placeholder_proxy(proxy: dict[str, Any]) -> tuple[bool, str]:
+    """Return (is_placeholder, reason).
+
+    Airports (e.g. 良心云) often ship a Clash YAML whose only ``proxies`` are
+    fake SS rows pointing at 127.0.0.1:65535 with names like
+    「在线设备数量超过套餐允许值！」. Those must never enter the register pool.
+    """
+    if not isinstance(proxy, dict):
+        return True, "not_dict"
+    name = str(proxy.get("name") or "").strip()
+    if _is_meta_proxy_name(name):
+        return True, "meta_name"
+    server = str(proxy.get("server") or "").strip()
+    port = _proxy_port(proxy)
+    loopback = _is_placeholder_server(server)
+    if loopback and (port is None or port in _PLACEHOLDER_PORTS or port <= 0):
+        return True, "loopback_dummy"
+    if loopback:
+        # Any loopback server is unusable as an egress leaf for registration.
+        return True, "loopback_server"
+    if port is not None and port in _PLACEHOLDER_PORTS:
+        # 0 / 65535 on a public host is almost always an airport banner node.
+        return True, "dummy_port"
+    # No type / no server already rejected by normalizer; keep reason explicit.
+    ptype = str(proxy.get("type") or "").strip().lower()
+    if not ptype or not server:
+        return True, "missing_type_or_server"
+    return False, ""
+
+
+def _classify_fetch_error(exc: BaseException) -> tuple[str, str]:
+    """Map raw fetch exceptions → (error_code, human message)."""
+    text = str(exc) if exc is not None else ""
+    low = text.lower()
+    raw_body = ""
+    # fetch HTTP 400: b'No nodes were found!'
+    if "no nodes were found" in low:
+        return (
+            "subscription_empty",
+            "订阅源返回空节点（No nodes were found）。常见原因：链接失效、"
+            "在线设备超限、套餐到期，或需要在机场后台生成新订阅链接。",
+        )
+    if "http 403" in low or "http 401" in low:
+        return (
+            "subscription_forbidden",
+            f"订阅源拒绝访问（鉴权失败/被墙）：{text[:180]}",
+        )
+    if "http 404" in low:
+        return (
+            "subscription_not_found",
+            f"订阅链接不存在（HTTP 404）：请核对 URL 是否完整。",
+        )
+    if "http 4" in low or "http 5" in low:
+        # Keep status in message; body snippet often carries the airport reason.
+        m = re.search(r"fetch HTTP (\d+):\s*(.*)$", text)
+        if m:
+            code, body = m.group(1), m.group(2).strip()
+            raw_body = body[:120]
+            return (
+                "subscription_http_error",
+                f"订阅源 HTTP {code}" + (f"：{raw_body}" if raw_body else ""),
+            )
+        return ("fetch_failed", text[:300])
+    return ("fetch_failed", text[:300] or "fetch failed")
+
+
 def _sanitize_proxy_name(name: str, *, prefix: str, used: set[str], idx: int) -> str:
     base = re.sub(r"\s+", " ", (name or "").strip())
     base = base.replace("\n", " ").replace("\r", "")
@@ -671,7 +811,8 @@ def _normalize_imported_proxy(
     server = str(proxy.get("server") or "").strip()
     if not ptype or not server:
         return None
-    if _is_meta_proxy_name(name):
+    is_ph, _reason = _is_placeholder_proxy(proxy)
+    if is_ph:
         return None
     out = dict(proxy)
     out["name"] = _sanitize_proxy_name(name or f"{ptype}-{server}", prefix=prefix, used=used_names, idx=idx)
@@ -834,7 +975,14 @@ def parse_subscription_proxies(
     source: str = "",
     prefix: str = "SUB",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Parse subscription body → clash proxy dicts (meta rows dropped)."""
+    """Parse subscription body → clash proxy dicts (meta/placeholder rows dropped).
+
+    Raises:
+      RuntimeError: underlying format parse failure.
+      SubscriptionFilterError: body parsed but every row was meta/placeholder/bad.
+        ``code`` is ``subscription_placeholder_only`` when at least one row looked
+        like an airport banner node; otherwise ``no_importable_proxies``.
+    """
     from register_core.nodes.convert.parsers import ParseError, decode_subscription_text, parse_text
 
     decoded, was_b64 = decode_subscription_text(body)
@@ -846,17 +994,32 @@ def parse_subscription_proxies(
     used: set[str] = set()
     cleaned: list[dict[str, Any]] = []
     skipped_meta = 0
+    skipped_placeholder = 0
     skipped_bad = 0
+    dropped_names: list[str] = []
+    drop_reasons: dict[str, int] = {}
     for i, p in enumerate(raw_proxies):
         if not isinstance(p, dict):
             skipped_bad += 1
+            drop_reasons["not_dict"] = drop_reasons.get("not_dict", 0) + 1
             continue
-        if _is_meta_proxy_name(str(p.get("name") or "")):
-            skipped_meta += 1
+        raw_name = str(p.get("name") or "").strip() or f"#{i + 1}"
+        is_ph, reason = _is_placeholder_proxy(p)
+        if is_ph:
+            if reason == "meta_name":
+                skipped_meta += 1
+            else:
+                skipped_placeholder += 1
+            drop_reasons[reason or "placeholder"] = drop_reasons.get(reason or "placeholder", 0) + 1
+            if len(dropped_names) < 12:
+                dropped_names.append(raw_name[:64])
             continue
         norm = _normalize_imported_proxy(p, prefix=prefix, used_names=used, idx=i + 1)
         if norm is None:
             skipped_bad += 1
+            drop_reasons["normalize_reject"] = drop_reasons.get("normalize_reject", 0) + 1
+            if len(dropped_names) < 12:
+                dropped_names.append(raw_name[:64])
             continue
         cleaned.append(norm)
     info = {
@@ -865,13 +1028,29 @@ def parse_subscription_proxies(
         "parsed_raw": len(raw_proxies),
         "imported": len(cleaned),
         "skipped_meta": skipped_meta,
+        "skipped_placeholder": skipped_placeholder,
         "skipped_bad": skipped_bad,
+        "drop_reasons": drop_reasons,
+        "dropped_names": dropped_names,
         "sample_names": [p["name"] for p in cleaned[:8]],
     }
     if not cleaned:
-        raise RuntimeError(
-            f"no importable proxies after filter (raw={len(raw_proxies)} "
-            f"meta={skipped_meta} bad={skipped_bad} format={fmt})"
+        names_txt = "、".join(dropped_names[:6]) if dropped_names else "(无名称)"
+        placeholderish = skipped_meta + skipped_placeholder
+        if placeholderish > 0 and placeholderish >= max(1, len(raw_proxies) - skipped_bad):
+            raise SubscriptionFilterError(
+                "subscription_placeholder_only",
+                "订阅无真实节点，全是机场占位/提示节点（常见：在线设备超限、"
+                f"订阅过期、需换新链接）。原始节点：{names_txt}",
+                info,
+            )
+        raise SubscriptionFilterError(
+            "no_importable_proxies",
+            "订阅解析后无可用代理"
+            f"（raw={len(raw_proxies)} meta={skipped_meta} "
+            f"placeholder={skipped_placeholder} bad={skipped_bad} format={fmt}）。"
+            f"原始节点：{names_txt}",
+            info,
         )
     return cleaned, info
 
@@ -1150,6 +1329,22 @@ def import_clash_subscription(
             f"err={type(e).__name__}: {str(e)[:160]}",
             flush=True,
         )
+        # A SubscriptionFilterError carries a stable machine code + a
+        # human-readable Chinese message; surface the code so the UI can branch
+        # its toast (e.g. subscription_placeholder_only → "需换订阅链接")
+        # instead of the generic parse_failed.
+        if isinstance(e, SubscriptionFilterError):
+            return {
+                "ok": False,
+                "stage": "parse",
+                "error": e.code,
+                "detail": e.message,
+                "parse": e.info,
+                "fetch": fetch_meta,
+                "url": (url or "")[:200],
+                "timings": timings,
+                "ms": timings["total_ms"],
+            }
         return {
             "ok": False,
             "stage": "parse",

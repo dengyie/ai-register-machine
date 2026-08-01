@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from apps.control_api import nodes_ops
 
 
@@ -276,6 +278,106 @@ def test_import_clash_subscription_fetch_error(tmp_path: Path, monkeypatch):
     assert out["ok"] is False
     assert out["stage"] == "fetch"
     assert out["error"] == "fetch_failed"
+
+
+def test_parse_subscription_filters_placeholder_banner_nodes():
+    """Airport "device-over-quota" banner nodes must never enter the pool.
+
+    When a token is invalid or the plan is over the device cap, some airports
+    return a Clash YAML whose only ``proxies`` are fake SS rows pointing at
+    127.0.0.1:65535. parse must drop them and raise SubscriptionFilterError
+    with a stable machine code so the UI toast can branch.
+
+    Two flavors are tested together: a banner row whose NAME carries a meta
+    marker (设备数量…, counted as meta), and a plain loopback-dummy row with a
+    clean name (counted as placeholder). Both are dropped; the placeholder one
+    lands in ``skipped_placeholder`` and the union raises the stable code.
+    """
+    import base64
+
+    yaml = nodes_ops._require_yaml()
+    banner_cfg = {
+        "proxies": [
+            # meta-marker banner name — caught by _is_meta_proxy_name
+            {
+                "name": "设备数量超过套餐允许值！",
+                "type": "ss",
+                "server": "127.0.0.1",
+                "port": 65535,
+                "cipher": "aes-256-gcm",
+                "password": "x",
+            },
+            # clean name but loopback+dummy port — caught by loopback_dummy
+            {
+                "name": "node-x",
+                "type": "ss",
+                "server": "127.0.0.1",
+                "port": 65535,
+                "cipher": "aes-256-gcm",
+                "password": "x",
+            },
+        ]
+    }
+    body = base64.b64encode(
+        yaml.dump(banner_cfg, allow_unicode=True).encode("utf-8")
+    ).decode("ascii")
+    with pytest.raises(nodes_ops.SubscriptionFilterError) as ei:
+        nodes_ops.parse_subscription_proxies(body, source="banner", prefix="X")
+    err = ei.value
+    assert err.code == "subscription_placeholder_only"
+    assert err.info["skipped_placeholder"] >= 1   # the loopback dummy
+    assert err.info["skipped_meta"] >= 1          # the meta-marker banner
+    assert err.info["imported"] == 0
+
+
+def test_parse_subscription_mixed_real_and_placeholder_keeps_real():
+    """A loopback placeholder port-65535 row is dropped; a real node survives."""
+    import base64
+
+    yaml = nodes_ops._require_yaml()
+    mixed = {
+        "proxies": [
+            {"name": "real-HK-1", "type": "ss", "server": "1.2.3.4", "port": 8388,
+             "cipher": "aes-256-gcm", "password": "x"},
+            # clean name → placeholder path via loopback_dummy
+            {"name": "ph-1", "type": "ss", "server": "127.0.0.1", "port": 65535,
+             "cipher": "aes-256-gcm", "password": "x"},
+        ]
+    }
+    body = base64.b64encode(yaml.dump(mixed, allow_unicode=True).encode("utf-8")).decode("ascii")
+    proxies, info = nodes_ops.parse_subscription_proxies(body, source="mixed", prefix="MIX")
+    assert info["imported"] == 1
+    assert info["skipped_placeholder"] >= 1
+    assert proxies[0]["server"] == "1.2.3.4"
+
+
+def test_import_clash_subscription_surfaces_subscription_filter_code(tmp_path, monkeypatch):
+    """import_clash_subscription must forward the SubscriptionFilterError code
+    (not collapse it to parse_failed) so the UI can branch on it."""
+    import base64
+
+    yaml = nodes_ops._require_yaml()
+    banner = {
+        "proxies": [
+            {"name": "ph-node", "type": "ss", "server": "127.0.0.1", "port": 65535,
+             "cipher": "aes-256-gcm", "password": "x"},
+        ]
+    }
+    body = base64.b64encode(yaml.dump(banner, allow_unicode=True).encode("utf-8")).decode("ascii")
+    monkeypatch.setattr(
+        nodes_ops,
+        "fetch_subscription_body",
+        lambda url, timeout=25.0: (body, {"http_status": 200, "bytes": len(body)}),
+    )
+    out = nodes_ops.import_clash_subscription(
+        tmp_path,
+        url="https://example.com/sub/over",
+        dry_run=True,
+    )
+    assert out["ok"] is False
+    assert out["stage"] == "parse"
+    assert out["error"] == "subscription_placeholder_only", out
+    assert out["error"] != "parse_failed"
 
 
 def test_remove_proxies_by_prefix_from_config(tmp_path: Path):
