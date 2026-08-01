@@ -267,6 +267,10 @@ def _public_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:
         "proxy_label",
         "mailbox_provider",
         "device_id",
+        "outlook_steps",
+        "outlook_auth_path",
+        "recovery_email",
+        "bound",
     }
     out: dict[str, Any] = {}
     for k, v in artifacts.items():

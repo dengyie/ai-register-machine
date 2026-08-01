@@ -29,6 +29,9 @@ def get_provider(name: str, **kwargs: Any) -> RegisterProvider:
         "openai": "chatgpt",
         "openai-platform": "chatgpt",
         "chatgpt-oauth": "chatgpt",
+        "microsoft": "outlook",
+        "hotmail": "outlook",
+        "msa": "outlook",
     }
     key = aliases.get(key, key)
     if key not in _FACTORY:
@@ -43,11 +46,13 @@ def _ensure_builtins() -> None:
     from register_core.providers.chatgpt_adapter import ChatGPTProvider
     from register_core.providers.grok_adapter import GrokProvider
     from register_core.providers.mimo_adapter import MimoProvider
+    from register_core.providers.outlook_adapter import OutlookProvider
 
     built: dict[str, Callable[..., RegisterProvider]] = {
         "grok": lambda **kw: GrokProvider(**kw),
         "mimo": lambda **kw: MimoProvider(**kw),
         "chatgpt": lambda **kw: ChatGPTProvider(**kw),
+        "outlook": lambda **kw: OutlookProvider(**kw),
     }
     _FACTORY = {**built, **_FACTORY}
     _BUILTINS_READY = True

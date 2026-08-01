@@ -11,6 +11,59 @@ class ProviderSpec:
     name: str
     options: dict[str, Any] = field(default_factory=dict)
 
+    def outlook_options(self) -> dict[str, Any]:
+        if self.name.strip().lower() != "outlook":
+            return {}
+        options = dict(self.options)
+        secret_keys = {
+            "password",
+            "secret",
+            "token",
+            "access_token",
+            "refresh_token",
+            "cookie",
+            "cookies",
+            "jwt",
+            "authorization",
+            "proxy",
+            "proxy_url",
+            "admin_password",
+            "admin_password_value",
+            "client_secret",
+        }
+
+        def find_inline_secrets(value: Any, path: str = "") -> list[str]:
+            found: list[str] = []
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    key_text = str(key)
+                    key_path = f"{path}.{key_text}" if path else key_text
+                    # Environment-variable *names* (e.g. admin_password_env) are
+                    # non-secret config; only exact secret key names are rejected.
+                    if key_text.lower() in secret_keys:
+                        found.append(key_path)
+                    else:
+                        found.extend(find_inline_secrets(nested, key_path))
+            elif isinstance(value, list):
+                for index, nested in enumerate(value):
+                    found.extend(find_inline_secrets(nested, f"{path}[{index}]"))
+            return found
+
+        inline_secrets = sorted(find_inline_secrets(options))
+        if inline_secrets:
+            raise ValueError(
+                "outlook options cannot contain inline secret values: "
+                + ",".join(inline_secrets)
+            )
+        strategy = int(options.get("captcha_strategy", 2))
+        if strategy not in (0, 1, 2):
+            raise ValueError("outlook captcha_strategy must be 0, 1, or 2")
+        options["captcha_strategy"] = strategy
+        options["email_suffix"] = str(options.get("email_suffix", "@outlook.com"))
+        options["bind_recovery_email"] = bool(options.get("bind_recovery_email", True))
+        options["headless"] = bool(options.get("headless", True))
+        return options
+
 
 @dataclass(slots=True)
 class MailboxSpec:
