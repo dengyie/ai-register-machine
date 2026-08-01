@@ -59,8 +59,9 @@ class OutlookProvider:
 
     async def _register_one_async(self, *, email_source, extra):
         # Proxy handoff boundary: only pipeline-injected extra["proxy"], never env discovery.
-        proxy = str(extra.get("proxy") or "")
-        if not proxy:
+        # Non-string / blank / whitespace must fail as proxy before any browser work.
+        raw_proxy = (extra or {}).get("proxy")
+        if not isinstance(raw_proxy, str) or not raw_proxy.strip():
             return RegisterResult(
                 ok=False,
                 provider=self.name,
@@ -68,10 +69,12 @@ class OutlookProvider:
                 error_kind="proxy",
                 secret_kind="none",
             )
+        proxy = raw_proxy.strip()
         # Tasks 6–9 provide the concrete bridge, recovery, OAuth, and sink dependencies.
         # Config normalization is available for later orchestration:
         # OutlookBrowserConfig.from_options(self.config)
         _ = email_source
+        _ = proxy
         return RegisterResult(
             ok=False,
             provider=self.name,

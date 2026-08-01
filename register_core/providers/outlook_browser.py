@@ -74,10 +74,18 @@ class RegistrationPageResult:
 
 
 def _proxy_settings(proxy: str | None) -> dict[str, str] | None:
-    """Build a patchright proxy object. Never log the proxy value."""
-    text = str(proxy or "").strip()
-    if not text:
+    """Build a patchright proxy object. Never log the proxy value.
+
+    None means intentionally no proxy. Blank/whitespace strings and non-strings
+    raise so callers cannot silently drop a required proxy at browser launch.
+    """
+    if proxy is None:
         return None
+    if not isinstance(proxy, str):
+        raise TypeError("proxy must be a string server URL or None")
+    text = proxy.strip()
+    if not text:
+        raise ValueError("proxy must be a non-empty server URL")
     return {"server": text}
 
 
@@ -221,15 +229,18 @@ class OutlookRegistrationFlow:
         await page.locator('[data-testid="primaryButton"]').click()
 
         # Wait for registration completion marker to detach before mailbox/captcha.
+        # Detach is the only positive post-submit signal for form success.
+        form_advanced = False
         try:
             await page.locator(_REGISTRATION_COMPLETION_LINK).wait_for(
                 state="detached", timeout=22000
             )
+            form_advanced = True
         except Exception:
-            # Risk checks below still classify the page; do not invent success.
-            pass
+            form_advanced = False
 
-        # Risk classification BEFORE any captcha action.
+        # Risk classification BEFORE any captcha action. Captcha/risk handoffs
+        # still win even when the completion-link wait timed out.
         if await page.locator("iframe#enforcementFrame").count():
             return RegistrationPageResult(
                 False,
@@ -250,5 +261,12 @@ class OutlookRegistrationFlow:
         if captcha_seen:
             return RegistrationPageResult(
                 False, "captcha", "captcha bridge required", captcha_frame_seen=True
+            )
+        if not form_advanced:
+            # Bounded provider/form-timeout failure for later orchestration.
+            return RegistrationPageResult(
+                False,
+                "provider",
+                "registration form timeout waiting for completion",
             )
         return RegistrationPageResult(True)
