@@ -1,7 +1,7 @@
-"""Outlook RegisterProvider — gated browser-backed foundation (Task 5).
+"""Outlook RegisterProvider — gated browser-backed foundation (Tasks 5–6).
 
 Live browser execution requires GROK_REGISTER_OUTLOOK_LIVE=1.
-Tasks 6–9 wire captcha bridge, recovery, OAuth, and sink orchestration.
+Task 6 stages the captcha bridge seam; Tasks 7–9 wire recovery, OAuth, and sink.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import os
 from typing import Any
 
 from register_core.contracts import RegisterResult
+from register_core.providers.outlook_captcha import OutlookCaptchaBridge
 
 
 class OutlookProvider:
@@ -57,6 +58,13 @@ class OutlookProvider:
             secret_kind="none",
         )
 
+    def _captcha_bridge(self) -> OutlookCaptchaBridge:
+        """Staged Task 6 seam: injectable bridge for later orchestration (Task 9)."""
+        injected = self.config.get("captcha_bridge")
+        if injected is not None:
+            return injected
+        return OutlookCaptchaBridge()
+
     async def _register_one_async(self, *, email_source, extra):
         # Proxy handoff boundary: only pipeline-injected extra["proxy"], never env discovery.
         # Non-string / blank / whitespace must fail as proxy before any browser work.
@@ -70,11 +78,12 @@ class OutlookProvider:
                 secret_kind="none",
             )
         proxy = raw_proxy.strip()
-        # Tasks 6–9 provide the concrete bridge, recovery, OAuth, and sink dependencies.
-        # Config normalization is available for later orchestration:
-        # OutlookBrowserConfig.from_options(self.config)
+        # Task 6: captcha bridge is constructible. Recovery/OAuth/sink remain Tasks 7–9.
+        # Full five-segment orchestration is intentionally deferred (Task 9).
+        captcha_bridge = self._captcha_bridge()
         _ = email_source
         _ = proxy
+        _ = captcha_bridge
         return RegisterResult(
             ok=False,
             provider=self.name,
