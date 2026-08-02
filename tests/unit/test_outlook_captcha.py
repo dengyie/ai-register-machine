@@ -240,20 +240,14 @@ def test_bridge_uses_endpoint_getter_without_exposing_it():
     assert "endpoint" not in str(result.metadata).lower()
 
 
-def test_adapter_stages_captcha_bridge_seam_without_full_orchestration(monkeypatch):
-    """Task 6 adapter seam: bridge is constructible; live path still staged."""
+def test_adapter_captcha_bridge_seam_is_injectable(monkeypatch):
+    """The bridge seam remains constructible/injectable under Task 9 orchestration."""
     from register_core.providers.outlook_adapter import OutlookProvider
 
-    monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
-    provider = OutlookProvider(config={})
-    bridge = provider._captcha_bridge()
-    assert isinstance(bridge, OutlookCaptchaBridge)
-
-    # Full orchestration (browser/recovery/oauth) remains Task 9.
-    result = provider.register_one(
-        email_source=None,
-        extra={"proxy": "http://127.0.0.1:7890"},
+    custom = OutlookCaptchaBridge()
+    provider = OutlookProvider(config={"captcha_bridge": custom})
+    assert provider._captcha_bridge() is custom
+    # Default (no injection) returns a real bridge.
+    assert isinstance(
+        OutlookProvider(config={})._captcha_bridge(), OutlookCaptchaBridge
     )
-    assert result.ok is False
-    assert result.error_kind == "provider"
-    assert result.error == "outlook_components_unavailable"
