@@ -556,6 +556,19 @@ while true; do
     tail -12 "$SUB_LOG" | tee -a "$SUP_LOG"
   fi
 
+  # Outlook artifact accounting (disjoint from the xai-*.json CPA pool).
+  # OutlookProvider writes private 0600 outlook-*.json under outlook_auths/;
+  # the count here is informational only and MUST NOT feed CPA import. The
+  # glob is strictly outlook-*.json over outlook_auths, never xai-*.json
+  # over cpa_auths, so the two products can never share a glob or directory.
+  outlook_auths_dir="${OUTLOOK_AUTHS_DIR:-outlook_auths}"
+  if [ -d "$outlook_auths_dir" ]; then
+    outlook_count=$(find "$outlook_auths_dir" -maxdepth 1 -type f -name 'outlook-*.json' | wc -l | tr -d ' ')
+  else
+    outlook_count=0
+  fi
+  echo "OUTLOOK_AUTH_COUNT=$outlook_count dir=$outlook_auths_dir" | tee -a "$SUP_LOG"
+
   read -r _ AFTER_COMPLETE _ <<<"$(baseline_count)"
   gained=$((AFTER_COMPLETE - before_complete))
   if (( gained <= 0 )); then

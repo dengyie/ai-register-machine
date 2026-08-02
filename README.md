@@ -778,6 +778,37 @@ GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 - 免费 Build 有额度与风控；批量注册 / mint 请控速，合理使用
 - 完整边界见 [DISCLAIMER.md](DISCLAIMER.md)；泄露处理见 [SECURITY.md](SECURITY.md)
 
+### Outlook provider (gated)
+
+`grok-register` integrates Outlook/Hotmail account registration as a fourth
+`RegisterProvider` (`register_core.providers.outlook_adapter.OutlookProvider`),
+reusing the existing `RegisterProvider` contract, `proxy_rotate`,
+`node_score`, pipeline proxy injection, control API, and 0600 sink
+conventions. It is **not** a standalone project or bypass script.
+
+- **Live gate.** Browser orchestration is OFF until
+  `GROK_REGISTER_OUTLOOK_LIVE=1` is set (verified against the test suite —
+  no `GROK_REGISTER_LIVE` flag exists; the Outlook gate is its own env var).
+  Default (`0`/unset) makes `register_one` return `error_kind="provider"`
+  without launching a browser or allocating a Temp Mail mailbox. This is
+  deliberate: unit tests run browser-free.
+- **Proxy.** The attempt proxy arrives via the pipeline's
+  `inject_attempt_proxy` into `extra["proxy"]`; the provider guards that it
+  is a non-empty string before `OutlookBrowser.open()`. Missing/blank →
+  `error_kind="proxy"`, no browser, no mailbox allocation.
+- **CAPTCHA.** Hold/press-and-hold CAPTCHA solving is delegated to the
+  standalone `slidex` package via `slidex.providers` — the Outlook adapter
+  never inlines slider trajectory or hold logic, and the slidex-side
+  Hold-solver carries its own attribution (see the block below).
+- **Artifacts.** Private 0600 `outlook-*.json` files are written under
+  `outlook_auths/` (default; override via `OUTLOOK_AUTHS_DIR`). The control
+  API lists these via a strict `outlook-*.json` glob that never matches the
+  `xai-*.json` CPA import pool — the two products share neither glob nor
+  directory. The supervisor emits `OUTLOOK_AUTH_COUNT=<n>` per sub-batch for
+  informational progress; it never imports Outlook artifacts into CPA.
+- **Secrets.** Password and `refresh_token` never appear in public result
+  views (`RegisterResult.to_public_dict`); only the private sink keeps them.
+
 ---
 
 ## License
