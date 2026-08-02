@@ -42,6 +42,7 @@ def _ensure_builtins() -> None:
     from register_core.email.sources.duckmail import DuckmailSource
     from register_core.email.sources.gmail_imap import GmailImapSource
     from register_core.email.sources.legacy_grok import LegacyGrokEmailSource
+    from register_core.email.sources.temp_mail import TempMailSource
     from register_core.email.sources.tinyhost import TinyhostSource
 
     built: dict[str, Callable[..., EmailSource]] = {
@@ -54,6 +55,10 @@ def _ensure_builtins() -> None:
         "gmail_imap": lambda **kw: GmailImapSource(**kw),
         "legacy_grok": lambda **kw: LegacyGrokEmailSource(**kw),
         "hotmail": lambda **kw: LegacyGrokEmailSource(provider="hotmail", **kw),
+        # Outlook recovery / OAuth proof only — deliberately absent from "auto"
+        # so it never becomes a fallback for the pooled sources above.
+        "temp_mail": lambda **kw: TempMailSource(**kw),
+        "cf_temp": lambda **kw: TempMailSource(**kw),
     }
     # Atomic publish so a mid-import failure does not leave a half registry.
     _FACTORY = {**built, **_FACTORY}
