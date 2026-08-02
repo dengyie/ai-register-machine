@@ -43,7 +43,7 @@ class ConfigPutOut(BaseModel):
 
 class StartRunRequest(BaseModel):
     kind: Literal["grok_supervisor", "register_sh"] = "grok_supervisor"
-    product: Literal["grok", "mimo", "chatgpt"] = "grok"
+    product: Literal["grok", "mimo", "chatgpt", "outlook"] = "grok"
     mode: Literal["ordinary", "residential"] = "ordinary"
     target: int = Field(default=100, ge=1, le=100_000)
     threads: int = Field(default=1, ge=1, le=32)
