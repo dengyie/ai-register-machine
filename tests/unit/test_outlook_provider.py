@@ -255,6 +255,92 @@ def test_success_writes_0600_artifact_and_redacts_public(monkeypatch, tmp_path):
     assert source.released and source.released[0][1] is True
 
 
+def _install_oauth_that_raises(monkeypatch, exc):
+    """OAuth stub whose run() raises — simulating a terminal token rejection
+    (ValueError, e.g. missing_refresh_token after a burnt auth code) or a
+    typed register-core error the pipeline must classify upstream."""
+
+    class _RaisingOAuth:
+        def __init__(self, *, config=None):
+            self.config = config
+
+        async def run(self, page, email, password, *, proxy="", recovery_session=None, timeout_s=20.0):
+            raise exc
+
+    monkeypatch.setattr(adapter_mod, "OAuthStateMachine", _RaisingOAuth)
+
+
+def test_oauth_value_error_is_classified_as_token_not_raised(monkeypatch, tmp_path):
+    """A ValueError from the OAuth state machine (e.g. missing_refresh_token)
+    is a terminal token rejection, NOT a RegisterCoreError. Without the
+    classifier it would escape the pipeline's typed handlers and abort the
+    batch. register_one must convert it to error_kind="token"."""
+    import pytest
+
+    monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
+    _install_fake_browser(monkeypatch, _FakeSession())
+    _install_fake_flow(monkeypatch, RegistrationPageResult(ok=True))
+    source = _FakeSource()
+    _install_fake_recovery(
+        monkeypatch, mailbox_address="recovery@invalid", bound=True, source=source
+    )
+    _install_oauth_that_raises(monkeypatch, ValueError("missing_refresh_token"))
+    _install_fake_temp_source(monkeypatch)
+
+    provider = _orchestration_provider(tmp_path)
+    result = provider.register_one(
+        email_source=None, extra={"proxy": "http://synthetic.invalid"}
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "token"
+    assert "missing_refresh_token" in (result.error or "")
+    # No artifact on the failure path.
+    assert list((tmp_path / "auths").glob("*.json")) == []
+    # Recovery mailbox still released with success=False in the finally.
+    assert source.released and source.released[0][1] is False
+
+
+def test_register_core_error_propagates_for_pipeline_classification(monkeypatch, tmp_path):
+    """MailMissError / FailFastError / ProviderError are RegisterCoreError
+    subclasses the PIPELINE classifies (mail_miss retry, fatal stop, provider
+    terminal). register_one must NOT swallow them — if it returned a plain
+    RegisterResult the pipeline would lose the mail-miss retry classification.
+    They propagate (here via asyncio.run re-raise); the ValueError classifier
+    must not intercept them."""
+    import pytest
+
+    from register_core.errors import MailMissError, ProviderError
+
+    for exc, _label in (
+        (ProviderError("recovery_submit_failed"), "provider"),
+        (MailMissError("mail_miss"), "mail_miss"),
+    ):
+        monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
+        _install_fake_browser(monkeypatch, _FakeSession())
+        _install_fake_flow(monkeypatch, RegistrationPageResult(ok=True))
+        source = _FakeSource()
+        _install_fake_recovery(
+            monkeypatch, mailbox_address="recovery@invalid", bound=True, source=source
+        )
+        # Recovery bind happens before oauth.run; raise from recovery instead
+        # so the typed error originates from the orchestration path.
+
+        async def _raising_bind(page, source_arg, *, timeout_seconds=90):
+            raise exc
+
+        monkeypatch.setattr(adapter_mod, "bind_recovery_email", _raising_bind)
+        _install_fake_temp_source(monkeypatch)
+
+        provider = _orchestration_provider(tmp_path)
+        with pytest.raises(type(exc)):
+            provider.register_one(
+                email_source=None, extra={"proxy": "http://synthetic.invalid"}
+            )
+        # Still no artifact written when it raises.
+        assert list((tmp_path / "auths").glob("*.json")) == []
+
+
 def test_fun_captcha_failure_releases_recovery_never_allocated(monkeypatch, tmp_path):
     """FunCaptcha is detected before recovery binding, so no mailbox to release."""
     monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")

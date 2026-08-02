@@ -67,3 +67,29 @@ def _public_outlook_record(payload: dict[str, Any]) -> dict[str, Any]:
         "has_password": bool(payload.get("password")),
         "has_refresh_token": bool(payload.get("refresh_token")),
     }
+
+
+@router.get("/api/outlook-accounts")
+def api_list_outlook_accounts() -> dict:
+    """List Outlook auth records as a redacted public view.
+
+    Strict ``outlook-*.json`` glob over the ``outlook_auths/`` directory; the
+    xai ``cpa_auths`` pool is never touched. Response records never carry the
+    password or refresh_token value — only ``has_password``/``has_refresh_token``
+    flags. Records that fail the required-fields contract are skipped with a
+    ``skipped`` count rather than 500ing the whole list (an operator can then
+    repair the partial file).
+    """
+    import json
+
+    root = get_settings().project_root
+    auth_dir = root / "outlook_auths"
+    records: list[dict[str, Any]] = []
+    skipped = 0
+    for path in _outlook_auth_files(auth_dir):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            records.append(_public_outlook_record(payload))
+        except (ValueError, OSError, json.JSONDecodeError):
+            skipped += 1
+    return {"accounts": records, "count": len(records), "skipped": skipped}

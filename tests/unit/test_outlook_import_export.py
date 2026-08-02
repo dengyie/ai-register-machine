@@ -114,3 +114,50 @@ def test_public_outlook_record_roundtrips_through_real_sink_layout(tmp_path):
     assert len(paths) == 1
     payload = json.loads(paths[0].read_text(encoding="utf-8"))
     assert _public_outlook_record(payload)["email"] == "sink@outlook.com"
+
+
+def test_api_list_outlook_accounts_redacts_and_skips_malformed(tmp_path, monkeypatch):
+    """GET /api/outlook-accounts returns redacted records over outlook_auths/,
+    never xai, skips malformed/partial files instead of 500ing, and never
+    leaks password/refresh_token."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from apps.control_api import routes_ops
+
+    auths = tmp_path / "outlook_auths"
+    auths.mkdir()
+    # Two good records + one malformed JSON + one partial (missing required).
+    (auths / "outlook-good.json").write_text(
+        _json.dumps(
+            _auth(password="real-pw", refresh_token="real-refresh", bound=True,
+                  recovery_email="r@invalid")
+        ),
+        encoding="utf-8",
+    )
+    (auths / "outlook-second.json").write_text(
+        _json.dumps(_auth(email="b@outlook.com")), encoding="utf-8"
+    )
+    (auths / "outlook-broken.json").write_text("{not json", encoding="utf-8")
+    (auths / "outlook-partial.json").write_text(
+        _json.dumps({"email": "x@outlook.com"}), encoding="utf-8"  # missing 3 fields
+    )
+    # xai must NEVER be picked up here.
+    (auths / "xai-leak.json").write_text(_json.dumps({"email": "x@x.ai"}), encoding="utf-8")
+
+    # Point the route's settings lookup at the tmp root without relying on the
+    # lru-cached get_settings (which reads the real process root).
+    monkeypatch.setattr(
+        routes_ops, "get_settings", lambda: SimpleNamespace(project_root=tmp_path)
+    )
+
+    resp = routes_ops.api_list_outlook_accounts()
+    assert resp["count"] == 2
+    assert resp["skipped"] == 2  # broken json + partial
+    emails = sorted(r["email"] for r in resp["accounts"])
+    assert emails == ["b@outlook.com", "u@outlook.com"]
+    blob = _json.dumps(resp)
+    assert "real-pw" not in blob
+    assert "real-refresh" not in blob
+    # xai accounts are excluded by the strict glob.
+    assert "x@x.ai" not in blob

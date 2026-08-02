@@ -110,6 +110,13 @@ ENV_ALLOWLIST = frozenset(CONFIG_TO_ENV.values()) | frozenset(
         "SKIP_CLASH_PREFLIGHT",
         "NODE_SCORE",
         "SUPERVISOR_CHUNK",
+        # Outlook live gate — the operator-controlled flag that turns on
+        # browser orchestration for the Outlook provider. A *name*, never a
+        # secret value; allowlisting lets the control plane pass it through
+        # start_run extra_env / .env sync so the gate can be turned on
+        # out-of-band without exposing proxy/email/token env vars (those are
+        # never allowlisted).
+        "GROK_REGISTER_OUTLOOK_LIVE",
     }
 )
 

@@ -86,6 +86,22 @@ def test_write_outlook_artifact_atomic_no_temp_left_behind(tmp_path):
     assert leftovers == []
 
 
+def test_write_outlook_artifact_tightens_auths_dir_to_0700(tmp_path):
+    """The auths directory is tightened to 0700 to match the 0600-file secret
+    discipline; a default umask would otherwise leave it world-readable."""
+    provider = _provider(tmp_path)
+    provider._write_outlook_artifact(
+        email="dir@outlook.com", password="p", client_id="c",
+        refresh_token="r", recovery_email="", bound=False,
+        created_at=datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    auths_dir = tmp_path / "auths"
+    assert stat.S_IMODE(os.stat(auths_dir).st_mode) == 0o700
+    # The file itself remains 0600.
+    f = next(auths_dir.glob("outlook-dir-outlook-com-*.json"))
+    assert stat.S_IMODE(os.stat(f).st_mode) == 0o600
+
+
 def test_generate_account_email_is_random_and_suffixed():
     provider = OutlookProvider()
     a = provider._generate_account_email("@outlook.com")

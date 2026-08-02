@@ -31,3 +31,17 @@ def test_start_run_extra_env_carry_names_not_values_required():
     # the type accepts the Outlook live-gate flag name without constraints.
     request = StartRunRequest(product="outlook", extra_env={"GROK_REGISTER_OUTLOOK_LIVE": "1"})
     assert request.extra_env == {"GROK_REGISTER_OUTLOOK_LIVE": "1"}
+
+
+def test_outlook_live_gate_env_name_passes_filter_extra_env():
+    """The live-gate env NAME must survive the control-plane allowlist filter
+    so operators can turn the gate on via start_run extra_env. Only the NAME
+    is exercised — never a secret value (the gate is a '1'/'0' flag)."""
+    from apps.control_api.config_io import ENV_ALLOWLIST
+    from apps.control_api.runs import filter_extra_env
+
+    assert "GROK_REGISTER_OUTLOOK_LIVE" in ENV_ALLOWLIST
+    # The gate flag value is a tiny on/off string; the filter must accept it.
+    assert filter_extra_env({"GROK_REGISTER_OUTLOOK_LIVE": "1"}) == {
+        "GROK_REGISTER_OUTLOOK_LIVE": "1"
+    }

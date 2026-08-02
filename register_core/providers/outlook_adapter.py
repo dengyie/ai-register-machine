@@ -72,6 +72,24 @@ class OutlookProvider:
                     error_kind="provider",
                     secret_kind="none",
                 )
+            except ValueError as exc:
+                # The OAuth state machine raises ValueError for terminal token
+                # rejections (e.g. missing_refresh_token after a burnt code) so
+                # the exchange is NOT retried. ValueError is a BaseException
+                # sibling of RuntimeError, NOT a RegisterCoreError, so it would
+                # otherwise escape the pipeline's typed handlers and abort the
+                # batch. Classify it as "token" (a valid terminal kind) instead
+                # of letting it propagate. RegisterCoreError subclasses
+                # (MailMissError, FailFastError, ProviderError) are intentionally
+                # NOT caught here — the pipeline's typed handlers classify them
+                # (mail_miss retry, fatal stop, provider terminal).
+                return RegisterResult(
+                    ok=False,
+                    provider=self.name,
+                    error=str(exc),
+                    error_kind="token",
+                    secret_kind="none",
+                )
         return RegisterResult(
             ok=False,
             provider=self.name,
@@ -129,6 +147,12 @@ class OutlookProvider:
         """
         directory = Path(self._auths_dir)
         directory.mkdir(parents=True, exist_ok=True)
+        # Tighten the auths dir to 0700 to match the 0600 per-file secret
+        # discipline — default umask leaves new dirs world-readable otherwise.
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
         sanitized = self._FILENAME_SAFE.sub("-", (email or "").lower().strip())
         sanitized = sanitized.strip("-") or "account"
         stamp = created_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
