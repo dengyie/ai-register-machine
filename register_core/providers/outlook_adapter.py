@@ -40,7 +40,15 @@ class OutlookProvider:
 
     def __init__(self, *, config: dict[str, Any] | None = None, **options: Any) -> None:
         self.config = {**(config or {}), **options}
-        self._auths_dir = str(self.config.get("outlook_auths_dir", "outlook_auths"))
+        # The auths directory is taken from explicit config first; otherwise we
+        # honor the same OUTLOOK_AUTHS_DIR env the supervisor count block and the
+        # control-api list route use, so write/count/list stay aligned on one
+        # directory. Defaults to "outlook_auths" across all three surfaces.
+        self._auths_dir = str(
+            self.config.get("outlook_auths_dir")
+            or os.environ.get("OUTLOOK_AUTHS_DIR")
+            or "outlook_auths"
+        )
 
     def register_one(self, *, email_source=None, extra=None) -> RegisterResult:
         if os.environ.get("GROK_REGISTER_OUTLOOK_LIVE") != "1":
@@ -65,29 +73,43 @@ class OutlookProvider:
                     )
                 )
             except RuntimeError as exc:
+                # RuntimeError bubbles from the browser/registry flows as a
+                # terminal provider failure. patchright/Chromium launch
+                # exceptions can embed the configured proxy URL — including
+                # credentials — into the exception text; never surface raw.
                 return RegisterResult(
                     ok=False,
                     provider=self.name,
-                    error=str(exc),
+                    error=self._scrub_proxy_creds(str(exc), extra or {}),
                     error_kind="provider",
                     secret_kind="none",
                 )
             except ValueError as exc:
-                # The OAuth state machine raises ValueError for terminal token
-                # rejections (e.g. missing_refresh_token after a burnt code) so
-                # the exchange is NOT retried. ValueError is a BaseException
-                # sibling of RuntimeError, NOT a RegisterCoreError, so it would
-                # otherwise escape the pipeline's typed handlers and abort the
-                # batch. Classify it as "token" (a valid terminal kind) instead
-                # of letting it propagate. RegisterCoreError subclasses
-                # (MailMissError, FailFastError, ProviderError) are intentionally
-                # NOT caught here — the pipeline's typed handlers classify them
-                # (mail_miss retry, fatal stop, provider terminal).
+                # ValueError surfaces a TERMINAL token rejection only when it
+                # carries the sentinel the OAuth state machine raises for a
+                # burnt/missing refresh token (outlook_oauth.py raises
+                # "missing_refresh_token"). Map exactly that to "token" so the
+                # pipeline does not retry a burnt code and does not abort the
+                # batch. Any other ValueError — e.g. a config-validation failure
+                # raised by schema.outlook_options (bad captcha_strategy,
+                # inline-secret rejection) — is a provider/config problem, not
+                # a token problem; classify it as "provider" so operators see
+                # the real bucket, not a false token terminal.
+                # RegisterCoreError subclasses (MailMissError, FailFastError,
+                # ProviderError) are NOT ValueError and propagate to the
+                # pipeline's typed handlers (mail_miss retry, fatal stop,
+                # provider terminal) — do NOT catch them here.
+                text = str(exc)
+                kind = (
+                    "token"
+                    if "missing_refresh_token" in text
+                    else "provider"
+                )
                 return RegisterResult(
                     ok=False,
                     provider=self.name,
-                    error=str(exc),
-                    error_kind="token",
+                    error=self._scrub_proxy_creds(text, extra or {}),
+                    error_kind=kind,
                     secret_kind="none",
                 )
         return RegisterResult(
@@ -97,6 +119,23 @@ class OutlookProvider:
             error_kind="provider",
             secret_kind="none",
         )
+
+    # Credentials inside a proxy URL must never reach RegisterResult.error,
+    # even if a browser library (patchright/Chromium) embeds the configured
+    # proxy string into an exception message. Strip userinfo before storing;
+    # keep host/port/scheme for operator diagnosis.
+    _CREDS_RE = re.compile(r"://[^@/\s:]+:[^@/\s]+@")
+
+    @staticmethod
+    def _scrub_proxy_creds(text: str, extra: dict[str, Any]) -> str:
+        if not text:
+            return text
+        cleaned = OutlookProvider._CREDS_RE.sub("://<redacted>@", text)
+        # Also redact raw proxy value when it appears verbatim (whole-URL form).
+        raw = extra.get("proxy") if isinstance(extra, dict) else None
+        if isinstance(raw, str) and raw.strip() and raw in text:
+            cleaned = cleaned.replace(raw, "<redacted-proxy>")
+        return cleaned
 
     def _captcha_bridge(self) -> OutlookCaptchaBridge:
         """Injectable bridge seam for orchestration."""

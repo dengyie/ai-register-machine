@@ -301,6 +301,89 @@ def test_oauth_value_error_is_classified_as_token_not_raised(monkeypatch, tmp_pa
     assert source.released and source.released[0][1] is False
 
 
+def test_config_value_error_is_classified_as_provider_not_token(monkeypatch, tmp_path):
+    """A ValueError raised by config validation (e.g. bad captcha_strategy in
+    schema.outlook_options) is a provider/config problem, NOT a terminal token
+    rejection. The outer except ValueError must NOT bucket it as 'token' — ops
+    must see the real provider bucket. Only the missing_refresh_token sentinel
+    is token. (Regression for the prior blanket ValueError->token.)"""
+    monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
+    provider = OutlookProvider(
+        config={
+            "outlook_auths_dir": str(tmp_path / "auths"),
+            "bind_recovery_email": True,
+            "captcha_strategy": 7,  # invalid -> ValueError inside _register_one_async
+        }
+    )
+    result = provider.register_one(
+        email_source=None, extra={"proxy": "http://synthetic.invalid"}
+    )
+    assert result.ok is False
+    assert result.error_kind == "provider"
+    assert "captcha_strategy" in (result.error or "")
+
+
+def test_runtime_error_with_credentialed_proxy_is_scrubbed(monkeypatch, tmp_path):
+    """If a patchright/Chromium launch failure embeds the credentialed proxy URL
+    into the RuntimeError text, RegisterResult.error must NOT carry the proxy
+    username/password. Defense-in-depth for cannot-verify-from-diff finding."""
+    proxy_with_creds = "http://u:sekret@10.0.0.5:7890"
+    leaked_format = "patchright launch failed: server " + proxy_with_creds + " refused"
+
+    class _BoomBrowser:
+        def __init__(self, config):
+            self.config = config
+
+        @asynccontextmanager
+        async def open(self, proxy=None):
+            raise RuntimeError(leaked_format)
+            yield  # noqa: unreachable
+
+    monkeypatch.setattr(adapter_mod, "OutlookBrowser", _BoomBrowser)
+    monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
+    provider = OutlookProvider(
+        config={"outlook_auths_dir": str(tmp_path / "auths")}
+    )
+    result = provider.register_one(
+        email_source=None, extra={"proxy": proxy_with_creds}
+    )
+    assert result.ok is False
+    assert result.error_kind == "provider"
+    err = result.error or ""
+    assert "sekret" not in err, err
+    assert proxy_with_creds not in err, err
+    # Host is still diagnosable; only userinfo was redacted.
+    assert "10.0.0.5:7890" in err, err
+
+
+def test_value_error_with_credentialed_proxy_is_scrubbed(monkeypatch, tmp_path):
+    """Same scrub applies on the ValueError path."""
+    proxy_with_creds = "https://alice:hunter2@gw.example:443"
+
+    class _BoomBrowser:
+        def __init__(self, config):
+            self.config = config
+
+        @asynccontextmanager
+        async def open(self, proxy=None):
+            raise ValueError("bad config near " + proxy_with_creds)
+            yield  # noqa: unreachable
+
+    monkeypatch.setattr(adapter_mod, "OutlookBrowser", _BoomBrowser)
+    monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
+    provider = OutlookProvider(
+        config={"outlook_auths_dir": str(tmp_path / "auths")}
+    )
+    result = provider.register_one(
+        email_source=None, extra={"proxy": proxy_with_creds}
+    )
+    assert result.ok is False
+    assert result.error_kind == "provider"  # not the token sentinel
+    err = result.error or ""
+    assert "hunter2" not in err, err
+    assert proxy_with_creds not in err, err
+
+
 def test_register_core_error_propagates_for_pipeline_classification(monkeypatch, tmp_path):
     """MailMissError / FailFastError / ProviderError are RegisterCoreError
     subclasses the PIPELINE classifies (mail_miss retry, fatal stop, provider
@@ -310,11 +393,12 @@ def test_register_core_error_propagates_for_pipeline_classification(monkeypatch,
     must not intercept them."""
     import pytest
 
-    from register_core.errors import MailMissError, ProviderError
+    from register_core.errors import FailFastError, MailMissError, ProviderError
 
     for exc, _label in (
         (ProviderError("recovery_submit_failed"), "provider"),
         (MailMissError("mail_miss"), "mail_miss"),
+        (FailFastError("captcha_infra_dead"), "fatal"),
     ):
         monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
         _install_fake_browser(monkeypatch, _FakeSession())

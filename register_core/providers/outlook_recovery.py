@@ -89,8 +89,14 @@ async def _poll_code(session: RecoverySession, timeout_seconds: int) -> str:
             used_codes=used,
             sender_hint="account-security-noreply",
         )
-    except MailMissError as exc:
-        raise ProviderError("mail_miss") from exc
+    except MailMissError:
+        # mail_miss is the pipeline's soft-retry signal, NOT a terminal
+        # provider error. The pipeline (register_core/pipeline.py) maps
+        # MailMissError -> error_kind="mail_miss" + continue (retry) and
+        # anything else (including a wrapped ProviderError) -> "provider"
+        # terminal. Wrapping here would silently drop the mail-miss retry
+        # contract. Propagate the typed error so the pipeline keeps soft-retry.
+        raise
     except ProviderError:
         raise
     except Exception as exc:
@@ -132,28 +138,48 @@ async def bind_recovery_email(
     if not await _visible(page, EMAIL_INPUT):
         return None
 
+    mailbox = _allocate(source)
+    session = RecoverySession(mailbox=mailbox, source=source, bound=False)
+    # Own the allocated mailbox across the bind: if fill/submit/poll/enter
+    # raises AFTER allocate, the adapter never receives ``session`` and so its
+    # own finally cannot release it — release here with success=False so the
+    # source still learns the address did not bind (even if the current CF
+    # TempMail release is a no-op, this preserves the release contract for any
+    # future source that tracks quotas / return-to-pool).
     try:
-        mailbox = source.allocate()
+        address = str(getattr(mailbox, "address", "") or "")
+        if not address:
+            raise ProviderError("recovery_allocate_failed")
+        try:
+            await _fill(page, EMAIL_INPUT, address)
+        except Exception as exc:
+            raise ProviderError("recovery_fill_failed") from exc
+        await _submit(page)
+        code = await _poll_code(session, timeout_seconds)
+        await _enter_code(page, code)
+    except BaseException:
+        _release(source, mailbox, success=False)
+        raise
+    session.bound = True
+    return session
+
+
+def _allocate(source: Any):
+    try:
+        return source.allocate()
     except ProviderError:
         raise
     except Exception as exc:
         raise ProviderError("recovery_allocate_failed") from exc
 
-    session = RecoverySession(mailbox=mailbox, source=source, bound=False)
-    address = str(getattr(mailbox, "address", "") or "")
-    if not address:
-        raise ProviderError("recovery_allocate_failed")
 
+def _release(source: Any, mailbox: Any, *, success: bool) -> None:
     try:
-        await _fill(page, EMAIL_INPUT, address)
-    except Exception as exc:
-        raise ProviderError("recovery_fill_failed") from exc
-    await _submit(page)
-
-    code = await _poll_code(session, timeout_seconds)
-    await _enter_code(page, code)
-    session.bound = True
-    return session
+        source.release(mailbox, success=success)
+    except Exception:
+        # A release failure never re-escalates: the bind already did not
+        # complete; we must not mask the original error.
+        pass
 
 
 async def verify_bound_email_on_login(

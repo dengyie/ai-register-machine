@@ -58,6 +58,17 @@ class ProviderSpec:
         strategy = int(options.get("captcha_strategy", 2))
         if strategy not in (0, 1, 2):
             raise ValueError("outlook captcha_strategy must be 0, 1, or 2")
+        if strategy == 1:
+            # Strategy 1 (半自动: pause-for-human via slidex ManualFallbackSession)
+            # is accepted by the spec but NOT yet wired in the outlook branch —
+            # the adapter would otherwise silently degrade to strategy 0's
+            # fully-auto HOLD solve, masking operator intent. Reject loudly so
+            # operators get immediate feedback instead of silent mis-behavior.
+            # 0 = full-auto hold, 2 = manual handoff only (both implemented).
+            raise ValueError(
+                "outlook captcha_strategy=1 (ManualFallback) is not implemented "
+                "yet; use 0 (full-auto hold) or 2 (manual handoff)"
+            )
         options["captcha_strategy"] = strategy
         options["email_suffix"] = str(options.get("email_suffix", "@outlook.com"))
         options["bind_recovery_email"] = bool(options.get("bind_recovery_email", True))

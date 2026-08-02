@@ -23,6 +23,18 @@ def test_outlook_config_rejects_secret_values_before_normalization():
         OutlookBrowserConfig.from_options({"password": "must-not-be-read"})
 
 
+def test_outlook_config_rejects_strategy_1_as_not_implemented():
+    """Strategy 1 (ManualFallback) is spec-accepted but not wired; rejecting
+    it loudly prevents the silent degrade to strategy 0 full-auto HOLD."""
+    with pytest.raises(ValueError, match="not implemented"):
+        OutlookBrowserConfig.from_options({"captcha_strategy": 1})
+
+
+def test_outlook_config_accepts_strategy_0_and_2():
+    assert OutlookBrowserConfig.from_options({"captcha_strategy": 0}).captcha_strategy == 0
+    assert OutlookBrowserConfig.from_options({"captcha_strategy": 2}).captcha_strategy == 2
+
+
 def test_proxy_settings_accepts_valid_server():
     assert _proxy_settings("http://127.0.0.1:7890") == {"server": "http://127.0.0.1:7890"}
     assert _proxy_settings(None) is None

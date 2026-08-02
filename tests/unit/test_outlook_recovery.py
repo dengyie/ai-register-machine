@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-from register_core.contracts import Mailbox, OtpCode
+from register_core.contracts import Mailbox, OtpCode, OtpWaitDiagnostics
 from register_core.errors import MailMissError, ProviderError
 from register_core.providers.outlook_recovery import (
     RecoverySession,
@@ -60,6 +60,7 @@ class _Source:
 
     def __init__(self, code="123456"):
         self.calls: list[str] = []
+        self.released: list[tuple[str, bool]] = []
         self._code = code
 
     def allocate(self):
@@ -72,6 +73,7 @@ class _Source:
 
     def release(self, mailbox, *, success):
         self.calls.append("release")
+        self.released.append((str(getattr(mailbox, "address", "")), bool(success)))
 
 
 def test_bound_session_is_reused_without_allocating_new_address():
@@ -153,12 +155,24 @@ def test_bind_dismisses_passkey_interstitial_first():
     assert page.clicked[0] == "#idBtn_Back"
 
 
-def test_mail_miss_maps_to_provider_error_without_message_text():
+def test_mail_miss_propagates_for_pipeline_retry_classification():
+    """A MailMissError from the email source must propagate as MailMissError,
+    NOT be wrapped as ProviderError. The pipeline maps MailMissError to
+    ``error_kind="mail_miss"`` + soft retry; a wrapped ProviderError would be
+    classified as ``error_kind="provider"`` terminal, silently dropping the
+    retry. (Regression for the prior wrap in _poll_code.)"""
     source = _Source()
 
     def raise_miss(mailbox, **kwargs):
         source.calls.append("poll")
-        raise MailMissError("cf_temp no OTP for throwaway@invalid before deadline")
+        diag = OtpWaitDiagnostics(
+            timeout_s=90.0, provider="cf_temp", sender_hint="account-security-noreply",
+            notes="cf_temp wait_for_code",
+        )
+        raise MailMissError(
+            "cf_temp no OTP for throwaway@invalid before deadline",
+            diagnostics=diag,
+        )
 
     source.poll_otp = raise_miss
     session = RecoverySession(
@@ -168,9 +182,12 @@ def test_mail_miss_maps_to_provider_error_without_message_text():
     )
     page = _FakePage(visible={"#iOttText"})
 
-    with pytest.raises(ProviderError) as excinfo:
+    with pytest.raises(MailMissError) as excinfo:
         asyncio.run(verify_bound_email_on_login(page, session))
-    assert str(excinfo.value) == "mail_miss"
+    assert "throwaway@invalid" in str(excinfo.value)
+    # Diagnostics ride along so the pipeline's otp_wait artifact stays rich.
+    diag = getattr(excinfo.value, "diagnostics", None)
+    assert diag is not None and getattr(diag, "provider", "") == "cf_temp"
 
 
 def test_non_six_digit_code_maps_to_otp_invalid():
@@ -185,3 +202,27 @@ def test_non_six_digit_code_maps_to_otp_invalid():
     with pytest.raises(ProviderError) as excinfo:
         asyncio.run(verify_bound_email_on_login(page, session))
     assert "otp_invalid" in str(excinfo.value)
+
+
+def test_bind_releases_mailbox_when_fill_raises_after_allocate():
+    """Regression: if bind raises AFTER source.allocate() (here fill fails), the
+    mailbox must still be released with success=False. Without the post-allocate
+    ownership guard the adapter never receives the session and the allocated
+    address leaks unreleased."""
+    source = _Source()
+    page = _FakePage(visible={"#EmailAddress", "#iOttText"})
+
+    class _FailingLocator(_FakeLocator):
+        async def fill(self, value):
+            raise RuntimeError("fill exploded")
+
+    def _fill_locator(selector):
+        return _FailingLocator(page, selector)
+
+    page.locator = _fill_locator  # type: ignore[assignment]
+
+    with pytest.raises(ProviderError) as excinfo:
+        asyncio.run(bind_recovery_email(page, source))
+    assert "recovery_fill_failed" in str(excinfo.value)
+    assert source.calls == ["allocate", "release"]
+    assert source.released == [("throwaway@invalid", False)]
