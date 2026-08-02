@@ -81,9 +81,14 @@ def api_list_outlook_accounts() -> dict:
     repair the partial file).
     """
     import json
+    import os
 
     root = get_settings().project_root
-    auth_dir = root / "outlook_auths"
+    # Honor the same OUTLOOK_AUTHS_DIR env the supervisor count block and the
+    # adapter config use, so listing/counting stays aligned with where the
+    # adapter writes artifacts. Defaults to "outlook_auths" everywhere.
+    auth_dir_name = os.environ.get("OUTLOOK_AUTHS_DIR") or "outlook_auths"
+    auth_dir = root / auth_dir_name
     records: list[dict[str, Any]] = []
     skipped = 0
     for path in _outlook_auth_files(auth_dir):
@@ -92,4 +97,9 @@ def api_list_outlook_accounts() -> dict:
             records.append(_public_outlook_record(payload))
         except (ValueError, OSError, json.JSONDecodeError):
             skipped += 1
-    return {"accounts": records, "count": len(records), "skipped": skipped}
+    return {
+        "accounts": records,
+        "count": len(records),
+        "skipped": skipped,
+        "dir": auth_dir_name,
+    }

@@ -18,12 +18,16 @@ dependencies = [
     "itsdangerous>=2.2",
     "patchright>=1.52",
     "slidex>=0.5.0",
+    # Outlook provider HTTP clients — temp_mail (httpx) and outlook_oauth
+    # (requests) hard-import these at module load; declared here (not dev-only)
+    # so a clean prod install can load the email registry without ImportError.
+    "httpx>=0.27",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "httpx>=0.27",
 ]
 
 [project.urls]

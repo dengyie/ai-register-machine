@@ -138,3 +138,23 @@ def test_failure_helper_normalizes_kind_and_carries_no_secret():
     # A transport-shaped alias maps through normalize_error_kind as documented.
     proxied = provider._failure("missing_attempt_proxy", "x")
     assert proxied.error_kind == "proxy"
+
+
+def test_auths_dir_defaults_when_config_and_env_absent(monkeypatch):
+    monkeypatch.delenv("OUTLOOK_AUTHS_DIR", raising=False)
+    provider = OutlookProvider()
+    assert provider._auths_dir == "outlook_auths"
+
+
+def test_auths_dir_honors_env_when_config_absent(monkeypatch, tmp_path):
+    """The adapter honors OUTLOOK_AUTHS_DIR so write/count/list agree on one
+    directory (findings #8 alignment)."""
+    monkeypatch.setenv("OUTLOOK_AUTHS_DIR", str(tmp_path / "env_auths"))
+    provider = OutlookProvider()  # no outlook_auths_dir in config
+    assert provider._auths_dir == str(tmp_path / "env_auths")
+
+
+def test_auths_dir_config_wins_over_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUTLOOK_AUTHS_DIR", str(tmp_path / "env_auths"))
+    provider = OutlookProvider(config={"outlook_auths_dir": "config_wins"})
+    assert provider._auths_dir == "config_wins"

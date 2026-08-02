@@ -154,6 +154,7 @@ def test_api_list_outlook_accounts_redacts_and_skips_malformed(tmp_path, monkeyp
     resp = routes_ops.api_list_outlook_accounts()
     assert resp["count"] == 2
     assert resp["skipped"] == 2  # broken json + partial
+    assert resp["dir"] == "outlook_auths"
     emails = sorted(r["email"] for r in resp["accounts"])
     assert emails == ["b@outlook.com", "u@outlook.com"]
     blob = _json.dumps(resp)
@@ -161,3 +162,34 @@ def test_api_list_outlook_accounts_redacts_and_skips_malformed(tmp_path, monkeyp
     assert "real-refresh" not in blob
     # xai accounts are excluded by the strict glob.
     assert "x@x.ai" not in blob
+
+
+def test_api_list_outlook_accounts_honors_outlook_auths_dir_env(tmp_path, monkeypatch):
+    """Listing must honor OUTLOOK_AUTHS_DIR so count/list/write all agree on the
+    same directory the supervisor and adapter use (findings #8 alignment)."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from apps.control_api import routes_ops
+
+    custom = tmp_path / "custom_outlook_auths"
+    custom.mkdir()
+    (custom / "outlook-env.json").write_text(
+        _json.dumps(_auth(email="env@outlook.com")), encoding="utf-8"
+    )
+    # A sibling default-named dir stays untouched — confirms we read custom only.
+    default = tmp_path / "outlook_auths"
+    default.mkdir()
+    (default / "outlook-default.json").write_text(
+        _json.dumps(_auth(email="default@outlook.com")), encoding="utf-8"
+    )
+
+    monkeypatch.setattr(
+        routes_ops, "get_settings", lambda: SimpleNamespace(project_root=tmp_path)
+    )
+    monkeypatch.setenv("OUTLOOK_AUTHS_DIR", "custom_outlook_auths")
+
+    resp = routes_ops.api_list_outlook_accounts()
+    assert resp["dir"] == "custom_outlook_auths"
+    assert resp["count"] == 1
+    assert resp["accounts"][0]["email"] == "env@outlook.com"

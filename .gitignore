@@ -42,6 +42,9 @@ mail_assets/*
 !mail_assets/README.md
 cpa_auths/*
 !cpa_auths/.gitkeep
+# Outlook private per-account refresh-token artifacts (0600, never commit)
+outlook_auths/*
+!outlook_auths/.gitkeep
 cookies/
 screenshots/
 *.log
