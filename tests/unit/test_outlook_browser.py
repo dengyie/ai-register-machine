@@ -35,6 +35,39 @@ def test_outlook_config_accepts_strategy_0_and_2():
     assert OutlookBrowserConfig.from_options({"captcha_strategy": 2}).captcha_strategy == 2
 
 
+def test_outlook_config_accepts_pipeline_runtime_proxy_not_guarded():
+    """Pipeline injects runtime-operational keys (``proxy``, ``mail_proxy``,
+    ``egress``, ``proxy_list``) into ``job.extra`` and ``get_provider(name,
+    **extra)`` splatters them into the provider's ``self.config`` options dict.
+    Those keys are NOT profile-authored config and must not trip the
+    ``outlook_options()`` inline-secret guard — a real runtime proxy URL is
+    legitimate and is read separately by the adapter from ``extra["proxy"]``.
+    Without this exemption a real live run with ``--proxy`` aborts at the guard
+    with "outlook options cannot contain inline secret values: proxy" before
+    the proxy handoff boundary is even reached (live regression, 2026-08-03)."""
+    for runtime_key in ("proxy", "mail_proxy", "egress", "proxy_list"):
+        config = OutlookBrowserConfig.from_options(
+            {runtime_key: "http://USER:SECRET@example.invalid:7000",
+             "bind_recovery_email": False}
+        )
+        assert config.email_suffix == "@outlook.com"
+        # runtime proxy URL is dropped from the typed config (adapter reads
+        # extra["proxy"] separately); it never leaks into OutlookBrowserConfig:
+        assert not getattr(config, runtime_key, None)
+
+
+def test_outlook_config_still_rejects_authored_proxy_in_options():
+    """A proxy URL injected anywhere the guard still scans (i.e. nested under a
+    profile-authored key like ``temp_mail``) must still be rejected — the
+    runtime exemption above only covers the pipeline-injected top-level keys,
+    not profile-authored secrets."""
+    with pytest.raises(ValueError, match="secret"):
+        OutlookBrowserConfig.from_options(
+            {"proxy": "http://runtime:legit@example.invalid:7000",  # runtime — OK
+             "temp_mail": {"proxy": "http://authored:secret@example.invalid:7000"}}
+        )
+
+
 def test_proxy_settings_accepts_valid_server():
     assert _proxy_settings("http://127.0.0.1:7890") == {"server": "http://127.0.0.1:7890"}
     assert _proxy_settings(None) is None

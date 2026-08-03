@@ -36,8 +36,17 @@ class OutlookBrowserConfig:
 
     @classmethod
     def from_options(cls, options: dict[str, Any]) -> "OutlookBrowserConfig":
+        # Pipeline injects runtime-operational keys into job.extra, which
+        # ``get_provider(name, **extra)`` splatters into the provider's options
+        # dict (``self.config``). Those are NOT profile-authored config and
+        # must never pass the profile secret-guard in ``outlook_options()`` —
+        # a runtime-injected ``proxy``/``mail_proxy`` URL is legitimate and is
+        # read separately by the adapter from ``extra["proxy"]``; if it reached
+        # the guard it would be mis-rejected as a forbidden inline secret.
+        runtime_keys = ("proxy", "proxy_list", "mail_proxy", "egress")
+        guarded = {k: v for k, v in options.items() if k not in runtime_keys}
         normalized = ProviderSpec(
-            name="outlook", options=dict(options)
+            name="outlook", options=guarded
         ).outlook_options()
         strategy = normalized["captcha_strategy"]
         return cls(
