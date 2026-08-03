@@ -23,7 +23,7 @@ grok 现有 Turnstile 逻辑**本次不动**(slidex 本轮只加按压,不强行
 ```
 email----password----client_id----refresh_token
 ```
-落盘到 `cpa_auths/`(扩展现有 xai-*.json 模型或新建 `outlook-*.json`,见 §9)。
+落盘到独立的 `outlook_auths_dir`(默认 `outlook_auths/`)，文件使用 `outlook-*.json` 命名；不进入现有 `xai-*.json` CPA auth glob，详见 §9。
 
 ## 2. 三方来源与复用边界
 
@@ -164,11 +164,11 @@ S1/S2 先行(slidex 出按压能力),S3-S8 在 grok-register。S5 依赖 S1。
 
 ## 9. 账号产物
 
-扩 `cpa_auths` 或新建 `outlook-*.json`,字段:
+使用独立的 `outlook_auths_dir`(默认 `outlook_auths/`)和 `outlook-<safe-email>-<UTC timestamp>.json` 文件名，字段:
 ```json
 {"email","password","client_id","refresh_token","recovery_email","bound":bool,"created_at"}
 ```
-writing-plans 阶段定结构,需兼容 account_backup / sink。
+private 文件使用 `0600`、同目录临时文件原子替换；兼容 account_backup / sink，但不加入既有 `xai-*.json` CPA glob。public output 只返回 email、bound、artifact path、步骤和存在性信息，不返回 password、refresh_token、cookie 或 proxy URL。
 
 ## 10. 关键风险
 
@@ -182,9 +182,9 @@ writing-plans 阶段定结构,需兼容 account_backup / sink。
 8. **OAuth SSO cookie 连续性**依赖同 context(adapter 主进程跑),CDP attach 不破坏 context——这是 §3.1 架构成立的前提。
 9. 移植 OutlookRegister 代码须保留其 MIT 署名(进 slidex 与进 grok-register 两处分别标注来源)。
 
-## 11. 待确认问题(进入 writing-plans 前需定)
+## 11. 已确认决策(写入 implementation plan)
 
-- [ ] §10.2:CDP attach 模式下 slidex 能否定位主进程嵌套 iframe 并注入鼠标坐标?需 S2 技术验证再定 S5 实现细节。若不行,fallback 是 adapter 起第二个 context 专给 slidex(CDP standalone),cookie 通过 storage_state 传递。
-- [ ] §5:CF Temp Mail 自部署 vs 对接本仓库 mail_assets?
-- [ ] §9:扩 cpa_auths 还是新建 outlook auths 目录?
-- [ ] §8:Outlook 复用 supervisor 进度格式还是旁路?
+- [x] §10.2:优先验证 slidex `connect_over_cdp` 是否能定位主进程嵌套 iframe 并保持坐标一致；若验证失败，adapter 导出主 context 的 `storage_state`，创建仅用于验证码的临时 context，完成后关闭临时 context，主注册 context 不重启且继续负责邮箱/OAuth。
+- [x] §5:CF Temp Mail 作为新增 `temp_mail`/`cf_temp` EmailSource，服务恢复邮箱绑定和 OAuth proof verify；既有 `mail_assets`/Hotmail Graph REST 继续服务已有邮箱读取，两者不互换。
+- [x] §9:使用独立 `outlook_auths_dir`(默认 `outlook_auths/`)和 `outlook-*.json`，不加入现有 `xai-*.json` CPA glob。
+- [x] §8:Outlook 复用现有 `SUMMARY_JSON`、`注册成功`、`Fatal`、`FAIL-FAST` 等 supervisor 进度协议，同时使用独立 Outlook artifact glob 和计数分支。

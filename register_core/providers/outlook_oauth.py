@@ -317,24 +317,3 @@ class OAuthStateMachine:
             state="refresh_token",
             metadata={"scope_requested": self.config.scope},
         )
-
-
-async def get_refresh_token(
-    page: Any,
-    full_email: str,
-    password: str,
-    *,
-    proxy: str = "",
-    recovery_session: Any = None,
-    config: OutlookOAuthConfig | None = None,
-    proxy_getter: Callable[[], str] | None = None,
-) -> OAuthTokenResult:
-    """Public entry point; the refresh token stays in memory for the caller."""
-    machine = OAuthStateMachine(config=config, proxy_getter=proxy_getter)
-    return await machine.run(
-        page,
-        full_email,
-        password,
-        proxy=proxy,
-        recovery_session=recovery_session,
-    )
