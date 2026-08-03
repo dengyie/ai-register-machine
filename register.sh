@@ -27,6 +27,7 @@ register.sh — multi-provider hub (ai-register-machine)
   ./register.sh grok [count] [threads]   Register xAI/Grok (Python production path)
   ./register.sh mimo [count]             Register Xiaomi MiMo API key (Node)
   ./register.sh chatgpt [count]          Register OpenAI platform account (protocol)
+  ./register.sh outlook [count] [threads] Register Microsoft Outlook account (register_core Pipeline; gated)
   ./register.sh core list                Layered framework: list providers/email
   ./register.sh core run -p mimo -n 1    Layered framework: pipeline run
   ./register.sh core run -p chatgpt -n 1 --email-source tinyhost
@@ -207,6 +208,32 @@ case "$cmd" in
       exec "$_PY" "${_ARGS[@]}"
     fi
     exec bash "$ROOT/providers/chatgpt/run-register.sh" "$COUNT"
+    ;;
+  outlook|microsoft|hotmail|msa)
+    COUNT="${1:-1}"
+    export COUNT
+    THREADS="${2:-${OUTLOOK_THREADS:-1}}"
+    # register_core Pipeline entrypoint → OutlookProvider.register_one. The
+    # provider's own GROK_REGISTER_OUTLOOK_LIVE=1 gate stays an operator env
+    # (never set here) so live runs are explicit; default-off short-circuits
+    # to error_kind="provider" before any browser/mailbox, which is the safe
+    # control-flow reachability contract for non-live harness tests.
+    if [[ -d "$ROOT/.venv" && -x "$ROOT/.venv/bin/python" ]]; then
+      _PY="$ROOT/.venv/bin/python"
+    else
+      _PY="${PYTHON:-python3}"
+    fi
+    _ARGS=(
+      -m register_core run
+      --provider outlook
+      -n "$COUNT"
+      --threads "$THREADS"
+    )
+    [[ -n "${REGISTER_EGRESS:-}" ]] && _ARGS+=(--egress "$REGISTER_EGRESS")
+    [[ -n "${OUTLOOK_PROXY:-}" ]] && _ARGS+=(--proxy "$OUTLOOK_PROXY")
+    [[ -n "${OUTLOOK_PROXY_LIST:-}" ]] && _ARGS+=(--proxy-list "$OUTLOOK_PROXY_LIST")
+    [[ -n "${OUTLOOK_SINK:-}" ]] && _ARGS+=(--sink "$OUTLOOK_SINK")
+    exec "$_PY" "${_ARGS[@]}"
     ;;
   core|framework)
     # Layered register_core CLI (email / provider / verify / sink)

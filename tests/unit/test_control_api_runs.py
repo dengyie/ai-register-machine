@@ -413,6 +413,114 @@ def test_start_popen_argv(tmp_path: Path, monkeypatch):
     assert meta.get("pgid") == 555
 
 
+def test_start_register_sh_outlook_argv(tmp_path: Path, monkeypatch):
+    """kind=register_sh + product=outlook reaches register.sh as argv
+    [bash, register.sh, outlook, target, threads] — the control-plane hop
+    that lets an Outlook run launch. The live gate (GROK_REGISTER_OUTLOOK_LIVE)
+    remains an operator env, NOT set here; the provider short-circuits to
+    error_kind="provider", which is the safe non-live reachability contract."""
+    # register.sh must exist for start_run's register_sh-branch file check.
+    (tmp_path / "register.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    (tmp_path / "logs").mkdir()
+
+    class FakeProc:
+        pid = 556
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    captured: dict = {}
+
+    class FakeFile:
+        def close(self):
+            pass
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return FakeProc()
+
+    monkeypatch.setattr("apps.control_api.runs.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("apps.control_api.runs.supervisor_lock_held", lambda: False)
+    monkeypatch.setattr("apps.control_api.runs.time.sleep", lambda _s: None)
+    monkeypatch.setattr("builtins.open", lambda *_a, **_k: FakeFile())
+    monkeypatch.setattr(
+        "apps.control_api.process_registry.ProcessRegistry.pid_alive",
+        staticmethod(lambda pid: pid == 556),
+    )
+    result = start_run(
+        tmp_path,
+        StartRunRequest(
+            kind="register_sh",
+            product="outlook",
+            mode="residential",
+            target=3,
+            threads=2,
+            tag="batch_web",
+            extra_env={},
+        ),
+    )
+    assert result["ok"] is True
+    argv = captured["argv"]
+    assert argv[0] == "bash"
+    assert Path(argv[1]).name == "register.sh"
+    assert argv[2] == "outlook"
+    assert argv[3] == "3"
+    assert argv[4] == "2"  # threads is forwarded; register.sh forwards it to --threads
+    assert result["run"]["meta"]["product"] == "outlook"
+
+
+def test_register_sh_outlook_branch_maps_to_register_core_run(tmp_path, monkeypatch):
+    """register.sh's `outlook` branch execs `python -m register_core run --provider
+    outlook -n COUNT --threads N`, which resolves the provider via the registry and
+    calls ``OutlookProvider.register_one``. We pin the safe non-live contract at
+    the provider layer directly (in-process, no subprocess, no network):
+
+      - live gate OFF (``GROK_REGISTER_OUTLOOK_LIVE`` unset) → the provider
+        short-circuits to ``error_kind="provider"`` with the gate phrase BEFORE
+        any browser/mailbox/network is touched, in ~0s, and writes no artifact.
+
+    This is the control-flow reachability contract for a non-live harness: the
+    argv wiring from register.sh is already pinned by
+    ``test_start_register_sh_outlook_argv`` above; here we pin that the provider
+    the registry hands back honors the gate. Spawning the full ``register_core
+    run`` subprocess is avoided because the pipeline runs the shared node/egress
+    probe (network, ~12s libcurl timeouts per dead node) before reaching the
+    per-account gate — that probe is environment-dependent and not part of this
+    contract."""
+    # Live gate OFF (default). No proxy, no browser, no mailbox is ever opened.
+    monkeypatch.delenv("GROK_REGISTER_OUTLOOK_LIVE", raising=False)
+    # Isolate the outlook_auths dir so a gate-on bug can't write into the repo.
+    monkeypatch.setenv("OUTLOOK_AUTHS_DIR", str(tmp_path / "outlook_auths"))
+
+    import time
+
+    from register_core.providers.registry import get_provider
+
+    provider = get_provider("outlook")
+    t0 = time.monotonic()
+    result = provider.register_one()
+    elapsed = time.monotonic() - t0
+
+    # The provider gated off without a LIVE flag → a provider-kind failure.
+    assert result.ok is False
+    assert result.error_kind == "provider"
+    # No browser/mailbox round-trip should occur on a gated-off short-circuit —
+    # this guards against a future change that moves network work above the gate.
+    assert elapsed < 5.0, f"gated short-circuit took {elapsed:.3f}s (network?)"
+    assert result.error is not None
+    assert "live gate" in result.error.lower() or "GROK_REGISTER_OUTLOOK_LIVE" in result.error, (
+        result.error
+    )
+    # No outlook auth artifact should have been written (gate is OFF).
+    auths_dir = tmp_path / "outlook_auths"
+    assert not auths_dir.exists() or not list(auths_dir.glob("outlook-*.json")), (
+        "gate OFF must not write an artifact"
+    )
+
+
 def test_start_run_extra_env_overrides_config(tmp_path: Path, monkeypatch):
     """Request extra_env wins over config.json for one-shot experiments."""
     (tmp_path / "scripts").mkdir()
