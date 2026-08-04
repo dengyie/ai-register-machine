@@ -40,6 +40,12 @@ Changelog = "https://github.com/dengyie/ai-register-machine/blob/main/CHANGELOG.
 [tool.uv]
 package = false
 
+# slidex is NOT published to PyPI (per project policy). uv resolves it from
+# the public GitHub repo instead. The version constraint in [project] deps
+# (slidex>=0.5.0) is checked against the repo's pyproject.toml version.
+[tool.uv.sources]
+slidex = { git = "https://github.com/dengyie/slidex.git" }
+
 [tool.pytest.ini_options]
 testpaths = [".", "tests"]
 python_files = ["test_*.py"]
