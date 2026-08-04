@@ -134,14 +134,27 @@ class _AwaitableInt:
 
 
 class _FakeText:
-    def __init__(self, present: bool = False) -> None:
+    def __init__(self, present: bool = False, *, owner=None, text: str = "") -> None:
         self._present = present
+        self._owner = owner
+        self._text = text
 
     def count(self):
         return _AwaitableInt(1 if self._present else 0)
 
-    async def click(self) -> None:
+    @property
+    def first(self) -> "_FakeText":
+        # Playwright's Locator.first — used for the consent wait.
+        return self
+
+    async def wait_for(self, **kwargs):
+        if not self._present:
+            raise TimeoutError(f"{self._text} not visible")
         return None
+
+    async def click(self) -> None:
+        if self._owner is not None:
+            self._owner.consent_text = self._text
 
 
 class _FakePage:
@@ -155,12 +168,15 @@ class _FakePage:
         abnormal: bool = False,
         maintenance: bool = False,
         captcha_frame: bool = False,
+        consent: bool = False,
     ) -> None:
         self.detach_timeout = detach_timeout
         self.enforcement = enforcement
         self.abnormal = abnormal
         self.maintenance = maintenance
         self.captcha_frame = captcha_frame
+        self.consent = consent
+        self.consent_text: str = ""
         self.goto_calls: list[str] = []
 
     async def goto(self, url: str, **_kwargs) -> None:
@@ -179,12 +195,12 @@ class _FakePage:
 
     def get_by_text(self, text: str, exact: bool = False):
         if text == "同意并继续":
-            return _FakeText(False)
+            return _FakeText(self.consent, owner=self, text=text)
         if text == "一些异常活动":
-            return _FakeText(self.abnormal)
+            return _FakeText(self.abnormal, owner=self, text=text)
         if text == "此站点正在维护":
-            return _FakeText(self.maintenance)
-        return _FakeText(False)
+            return _FakeText(self.maintenance, owner=self, text=text)
+        return _FakeText(False, owner=self, text=text)
 
 
 def test_registration_flow_detach_timeout_without_risk_is_not_success():
@@ -234,3 +250,38 @@ def test_registration_flow_enforcement_frame_before_success():
     assert result.ok is False
     assert result.error_kind == "captcha"
     assert result.fun_captcha_seen is True
+
+
+def test_registration_flow_clicks_consent_when_present():
+    """The consent button (同意并继续) is a hard gate: when present, register()
+    must wait for it and click it — a single poll would miss a slow render."""
+    page = _FakePage(consent=True)
+    asyncio.run(
+        OutlookRegistrationFlow().register(
+            page,
+            "user@outlook.com",
+            "Pw-not-logged",
+            captcha_strategy=2,
+        )
+    )
+    assert page.consent_text == "同意并继续", "consent should have been clicked"
+
+
+def test_registration_flow_consent_absent_is_non_fatal():
+    """When no consent button appears (already past consent or not required),
+    register() must not raise — it proceeds to the email form wait. The
+    consent timeout is non-fatal; the flow continues normally."""
+    page = _FakePage(consent=False)
+    # Should not raise despite consent timeout
+    result = asyncio.run(
+        OutlookRegistrationFlow().register(
+            page,
+            "user@outlook.com",
+            "Pw-not-logged",
+            captcha_strategy=2,
+        )
+    )
+    # Consent timeout is silently swallowed; form proceeds normally.
+    # Since no detach timeout or captcha, result is ok=True.
+    assert result.ok is True
+    assert page.consent_text == ""  # consent was never clicked (not required)

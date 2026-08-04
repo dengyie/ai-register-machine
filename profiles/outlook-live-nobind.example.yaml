@@ -1,0 +1,47 @@
+# Live-verify profile for Outlook (A path: bind_recovery_email=false).
+#
+# Usage (live — gated, requires explicit operator authorization):
+#   GROK_REGISTER_OUTLOOK_LIVE=1 \
+#   OUTLOOK_PROXY="http://user:pass@host:port" \
+#   .venv/bin/python -m register_core run \
+#     --profile profiles/outlook-live-nobind.example.yaml -n 1
+#
+# This is NOT a production profile; it exists to exercise the live Outlook
+# register flow under the GROK_REGISTER_OUTLOOK_LIVE gate with the recovery
+# mailbox binding skipped (A path) so it does NOT create a fresh temp mailbox.
+#
+# Operator responsibilities for a real live run:
+#   * set GROK_REGISTER_OUTLOOK_LIVE=1 (explicit)
+#   * supply a usable outbound proxy via OUTLOOK_PROXY (or REGISTER_EGRESS=list
+#     + a populated PROXY_LIST) — the Outlook provider rejects an empty/blank
+#     extra["proxy"] with error_kind="proxy" before opening any browser.
+#   * recovery mailbox binding is OFF (bind_recovery_email: false); the account
+#     is registered WITHOUT an external recovery email.
+
+apiVersion: register.v1
+kind: RegisterProfile
+metadata:
+  name: outlook-live-nobind
+  description: Outlook live-verify — recovery mailbox skipped (A path)
+
+spec:
+  provider:
+    name: outlook
+    options:
+      bind_recovery_email: false
+      captcha_strategy: 0
+      # headless:false — MS errcode 1045 was observed in headless mode on the
+      # first proxy; sentinel testing whether a real display softens detection.
+      # Requires xvfb-run for pxed (or a desktop) — command in the run notes.
+      headless: false
+  count: 1
+
+  strategy:
+    fail_fast: true
+    fail_fast_kinds:
+      - provider
+      - fatal
+      - proxy
+      - verify
+    egress:
+      mode: direct

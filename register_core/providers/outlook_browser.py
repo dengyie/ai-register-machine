@@ -171,6 +171,13 @@ class OutlookBrowser:
 # comfortable margin without hanging forever on a genuinely dead page.
 _SLOW_FORM_TIMEOUT_MS = 60_000
 
+# Consent ("个人数据导出许可") is a hard pre-condition for the create-email
+# form — the SPA does not render any input until consent is granted, and the
+# consent page's render time varies widely through the OAuth redirect chain
+# (4s on a fast egress, >60s on a slow one). Give consent a bounded window so
+# a slow render is still granted instead of being skipped by a single poll.
+_CONSENT_TIMEOUT_MS = 15_000
+
 
 async def _wait_visible(page: Any, selector: str, *, timeout: int = _SLOW_FORM_TIMEOUT_MS) -> None:
     """Wait for a form control to be visible before interacting.
@@ -247,9 +254,18 @@ class OutlookRegistrationFlow:
         # (outlook → login → signup) completes even on a slow egress.
         await page.goto(_CREATE_ACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
 
-        # 1) Consent
-        if await page.get_by_text("同意并继续", exact=True).count():
-            await page.get_by_text("同意并继续", exact=True).click()
+        # 1) Consent — wait (bounded) for the consent button instead of a
+        # single poll, so a slow consent render through the OAuth chain is
+        # still granted. Timeout is non-fatal: some sessions are already past
+        # consent or don't require it.
+        try:
+            await page.get_by_text("同意并继续", exact=True).first.wait_for(
+                state="visible", timeout=_CONSENT_TIMEOUT_MS
+            )
+        except Exception:
+            pass  # already past consent or consent not required this session
+        else:
+            await page.get_by_text("同意并继续", exact=True).first.click()
 
         # 2) Optional hotmail suffix switch when the option is present
         if await page.locator('[role="option"]:text-is("@hotmail.com")').count():
