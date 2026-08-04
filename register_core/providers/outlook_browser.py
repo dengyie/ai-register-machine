@@ -114,7 +114,7 @@ class OutlookBrowser:
     async def open(self, proxy: str | None = None) -> AsyncIterator[BrowserSession]:
         # Import at use-site so config-only unit tests do not require a live browser stack.
         from patchright.async_api import async_playwright
-        from slidex import STEALTH_INIT_SCRIPT, STEALTH_LAUNCH_ARGS
+        from slidex import STEALTH_LAUNCH_ARGS
 
         proxy_settings = _proxy_settings(proxy)
         geo = _geolocation(self.config)
@@ -137,7 +137,20 @@ class OutlookBrowser:
                     context_kwargs["geolocation"] = geo
                     context_kwargs["permissions"] = ["geolocation"]
                 context = await browser.new_context(**context_kwargs)
-                await context.add_init_script(STEALTH_INIT_SCRIPT)
+                # NOTE: intentionally NOT calling context.add_init_script() here.
+                # signup.live.com is a React/FluentUI SPA behind a strict CSP
+                # (script-src 'self' 'nonce-...'). The slidex STEALTH_INIT_SCRIPT
+                # blob injects inline main-world overrides (navigator.webdriver,
+                # window.chrome, canvas/WebGL getParameter, etc.) that the CSP
+                # rejects; the bootstrap then tags its own nonce-protected
+                # <script class="error-handling-tag"> chunks and never mounts the
+                # form (CheckAndReportReactBlankPageError swallows the failure),
+                # leaving a blank shell with zero inputs. Verified by binary
+                # bisect: launch args alone render the consent page fine, the
+                # init script alone blanks it. So we keep STEALTH_LAUNCH_ARGS
+                # (args are CSP-clean — they change the browser surface, not the
+                # page script world) and drop the init script for the Outlook
+                # path. Other providers may still use the init script.
                 page = await context.new_page()
                 yield BrowserSession(browser=browser, context=context, page=page)
             finally:
@@ -149,6 +162,25 @@ class OutlookBrowser:
                         await resource.close()
                     except Exception:
                         pass
+
+
+# Worst-case time for the signup FluentUI SPA to bootstrap through the
+# proxy egress: logincdn.msauth.net (brs.json → fluent-chunk_vendors →
+# fluent-chunk_fluentui → signup-fluent_v2) loads sequentially and can take
+# ~28s before the create-email form mounts on a slow node. 60s gives a
+# comfortable margin without hanging forever on a genuinely dead page.
+_SLOW_FORM_TIMEOUT_MS = 60_000
+
+
+async def _wait_visible(page: Any, selector: str, *, timeout: int = _SLOW_FORM_TIMEOUT_MS) -> None:
+    """Wait for a form control to be visible before interacting.
+
+    The signup SPA re-mounts on every step (email → password → birth → name),
+    so each stage hits the same slow-CDN bootstrap lag. Waiting for the
+    control's visibility — instead of relying on a fixed fill timeout — keeps
+    the flow from racing ahead of the renderer.
+    """
+    await page.locator(selector).wait_for(state="visible", timeout=timeout)
 
 
 async def _select_birth_field(page: Any, *, name: str, css_id: str, value: str, option_text: str) -> None:
@@ -177,6 +209,12 @@ async def _select_birth_field(page: Any, *, name: str, css_id: str, value: str, 
 
 
 async def _fill_birth_year(page: Any, year: str = "1994") -> None:
+    # Birth controls mount with the SPA after the password step; wait first
+    # so the slow-CDN re-mount doesn't race select_option/fill.
+    try:
+        await page.locator("#BirthYear").wait_for(state="visible", timeout=_SLOW_FORM_TIMEOUT_MS)
+    except Exception:  # noqa: BLE001 — fall back to the multi-variant loop below
+        pass
     last_error: Exception | None = None
     for locator in (page.locator("#BirthYear"), page.locator('[name="BirthYear"]')):
         for action in ("fill", "select_option"):
@@ -204,7 +242,10 @@ class OutlookRegistrationFlow:
         *,
         captcha_strategy: int,
     ) -> RegistrationPageResult:
-        await page.goto(_CREATE_ACCOUNT_URL)
+        # goto with domcontentloaded (not the default "load", whose networkidle
+        # wait would hang on the slow CDN) and a 60s ceiling so the 302 chain
+        # (outlook → login → signup) completes even on a slow egress.
+        await page.goto(_CREATE_ACCOUNT_URL, wait_until="domcontentloaded", timeout=60_000)
 
         # 1) Consent
         if await page.get_by_text("同意并继续", exact=True).count():
@@ -214,12 +255,16 @@ class OutlookRegistrationFlow:
         if await page.locator('[role="option"]:text-is("@hotmail.com")').count():
             await page.locator('[role="option"]:text-is("@hotmail.com")').click()
 
-        # 3) Email local-part
+        # 3) Email local-part — explicitly wait for the input. The signup
+        # FluentUI SPA mounts the create-email form only after logincdn.msauth.net
+        # finishes bootstrapping (~28s on a slow egress); fill() alone races it.
         local_part = email.split("@", 1)[0]
+        await _wait_visible(page, '[aria-label="新建电子邮件"]')
         await page.locator('[aria-label="新建电子邮件"]').fill(local_part)
         await page.locator('[data-testid="primaryButton"]').click()
 
-        # 4) Password
+        # 4) Password — same SPA re-mount, same slow-CDN lag after the email step.
+        await _wait_visible(page, '[type="password"]')
         await page.locator('[type="password"]').fill(password)
         await page.locator('[data-testid="primaryButton"]').click()
 
@@ -232,7 +277,8 @@ class OutlookRegistrationFlow:
             page, name="BirthDay", css_id="BirthDay", value="1", option_text="1日"
         )
 
-        # Name
+        # Name — SPA re-mounts once more before the name screen.
+        await _wait_visible(page, "#lastNameInput")
         await page.locator("#lastNameInput").fill("Test")
         await page.locator("#firstNameInput").fill("User")
         await page.locator('[data-testid="primaryButton"]').click()

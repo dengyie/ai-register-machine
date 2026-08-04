@@ -163,7 +163,7 @@ class _FakePage:
         self.captcha_frame = captcha_frame
         self.goto_calls: list[str] = []
 
-    async def goto(self, url: str) -> None:
+    async def goto(self, url: str, **_kwargs) -> None:
         self.goto_calls.append(url)
 
     def locator(self, selector: str) -> _FakeLocator:
