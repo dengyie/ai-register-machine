@@ -174,9 +174,9 @@ _SLOW_FORM_TIMEOUT_MS = 60_000
 # Consent ("个人数据导出许可") is a hard pre-condition for the create-email
 # form — the SPA does not render any input until consent is granted, and the
 # consent page's render time varies widely through the OAuth redirect chain
-# (4s on a fast egress, >60s on a slow one). Give consent a bounded window so
-# a slow render is still granted instead of being skipped by a single poll.
-_CONSENT_TIMEOUT_MS = 15_000
+# (4s on a fast egress, >20s on a slow one). Give consent the same CDN
+# bootstrap budget as the form itself so a slow render is still granted.
+_CONSENT_TIMEOUT_MS = _SLOW_FORM_TIMEOUT_MS
 
 
 async def _wait_visible(page: Any, selector: str, *, timeout: int = _SLOW_FORM_TIMEOUT_MS) -> None:
