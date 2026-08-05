@@ -714,7 +714,7 @@ wheels = [
 [[package]]
 name = "slidex"
 version = "0.5.0"
-source = { git = "https://github.com/dengyie/slidex.git#e8f0355825f27fa3a012ab8d91797daa3623e9ac" }
+source = { git = "https://github.com/dengyie/slidex.git#9a1db95588fa70e4d7cc1d9e83b2132fc90aac8f" }
 dependencies = [
     { name = "loguru" },
     { name = "numpy" },
