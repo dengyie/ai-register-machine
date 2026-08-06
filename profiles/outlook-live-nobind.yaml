@@ -1,0 +1,36 @@
+# Live-verify profile for Outlook — name-step fix verification run.
+# captcha_strategy: 2 = manual handoff. Outlook's captcha is FunCaptcha
+# (iframe[title="验证质询"]) which slidex VisualChallengeSolver (HOLD-only)
+# cannot solve, so strategy 0 is unusable for Outlook. With 2, the flow runs
+# consent→email→password→birth→name and STOPS cleanly at the FunCaptcha with
+# error_kind="manual_handoff" — proving register() now advances past the
+# name screen (previously a 60s stall → provider/form timeout).
+#
+# Usage (gated — explicit operator authorization required):
+#   GROK_REGISTER_OUTLOOK_LIVE=1 \
+#   .venv/bin/python -m register_core run \
+#     --profile profiles/outlook-live-nobind.yaml -n 1 --egress core
+apiVersion: register.v1
+kind: RegisterProfile
+metadata:
+  name: outlook-live-nobind
+  description: Outlook live-verify (name-step) — manual-handoff captcha
+
+spec:
+  provider:
+    name: outlook
+    options:
+      bind_recovery_email: false
+      captcha_strategy: 2
+      headless: false
+  count: 1
+
+  strategy:
+    fail_fast: true
+    fail_fast_kinds:
+      - provider
+      - fatal
+      - proxy
+      - verify
+    egress:
+      mode: core

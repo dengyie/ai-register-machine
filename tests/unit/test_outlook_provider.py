@@ -456,8 +456,10 @@ def test_fun_captcha_failure_releases_recovery_never_allocated(monkeypatch, tmp_
     assert list((tmp_path / "auths").glob("*.json")) == []
 
 
-def test_captcha_bridge_strategy2_manual_handoff(monkeypatch, tmp_path):
-    """captcha_frame_seen + strategy 2 → manual handoff, no bridge call."""
+def test_captcha_bridge_strategy2_manual_handoff_headless_returns_immediately(
+    monkeypatch, tmp_path
+):
+    """captcha_frame_seen + strategy 2 + headless → manual_handoff, no wait, no bridge."""
     monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
     _install_fake_browser(monkeypatch, _FakeSession())
     _install_fake_flow(
@@ -485,6 +487,7 @@ def test_captcha_bridge_strategy2_manual_handoff(monkeypatch, tmp_path):
             "outlook_auths_dir": str(tmp_path / "auths"),
             "bind_recovery_email": False,
             "captcha_strategy": 2,
+            "headless": True,
         }
     )
     result = provider.register_one(
@@ -494,3 +497,193 @@ def test_captcha_bridge_strategy2_manual_handoff(monkeypatch, tmp_path):
     assert result.error_kind == "captcha"
     assert result.error == "manual_handoff"
     assert result.artifacts.get("outlook_steps") == ["register"]
+
+
+# --- strategy 2 interactive manual-wait (headed) -----------------------------
+
+
+class _CountdownLocator:
+    """count() returns from a scripted sequence, then stays at the last value.
+
+    Simulates the captcha iframe detaching after the operator solves it: each
+    poll consumes the next value; when the script is exhausted the locator
+    stays detached (0).
+    """
+
+    def __init__(self, counts):
+        self._counts = list(counts)
+
+    async def count(self):
+        if len(self._counts) > 1:
+            return self._counts.pop(0)
+        return self._counts[0]
+
+
+class _HandoffPage:
+    """Page stub for manual_handoff_wait: only the two captcha selectors matter."""
+
+    def __init__(self, enforcement_counts, challenge_counts):
+        self._enforcement = _CountdownLocator(enforcement_counts)
+        self._challenge = _CountdownLocator(challenge_counts)
+
+    def locator(self, selector):
+        if selector == "iframe#enforcementFrame":
+            return self._enforcement
+        if 'title="验证质询"' in selector:
+            return self._challenge
+        raise AssertionError(f"unexpected selector {selector}")
+
+
+def test_manual_handoff_wait_returns_true_when_iframes_detach():
+    from register_core.providers.outlook_adapter import manual_handoff_wait
+
+    # enforcement: present, present, gone. challenge: present, gone, gone.
+    page = _HandoffPage([1, 1, 0], [1, 0, 0])
+    cleared = asyncio.run(
+        manual_handoff_wait(page, timeout_s=10.0, poll_s=0.01)
+    )
+    assert cleared is True
+
+
+def test_manual_handoff_wait_times_out_when_iframe_stays():
+    from register_core.providers.outlook_adapter import manual_handoff_wait
+
+    page = _HandoffPage([1], [0])
+    cleared = asyncio.run(
+        manual_handoff_wait(page, timeout_s=0.05, poll_s=0.01)
+    )
+    assert cleared is False
+
+
+def test_strategy2_headed_waits_then_proceeds_to_oauth(monkeypatch, tmp_path):
+    """headed + strategy 2 + captcha → wait (iframe detaches) → OAuth runs →
+    artifact written. This is the live operator path: solve the FunCaptcha in
+    the open browser window, registration completes automatically."""
+    monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
+    _install_fake_browser(monkeypatch, _FakeSession())
+    _install_fake_flow(
+        monkeypatch,
+        RegistrationPageResult(
+            ok=False, error_kind="captcha", error="manual handoff",
+            captcha_frame_seen=True,
+        ),
+    )
+
+    async def _wait_succeeds(page, *, timeout_s, poll_s=2.0):
+        return True
+
+    monkeypatch.setattr(adapter_mod, "manual_handoff_wait", _wait_succeeds)
+    _install_fake_oauth(
+        monkeypatch,
+        OAuthTokenResult(ok=True, refresh_token="synthetic-rt", state="refresh_token"),
+    )
+    _install_fake_temp_source(monkeypatch)
+
+    provider = OutlookProvider(
+        config={
+            "outlook_auths_dir": str(tmp_path / "auths"),
+            "bind_recovery_email": False,
+            "captcha_strategy": 2,
+            "headless": False,
+        }
+    )
+    result = provider.register_one(
+        email_source=None, extra={"proxy": "http://synthetic.invalid"}
+    )
+    assert result.ok is True
+    assert result.secret == "synthetic-rt"
+    assert result.secret_kind == "refresh_token"
+    artifact = Path(result.artifacts["outlook_auth_path"])
+    assert artifact.exists()
+    body = json.loads(artifact.read_text(encoding="utf-8"))
+    assert body["refresh_token"] == "synthetic-rt"
+    assert result.artifacts["outlook_steps"] == [
+        "register", "manual_captcha", "oauth",
+    ]
+
+
+def test_strategy2_headed_wait_timeout_returns_manual_handoff_timeout(
+    monkeypatch, tmp_path
+):
+    """headed + strategy 2 + captcha, operator never solves → bounded timeout
+    failure, no OAuth call, no artifact."""
+    monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
+    _install_fake_browser(monkeypatch, _FakeSession())
+    _install_fake_flow(
+        monkeypatch,
+        RegistrationPageResult(
+            ok=False, error_kind="captcha", error="manual handoff",
+            captcha_frame_seen=True,
+        ),
+    )
+
+    async def _wait_times_out(page, *, timeout_s, poll_s=2.0):
+        return False
+
+    monkeypatch.setattr(adapter_mod, "manual_handoff_wait", _wait_times_out)
+
+    class _NoOAuth:
+        def __init__(self, *, config=None):
+            pass
+
+        async def run(self, *a, **k):
+            raise AssertionError("OAuth must not run after handoff timeout")
+
+    monkeypatch.setattr(adapter_mod, "OAuthStateMachine", _NoOAuth)
+    _install_fake_temp_source(monkeypatch)
+
+    provider = OutlookProvider(
+        config={
+            "outlook_auths_dir": str(tmp_path / "auths"),
+            "bind_recovery_email": False,
+            "captcha_strategy": 2,
+            "headless": False,
+        }
+    )
+    result = provider.register_one(
+        email_source=None, extra={"proxy": "http://synthetic.invalid"}
+    )
+    assert result.ok is False
+    assert result.error_kind == "captcha"
+    assert result.error == "manual_handoff_timeout"
+    assert result.artifacts.get("outlook_steps") == ["register", "manual_captcha"]
+    assert list((tmp_path / "auths").glob("*.json")) == []
+
+
+def test_fun_captcha_headed_also_waits_for_operator(monkeypatch, tmp_path):
+    """FunCaptcha (enforcementFrame) is the captcha Outlook actually shows; in
+    headed mode the operator solves it in-window, so the wait must cover it
+    too — not just the 验证质询 iframe variant."""
+    monkeypatch.setenv("GROK_REGISTER_OUTLOOK_LIVE", "1")
+    _install_fake_browser(monkeypatch, _FakeSession())
+    _install_fake_flow(
+        monkeypatch,
+        RegistrationPageResult(
+            ok=False, error_kind="captcha", error="FunCaptcha enforcement frame",
+            fun_captcha_seen=True,
+        ),
+    )
+
+    async def _wait_succeeds(page, *, timeout_s, poll_s=2.0):
+        return True
+
+    monkeypatch.setattr(adapter_mod, "manual_handoff_wait", _wait_succeeds)
+    _install_fake_oauth(
+        monkeypatch,
+        OAuthTokenResult(ok=True, refresh_token="synthetic-rt", state="refresh_token"),
+    )
+    _install_fake_temp_source(monkeypatch)
+
+    provider = OutlookProvider(
+        config={
+            "outlook_auths_dir": str(tmp_path / "auths"),
+            "bind_recovery_email": False,
+            "captcha_strategy": 2,
+            "headless": False,
+        }
+    )
+    result = provider.register_one(
+        email_source=None, extra={"proxy": "http://synthetic.invalid"}
+    )
+    assert result.ok is True
+    assert result.secret == "synthetic-rt"

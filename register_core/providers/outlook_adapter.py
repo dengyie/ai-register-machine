@@ -34,6 +34,35 @@ from register_core.providers.outlook_captcha import OutlookCaptchaBridge
 from register_core.providers.outlook_oauth import OAuthStateMachine, OutlookOAuthConfig
 from register_core.providers.outlook_recovery import bind_recovery_email
 
+# How long the headed browser stays open waiting for the operator to solve the
+# captcha by hand. FunCaptcha is a few clicks; 10 minutes is generous without
+# leaving a headed browser parked forever on an abandoned run.
+_MANUAL_HANDOFF_TIMEOUT_S = 600.0
+_MANUAL_HANDOFF_POLL_S = 2.0
+
+
+async def manual_handoff_wait(page: Any, *, timeout_s: float, poll_s: float = _MANUAL_HANDOFF_POLL_S) -> bool:
+    """Poll until both captcha iframe variants detach (operator solved it).
+
+    Outlook shows the FunCaptcha either as ``iframe#enforcementFrame`` or as
+    ``iframe[title="验证质询"]``; when the human completes the challenge the
+    SPA tears the frame down and advances. Returns True once neither frame is
+    present, False after ``timeout_s`` seconds.
+
+    Only meaningful with a headed browser — in headless mode there is nobody
+    to solve it, so callers should skip the wait entirely.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while True:
+        enforcement = await page.locator("iframe#enforcementFrame").count()
+        challenge = await page.locator('iframe[title="验证质询"]').count()
+        if not enforcement and not challenge:
+            return True
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(poll_s)
+
 
 class OutlookProvider:
     name = "outlook"
@@ -261,6 +290,7 @@ class OutlookProvider:
         )
         recovery: Any = None
         success = False
+        manual_captcha_solved = False
         try:
             email = self._generate_account_email(config.email_suffix)
             password = self._generate_password()
@@ -271,15 +301,43 @@ class OutlookProvider:
                     password,
                     captcha_strategy=config.captcha_strategy,
                 )
-                if registration.fun_captcha_seen:
-                    return self._failure(
-                        "captcha", "fun_captcha", {"outlook_steps": ["register"]}
+                if registration.fun_captcha_seen or (
+                    registration.captcha_frame_seen and config.captcha_strategy == 2
+                ):
+                    # Strategy 2 = manual handoff. Headless: nobody can solve it —
+                    # return immediately so the batch moves on. Headed: keep the
+                    # browser open and wait for the operator to solve the captcha
+                    # in the window; on success fall through to OAuth.
+                    if config.headless:
+                        error = (
+                            "fun_captcha"
+                            if registration.fun_captcha_seen
+                            else "manual_handoff"
+                        )
+                        return self._failure(
+                            "captcha", error, {"outlook_steps": ["register"]}
+                        )
+                    print(
+                        "[outlook] captcha shown — solve it in the browser window; "
+                        f"waiting up to {int(_MANUAL_HANDOFF_TIMEOUT_S)}s "
+                        f"(account: {email})",
+                        flush=True,
                     )
-                if registration.captcha_frame_seen and config.captcha_strategy == 2:
-                    return self._failure(
-                        "captcha", "manual_handoff", {"outlook_steps": ["register"]}
+                    cleared = await manual_handoff_wait(
+                        session.page, timeout_s=_MANUAL_HANDOFF_TIMEOUT_S
                     )
-                if registration.captcha_frame_seen:
+                    if not cleared:
+                        return self._failure(
+                            "captcha",
+                            "manual_handoff_timeout",
+                            {"outlook_steps": ["register", "manual_captcha"]},
+                        )
+                    print(
+                        "[outlook] captcha cleared — continuing to OAuth",
+                        flush=True,
+                    )
+                    manual_captcha_solved = True
+                elif registration.captcha_frame_seen:
                     captcha = await captcha_bridge.solve(
                         page=session.page,
                         browser=session.browser,
@@ -343,7 +401,11 @@ class OutlookProvider:
                         if recovery
                         else "",
                         "bound": bool(recovery and recovery.bound),
-                        "outlook_steps": ["register", "captcha", "mailbox", "oauth"],
+                        "outlook_steps": (
+                            ["register", "manual_captcha", "oauth"]
+                            if manual_captcha_solved
+                            else ["register", "captcha", "mailbox", "oauth"]
+                        ),
                     },
                 )
         finally:
