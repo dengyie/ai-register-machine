@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 SMOKE = ROOT / "scripts" / "smoke_diskfirst_one.sh"
 
 

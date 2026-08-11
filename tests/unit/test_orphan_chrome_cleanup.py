@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_is_drission_chrome_cmdline() -> None:

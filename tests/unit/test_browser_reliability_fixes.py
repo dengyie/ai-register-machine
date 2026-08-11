@@ -10,7 +10,7 @@ import types
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_tab_pool_chromium_start_lock_source() -> None:

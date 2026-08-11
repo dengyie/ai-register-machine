@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 MOD_PATH = ROOT / "providers" / "mimo" / "inject_cpa_openai.py"
 
 

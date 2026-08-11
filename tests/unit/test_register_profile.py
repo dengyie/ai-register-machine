@@ -93,7 +93,7 @@ class TestProfileParse(unittest.TestCase):
         self.assertEqual(p.secrets.mode, "prod")
 
     def test_load_yaml_example(self):
-        root = Path(__file__).resolve().parent
+        root = Path(__file__).resolve().parents[2]
         path = root / "profiles" / "chatgpt-tinyhost.example.yaml"
         if not path.is_file():
             self.skipTest("example profile missing")

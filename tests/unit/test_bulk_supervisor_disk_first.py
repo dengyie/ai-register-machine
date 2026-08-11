@@ -12,7 +12,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 SUP = ROOT / "scripts" / "launch_batch_supervisor.sh"
 IMPORT = ROOT / "scripts" / "import_cpa_auth_dir.py"
 

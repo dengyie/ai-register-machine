@@ -8,7 +8,7 @@ import types
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_release_mint_browser_owned_closes() -> None:
