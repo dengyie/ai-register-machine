@@ -66,6 +66,29 @@ ai-register-machine/
 └── turnstilePatch/             # browser extension for Grok path
 ```
 
+### Root-level runtime modules (legacy dependency surface — DO NOT MOVE)
+
+These stay at repo root because `register_core` / `register_cli.py` import them
+lazily by bare name and production (pxed `/personal/grok-register`, batch
+supervisor) runs with the repo root on `sys.path` but **not** `scripts/`.
+Moving them breaks the lazy imports in a non-test environment. The tests that
+exercise them also import by bare name (`import tab_pool as tp`, etc.).
+
+| Module | Imported by (lazy) | Purpose |
+|--------|--------------------|---------|
+| `proxy_bridge.py` | `register_core/util/proxy.py`, `register_core/nodes/models.py`, `register_core/nodes/cli.py` | proxy URL auth-strip / label helpers |
+| `proxy_rotate.py` | `register_core/util/proxy.py` | list/clash proxy rotation |
+| `cpa_export.py` | `register_cli.py`, `scripts/remint_expired_and_sync_authdir.py` | CPA auth export / remote inject |
+| `account_backup.py` | `register_cli.py` | account backup |
+| `node_score.py` | `mail_pool_probe.py` + tests | egress node scoring |
+| `mail_pool_probe.py` | `apps/control_api` + tests | mail pool probe |
+| `tab_pool.py` | tests (`import tab_pool as tp`) | browser/xvfb tab pool |
+
+If a module above is ever refactored into `register_core/`/`scripts/`, the lazy
+import sites must be updated in the same commit and verified with the full
+suite — do not move the file alone. Truly dead root scripts go to
+`scripts/_archive/` (see `cf_mail_debug.py`, `optimization_checks.py`).
+
 ## Layer dependency (one way)
 
 ```text

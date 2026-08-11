@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 CHECKS: list[tuple[str, Callable[[], bool]]] = []
 
 
