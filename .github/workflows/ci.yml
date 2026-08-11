@@ -63,8 +63,6 @@ jobs:
             proxy_rotate.py
             mail_pool_probe.py
             node_score.py
-            optimization_checks.py
-            cf_mail_debug.py
             cpa_xai/__init__.py
             cpa_xai/accounts.py
             cpa_xai/browser_confirm.py
