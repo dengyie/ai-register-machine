@@ -14,6 +14,7 @@ import requests
 from register_core.providers import outlook_oauth
 from register_core.providers.outlook_oauth import (
     ACCOUNT_TYPE_TILE,
+    AUTHORIZE_ERROR,
     CONSENT_ACCEPT,
     KMSI_DENY,
     LOGIN_EMAIL,
@@ -169,6 +170,7 @@ def test_redact_reports_presence_but_never_the_token():
         ((LOGIN_PASSWORD,), "login_password"),
         ((LOGIN_EMAIL,), "login_email"),
         ((PROOF_INPUT, PROTECT_ACCOUNT), "proof_verify"),
+        ((AUTHORIZE_ERROR,), "authorize_error"),
         ((), "unknown"),
     ],
 )
@@ -399,7 +401,11 @@ def test_run_returns_refresh_token_without_leaking_it(monkeypatch):
     assert result.refresh_token == "synthetic-refresh"
     assert result.state == "refresh_token"
     assert "synthetic-refresh" not in repr(result.redact())
-    assert page.gotos and "prompt=none" in page.gotos[0]
+    # A freshly-registered MSA account has no settled SSO cookie, so a silent
+    # prompt=none hop returns AADSTS90013 instead of a code. run() must default
+    # to an interactive authorize (no prompt=none) so the state machine drives
+    # #i0116/#i0118 itself. See test_run_uses_interactive_authorize_by_default.
+    assert page.gotos and "prompt=none" not in page.gotos[0]
 
 
 def test_run_drives_login_then_callback(monkeypatch):
@@ -469,6 +475,79 @@ def test_run_reports_navigation_failure_without_touching_the_network():
     assert result.ok is False
     assert result.error_kind == "oauth_callback"
     assert result.state == "authorize_navigation"
+
+
+def test_run_uses_interactive_authorize_by_default(monkeypatch):
+    """run() must NOT send prompt=none for a freshly-registered account.
+
+    A silent hop against an MSA account whose session cookie hasn't settled
+    returns AADSTS90013 (Microsoft "Invalid input received from the user")
+    rather than a redirect to the login forms. The interactive authorize lets
+    the state machine drive #i0116/#i0118 itself. Regression guard for the
+    AADSTS90013 failure seen on the Taipei egress 2026-08-07.
+    """
+    gotos: list[str] = []
+
+    class _GotoPage(_FakePage):
+        async def goto(self, url: str) -> None:
+            gotos.append(url)
+            await super().goto(url)
+
+    def post(url, **kwargs):
+        return _FakeResponse({"refresh_token": "synthetic-refresh"})
+
+    monkeypatch.setattr(outlook_oauth.requests, "post", post)
+    page = _GotoPage(url=SYNTHETIC_CALLBACK)
+    asyncio.run(machine_run(page))
+
+    assert gotos, "run() must navigate to the authorize URL"
+    assert "prompt=none" not in gotos[0], (
+        "default authorize must be interactive (prompt=none triggers AADSTS90013 "
+        "against a freshly-created unsettled account)"
+    )
+
+
+def test_run_can_still_request_silent_sso_when_asked(monkeypatch):
+    """Silent SSO remains available for an already-logged-in reuse path."""
+    gotos: list[str] = []
+
+    class _GotoPage(_FakePage):
+        async def goto(self, url: str) -> None:
+            gotos.append(url)
+            await super().goto(url)
+
+    def post(url, **kwargs):
+        return _FakeResponse({"refresh_token": "synthetic-refresh"})
+
+    monkeypatch.setattr(outlook_oauth.requests, "post", post)
+    page = _GotoPage(url=SYNTHETIC_CALLBACK)
+    machine = OAuthStateMachine()
+    asyncio.run(
+        machine.run(
+            page,
+            SYNTHETIC_EMAIL,
+            SYNTHETIC_PASSWORD,
+            proxy="",
+            recovery_session=None,
+            timeout_s=0.01,
+            prefer_sso=True,
+        )
+    )
+    assert gotos and "prompt=none" in gotos[0]
+
+
+def test_run_reports_authorize_error_for_aadsts_page():
+    """An AADSTS error page (e.g. AADSTS90013) must degrade to a named
+    authorize_error state, never the silent 'unknown' that masked the
+    AADSTS90013 failure on the live run 2026-08-07.
+    """
+    page = _FakePage(visible=(AUTHORIZE_ERROR,))
+    result = asyncio.run(machine_run(page))
+
+    assert result.ok is False
+    assert result.error_kind == "oauth_callback"
+    assert result.state == "authorize_error"
+    assert result.refresh_token == ""
 
 
 def test_run_stops_when_proof_is_requested_without_recovery_session():

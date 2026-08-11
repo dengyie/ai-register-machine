@@ -19,6 +19,30 @@ from register_core.config.schema import ProviderSpec
 _REGISTRATION_COMPLETION_LINK = 'span > [href="https://go.microsoft.com/fwlink/?LinkID=521839"]'
 _CREATE_ACCOUNT_URL = "https://outlook.live.com/mail/0/?prompt=create_account"
 
+# Locale-union selectors. signup.live.com renders its Fluent form in the browser
+# locale, and the egress→identity align (outlook_identity.py) now drives that
+# locale from the egress IP — a US residential exit yields en-US, so the form's
+# aria-labels/visible-text arrive in English. Every locale-sensitive selector
+# below carries BOTH the zh-CN and en-US variants and the flow first-matches;
+# this keeps creation working on either locale WITHOUT pinning locale to zh-CN
+# (which re-introduces the hold that held the LA egress on 2026-08-08). When a
+# selector here grows stale against the live DOM, add the new variant rather
+# than dropping the zh-CN one — the non-egress path still defaults to zh-CN.
+#
+# Visible-text variants use Playwright union pseudo-selector `:text-is("a"), …`
+# is not directly supported, so the call sites pass a tuple and the matching
+# helper takes the first present option. aria-label variants are joined into a
+# single CSS :is(...) group per call site.
+_CONSENT_CTA_TEXTS = ("同意并继续", "Agree and continue")
+_EMAIL_INPUT_ARIA_LABELS = ("新建电子邮件", "New email")
+_BIRTH_YEAR_ARIA_LABELS = ("出生年份", "Birth year")
+# Month/day option visible-text (role=option in the Fluent listbox). en-US
+# months are full names ("January"); day stays the digit.
+_MONTH_OPTION_TEXTS = ("1月", "January")
+_DAY_OPTION_TEXTS = ("1日", "1")
+_ABNORMAL_ACTIVITY_TEXTS = ("一些异常活动", "some unusual activity")
+_MAINTENANCE_TEXTS = ("此站点正在维护", "this site is under maintenance")
+
 
 @dataclass(frozen=True, slots=True)
 class OutlookBrowserConfig:
@@ -54,7 +78,7 @@ class OutlookBrowserConfig:
             email_suffix=str(normalized.get("email_suffix") or cls.email_suffix),
             captcha_strategy=strategy,
             headless=bool(normalized.get("headless", True)),
-            locale="zh-CN",
+            locale=str(normalized.get("locale") or "zh-CN"),
             timezone_id=str(normalized.get("timezone_id") or "UTC"),
             latitude=normalized.get("latitude"),
             longitude=normalized.get("longitude"),
@@ -190,23 +214,145 @@ async def _wait_visible(page: Any, selector: str, *, timeout: int = _SLOW_FORM_T
     await page.locator(selector).wait_for(state="visible", timeout=timeout)
 
 
-async def _select_birth_field(page: Any, *, name: str, css_id: str, value: str, option_text: str) -> None:
-    """Birth month/day: try select_option, then click role=option text fallback."""
-    locators = (
+async def _wait_visible_any(
+    page: Any,
+    aria_labels: tuple[str, ...],
+    *,
+    inputmode_numeric: bool = False,
+    timeout: int = _SLOW_FORM_TIMEOUT_MS,
+) -> str:
+    """Wait for the first of several locale-variant aria-label controls to mount.
+
+    Returns the aria-label that resolved, so the caller can target the same
+    control for fill(). The signup SPA re-mounts per step on the same slow-CDN
+    bootstrap, so a visible wait across locale variants (e.g. en-US rendered on
+    a US residential egress) replaces a single hard-coded zh-CN aria-label that
+    would otherwise time out. ``inputmode_numeric`` narrows to the numeric
+    ``input`` variant when set (birth-year uses ``[inputmode="numeric"]``).
+    """
+    deadline_exc: Exception | None = None
+    for label in aria_labels:
+        attr = f'[aria-label="{label}"][inputmode="numeric"]' if inputmode_numeric else f'[aria-label="{label}"]'
+        loc = page.locator(attr)
+        try:
+            await loc.wait_for(state="visible", timeout=timeout)
+            return label
+        except Exception as exc:  # noqa: BLE001 — try next locale variant
+            deadline_exc = exc
+            continue
+    # Re-wait the FIRST variant so the Playwright timeout surfaces to the
+    # caller with its standard shape when no locale variant resolves at all.
+    if deadline_exc is not None:
+        attr = (
+            f'[aria-label="{aria_labels[0]}"][inputmode="numeric"]'
+            if inputmode_numeric
+            else f'[aria-label="{aria_labels[0]}"]'
+        )
+        await page.locator(attr).wait_for(state="visible", timeout=timeout)
+        return aria_labels[0]
+    return aria_labels[0]
+
+
+async def _count_text_any(page: Any, texts: tuple[str, ...], *, exact: bool) -> int:
+    """Sum ``get_by_text`` counts across locale variants.
+
+    Used for risk-classification sentinels (abnormal activity / maintenance)
+    whose visible text is localized; returns the first non-zero count so a US
+    egress's en-US rendered sentinel is detected the same as zh-CN.
+    """
+    for text in texts:
+        try:
+            if await page.get_by_text(text, exact=exact).count():
+                return 1
+        except Exception:  # noqa: BLE001 — try next locale variant
+            continue
+    return 0
+
+
+async def _open_dropdown_and_pick(
+    page: Any, *, button_selector: str, option_text: str | tuple[str, ...]
+) -> None:
+    """Fluent UI <Dropdown>: click the trigger button to open a listbox, then
+    click the matching role=option by visible text.
+
+    Live WCA (signup.live.com, verified 2026-08-05) renders Birth month/day
+    and Country as Fluent UI dropdowns — the trigger is a
+    ``button.fui-Dropdown__button`` (NOT a native <select>), and the options
+    are ``li[role="option"]`` entries in a listbox that only mounts AFTER the
+    trigger is clicked. ``select_option`` cannot target them. The option's
+    visible text is the localized label ("1月" / "January", "1日" / "1");
+    ``option_text`` accepts a tuple of locale variants and the first one the
+    rendered DOM exposes is clicked — locale-union so the egress→identity
+    align (en-US for a US exit) does not break the picker. Match exactly so a
+    numeric-only option (e.g. the day "1") does not collide with another
+    listbox (month names share digits in some locales).
+    """
+    variants = option_text if isinstance(option_text, tuple) else (option_text,)
+    btn = page.locator(button_selector)
+    await btn.wait_for(state="visible", timeout=_SLOW_FORM_TIMEOUT_MS)
+    await btn.click()
+    # First-match across locale variants: a US egress renders en-US labels, so
+    # the en-US variant resolves; a zh-CN default locale renders the zh-CN one.
+    for text in variants:
+        option = page.locator(f'[role="option"]:text-is("{text}")')
+        if await option.count():
+            await option.first.wait_for(state="visible", timeout=_SLOW_FORM_TIMEOUT_MS)
+            await option.first.click()
+            return
+    # None of the locale variants were present — fall back to the first variant
+    # so the caller sees the same Playwright timeout/error shape as before.
+    option = page.locator(f'[role="option"]:text-is("{variants[0]}")')
+    await option.first.wait_for(state="visible", timeout=_SLOW_FORM_TIMEOUT_MS)
+    await option.first.click()
+
+
+async def _select_birth_field(
+    page: Any, *, name: str, css_id: str, value: str, option_text: str | tuple[str, ...]
+) -> None:
+    """Birth month/day. WCA historically offered a native <select id="BirthMonth">;
+    current WCA uses Fluent UI dropdowns with ids ``BirthMonthDropdown`` /
+    ``BirthDayDropdown``. Try, in order: native <select> (legacy), Fluent
+    dropdown trigger+option (current). The css_id passed in is the LEGACY id;
+    the Fluent trigger id is derived by appending ``Dropdown``.
+    """
+    legacy_selectors = (
         page.locator(f"#{css_id}"),
         page.locator(f'[name="{name}"]'),
     )
     last_error: Exception | None = None
-    for locator in locators:
+    # 1) Legacy native <select>.
+    for locator in legacy_selectors:
+        if not await locator.count():
+            continue
         try:
             await locator.select_option(value)
             return
+        except Exception as exc:  # noqa: BLE001 — legacy UI may be absent
+            last_error = exc
+    # 2) Current Fluent UI dropdown trigger (id = "<Field>Dropdown").
+    fluent_trigger = f"#{css_id}Dropdown"
+    if await page.locator(fluent_trigger).count():
+        try:
+            await _open_dropdown_and_pick(page, button_selector=fluent_trigger, option_text=option_text)
+            return
         except Exception as exc:  # noqa: BLE001 — UI variant fallback
             last_error = exc
-    for locator in locators:
+    # 3) Legacy fallback: click the (now-stale) <select> then role=option.
+    variants = option_text if isinstance(option_text, tuple) else (option_text,)
+    for locator in legacy_selectors:
         try:
             await locator.click()
-            await page.locator(f'[role="option"]:text-is("{option_text}")').click()
+            picked = False
+            for text in variants:
+                opt = page.locator(f'[role="option"]:text-is("{text}")')
+                if await opt.count():
+                    await opt.first.click()
+                    picked = True
+                    break
+            if not picked:
+                # Fall through to the first-variant click below to surface the
+                # same Playwright error the single-variant code path used to.
+                await page.locator(f'[role="option"]:text-is("{variants[0]}")').click()
             return
         except Exception as exc:  # noqa: BLE001 — try next locator
             last_error = exc
@@ -216,14 +362,35 @@ async def _select_birth_field(page: Any, *, name: str, css_id: str, value: str, 
 
 
 async def _fill_birth_year(page: Any, year: str = "1994") -> None:
-    # Birth controls mount with the SPA after the password step; wait first
-    # so the slow-CDN re-mount doesn't race select_option/fill.
-    try:
-        await page.locator("#BirthYear").wait_for(state="visible", timeout=_SLOW_FORM_TIMEOUT_MS)
-    except Exception:  # noqa: BLE001 — fall back to the multi-variant loop below
-        pass
+    """Fill the birth-year input. Live WCA renders it as a numeric
+    ``input[aria-label="出生年份"][inputmode="numeric"]`` (NOT ``#BirthYear``);
+    a stale ``#BirthYear`` <select> no longer exists. Wait for either form,
+    then fill/select across the known variants.
+    """
+    candidates = (
+        # zh-CN rendered form (default locale path).
+        page.locator(f'[aria-label="{_BIRTH_YEAR_ARIA_LABELS[0]}"][inputmode="numeric"]'),
+        page.locator(f'[aria-label="{_BIRTH_YEAR_ARIA_LABELS[0]}"]'),
+        # en-US rendered form (US residential egress → en-US identity align).
+        page.locator(f'[aria-label="{_BIRTH_YEAR_ARIA_LABELS[1]}"][inputmode="numeric"]'),
+        page.locator(f'[aria-label="{_BIRTH_YEAR_ARIA_LABELS[1]}"]'),
+        # Stable id/name invariant across locales (stale on current WCA but harmless).
+        page.locator("#BirthYear"),
+        page.locator('[name="BirthYear"]'),
+    )
+    # Wait up to the slow-CDN budget for ANY known birth-year control to mount.
+    deadline_hit = False
+    for locator in candidates:
+        try:
+            await locator.wait_for(state="visible", timeout=_SLOW_FORM_TIMEOUT_MS)
+            break
+        except Exception:  # noqa: BLE001 — try next candidate selector
+            continue
+    else:
+        deadline_hit = True
+
     last_error: Exception | None = None
-    for locator in (page.locator("#BirthYear"), page.locator('[name="BirthYear"]')):
+    for locator in candidates:
         for action in ("fill", "select_option"):
             try:
                 if action == "fill":
@@ -233,8 +400,12 @@ async def _fill_birth_year(page: Any, year: str = "1994") -> None:
                 return
             except Exception as exc:  # noqa: BLE001 — UI variant fallback
                 last_error = exc
+    if deadline_hit:
+        # No known control mounted at all in the budget — surface that.
+        raise RuntimeError("birth year field did not mount within slow-CDN budget")
     if last_error is not None:
         raise last_error
+    # Last resort: legacy single-select.
     await page.locator("#BirthYear").select_option(year)
 
 
@@ -257,15 +428,22 @@ class OutlookRegistrationFlow:
         # 1) Consent — wait (bounded) for the consent button instead of a
         # single poll, so a slow consent render through the OAuth chain is
         # still granted. Timeout is non-fatal: some sessions are already past
-        # consent or don't require it.
-        try:
-            await page.get_by_text("同意并继续", exact=True).first.wait_for(
-                state="visible", timeout=_CONSENT_TIMEOUT_MS
-            )
-        except Exception:
+        # consent or don't require it. Locale-union: a US egress renders the
+        # en-US CTA ("Agree and continue"); try every variant, agree on the
+        # first that renders.
+        agreed = False
+        for consent_text in _CONSENT_CTA_TEXTS:
+            try:
+                await page.get_by_text(consent_text, exact=True).first.wait_for(
+                    state="visible", timeout=_CONSENT_TIMEOUT_MS
+                )
+                await page.get_by_text(consent_text, exact=True).first.click()
+                agreed = True
+                break
+            except Exception:
+                continue
+        if not agreed:
             pass  # already past consent or consent not required this session
-        else:
-            await page.get_by_text("同意并继续", exact=True).first.click()
 
         # 2) Optional hotmail suffix switch when the option is present
         if await page.locator('[role="option"]:text-is("@hotmail.com")').count():
@@ -274,9 +452,11 @@ class OutlookRegistrationFlow:
         # 3) Email local-part — explicitly wait for the input. The signup
         # FluentUI SPA mounts the create-email form only after logincdn.msauth.net
         # finishes bootstrapping (~28s on a slow egress); fill() alone races it.
+        # Locale-union aria-label: zh-CN default ("新建电子邮件") OR en-US
+        # ("New email") when the egress→identity align drove locale to en-US.
         local_part = email.split("@", 1)[0]
-        await _wait_visible(page, '[aria-label="新建电子邮件"]')
-        await page.locator('[aria-label="新建电子邮件"]').fill(local_part)
+        email_label = await _wait_visible_any(page, _EMAIL_INPUT_ARIA_LABELS)
+        await page.locator(f'[aria-label="{email_label}"]').fill(local_part)
         await page.locator('[data-testid="primaryButton"]').click()
 
         # 4) Password — same SPA re-mount, same slow-CDN lag after the email step.
@@ -284,14 +464,20 @@ class OutlookRegistrationFlow:
         await page.locator('[type="password"]').fill(password)
         await page.locator('[data-testid="primaryButton"]').click()
 
-        # 5) Birth date — select_option then role=option text fallbacks
+        # 5) Birth date — select_option then role=option text fallbacks.
+        # Locale-union option_text: zh-CN ("1月"/"1日") OR en-US ("January"/"1").
         await _fill_birth_year(page, "1994")
         await _select_birth_field(
-            page, name="BirthMonth", css_id="BirthMonth", value="1", option_text="1月"
+            page, name="BirthMonth", css_id="BirthMonth", value="1", option_text=_MONTH_OPTION_TEXTS
         )
         await _select_birth_field(
-            page, name="BirthDay", css_id="BirthDay", value="1", option_text="1日"
+            page, name="BirthDay", css_id="BirthDay", value="1", option_text=_DAY_OPTION_TEXTS
         )
+
+        # Submit the birth group — otherwise the SPA never advances to the name
+        # screen and #lastNameInput never mounts (probe advanced because it clicks
+        # primaryButton after birth; register() was missing this click → 60s stall).
+        await page.locator('[data-testid="primaryButton"]').click()
 
         # Name — SPA re-mounts once more before the name screen.
         await _wait_visible(page, "#lastNameInput")
@@ -319,9 +505,9 @@ class OutlookRegistrationFlow:
                 "FunCaptcha enforcement frame",
                 fun_captcha_seen=True,
             )
-        if await page.get_by_text("一些异常活动", exact=False).count():
+        if await _count_text_any(page, _ABNORMAL_ACTIVITY_TEXTS, exact=False):
             return RegistrationPageResult(False, "captcha", "abnormal activity")
-        if await page.get_by_text("此站点正在维护", exact=False).count():
+        if await _count_text_any(page, _MAINTENANCE_TEXTS, exact=False):
             return RegistrationPageResult(False, "captcha", "maintenance sentinel")
 
         captcha_seen = await page.locator('iframe[title="验证质询"]').count() > 0

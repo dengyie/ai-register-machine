@@ -11,11 +11,46 @@ from register_core.providers.outlook_browser import (
 
 
 def test_outlook_config_defaults_to_manual_captcha_gate():
+    """Default is strategy 2 (manual handoff for hold AND FunCaptcha), NOT 0.
+    Strategy 0's hold auto-solve needs a HOLD-capable slidex solver; installed
+    slidex 0.5.0 VisualChallengeSolver only handles OCR/IMAGE_TEXT and
+    SLIDER_CAPTCHA (returns error_code="unsupported_challenge_type" for HOLD),
+    so a naive default-0 would dead-bridge live hold captchas instead of
+    waiting for the human. Regression guard against re-flipping to 0."""
     config = OutlookBrowserConfig.from_options({})
     assert config.captcha_strategy == 2
     assert config.email_suffix == "@outlook.com"
     assert config.locale == "zh-CN"
     assert config.timezone_id == "UTC"
+
+
+def test_outlook_config_honors_authored_identity_passthrough():
+    """Identity keys (locale/timezone_id/latitude/longitude) are NOT secret keys
+    and pass straight through ``outlook_options()`` to the typed config. An
+    authored profile value wins — this is the override the egress→identity
+    auto-align leaves room for (resolver only fills keys the profile left unset).
+    A US/LA residential egress would author a western-aligned identity here
+    instead of the zh-CN/UTC default."""
+    config = OutlookBrowserConfig.from_options(
+        {
+            "locale": "en-US",
+            "timezone_id": "America/Los_Angeles",
+            "latitude": 34.0522,
+            "longitude": -118.2437,
+        }
+    )
+    assert config.locale == "en-US"
+    assert config.timezone_id == "America/Los_Angeles"
+    assert config.latitude == 34.0522
+    assert config.longitude == -118.2437
+
+
+def test_outlook_config_locale_falls_back_to_default_when_unset():
+    """An absent locale must keep the zh-CN default (the line-57 hardcode fix uses
+    ``normalized.get("locale") or "zh-CN"``). Non-egress paths are unchanged."""
+    config = OutlookBrowserConfig.from_options({"timezone_id": "America/Los_Angeles"})
+    assert config.locale == "zh-CN"
+    assert config.timezone_id == "America/Los_Angeles"
 
 
 def test_outlook_config_rejects_secret_values_before_normalization():
@@ -169,6 +204,7 @@ class _FakePage:
         maintenance: bool = False,
         captcha_frame: bool = False,
         consent: bool = False,
+        locale: str = "zh-CN",
     ) -> None:
         self.detach_timeout = detach_timeout
         self.enforcement = enforcement
@@ -176,6 +212,11 @@ class _FakePage:
         self.maintenance = maintenance
         self.captcha_frame = captcha_frame
         self.consent = consent
+        # ``locale`` drives which rendered variant the egress→identity align
+        # would have selected; the stub surfaces only the chosen variant so a
+        # test exercising the en-US form path can assert the previous zh-CN-only
+        # hard-codes (now locale-union selectors) keep working in English.
+        self.locale = locale
         self.consent_text: str = ""
         self.goto_calls: list[str] = []
 
@@ -194,13 +235,25 @@ class _FakePage:
         return _FakeLocator(count=0)
 
     def get_by_text(self, text: str, exact: bool = False):
-        if text == "同意并继续":
-            return _FakeText(self.consent, owner=self, text=text)
-        if text == "一些异常活动":
-            return _FakeText(self.abnormal, owner=self, text=text)
-        if text == "此站点正在维护":
-            return _FakeText(self.maintenance, owner=self, text=text)
-        return _FakeText(False, owner=self, text=text)
+        # Only the variant matching the rendered locale is present; the other
+        # locale variant resolves to not-present so the locale-union loops are
+        # actually exercising the alternate path rather than short-circuiting
+        # on the first (zh-CN) variant.
+        zh_variant_for = {
+            "同意并继续": self.consent,
+            "一些异常活动": self.abnormal,
+            "此站点正在维护": self.maintenance,
+        }
+        en_variant_for = {
+            "Agree and continue": self.consent,
+            "some unusual activity": self.abnormal,
+            "this site is under maintenance": self.maintenance,
+        }
+        if self.locale == "en-US":
+            present = en_variant_for.get(text, False)
+            return _FakeText(present, owner=self, text=text)
+        present = zh_variant_for.get(text, False)
+        return _FakeText(present, owner=self, text=text)
 
 
 def test_registration_flow_detach_timeout_without_risk_is_not_success():
@@ -285,3 +338,55 @@ def test_registration_flow_consent_absent_is_non_fatal():
     # Since no detach timeout or captcha, result is ok=True.
     assert result.ok is True
     assert page.consent_text == ""  # consent was never clicked (not required)
+
+
+def test_registration_flow_clicks_en_us_consent_when_present():
+    """egress→identity align drives locale to en-US for a US residential exit,
+    so the form (and its consent CTA) renders in English. The locale-union
+    consent loop must click the en-US "Agree and continue" the same it would
+    the zh-CN one — regression guard so a US egress does not silently stall at
+    the consent step the way the 2026-08-09 live run stalled at the email step.
+    """
+    page = _FakePage(consent=True, locale="en-US")
+    asyncio.run(
+        OutlookRegistrationFlow().register(
+            page,
+            "user@outlook.com",
+            "Pw-not-logged",
+            captcha_strategy=2,
+        )
+    )
+    assert page.consent_text == "Agree and continue", "en-US consent should have been clicked"
+
+
+def test_registration_flow_detects_en_us_abnormal_activity():
+    """Risk classification must detect the en-US rendered abnormal-activity
+    sentinel, not only the zh-CN one. ``_count_text_any`` walks locale variants."""
+    page = _FakePage(abnormal=True, locale="en-US")
+    result = asyncio.run(
+        OutlookRegistrationFlow().register(
+            page,
+            "user@outlook.com",
+            "Pw-not-logged",
+            captcha_strategy=2,
+        )
+    )
+    assert result.ok is False
+    assert result.error_kind == "captcha"
+    assert "abnormal activity" in result.error.lower()
+
+
+def test_registration_flow_detects_en_us_maintenance():
+    """Same locale-union guarantee for the maintenance sentinel."""
+    page = _FakePage(maintenance=True, locale="en-US")
+    result = asyncio.run(
+        OutlookRegistrationFlow().register(
+            page,
+            "user@outlook.com",
+            "Pw-not-logged",
+            captcha_strategy=2,
+        )
+    )
+    assert result.ok is False
+    assert result.error_kind == "captcha"
+    assert "maintenance" in result.error.lower()

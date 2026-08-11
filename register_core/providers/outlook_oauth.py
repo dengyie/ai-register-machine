@@ -40,6 +40,12 @@ KMSI_DENY = "#declineButton, [data-testid=secondaryButton], input[value=否]"
 CONSENT_ACCEPT = '[data-testid="appConsentPrimaryButton"]'
 PROTECT_ACCOUNT = "#EmailAddress"
 PROOF_INPUT = "#iOttText, #codeEntry-0"
+# Microsoft identity error page (AADSTS* — e.g. AADSTS90013 "Invalid input
+# received from the user", returned by a silent prompt=none hop against a
+# freshly-created account whose session cookie hasn't settled). Recognizing
+# it as a named state keeps the failure visible instead of degrading to the
+# silent "unknown" that masked the AADSTS90013 blocker on 2026-08-07.
+AUTHORIZE_ERROR = "#f6_len_container, .IdentityAssertion, .alert-error"
 
 # Public, bounded state names — safe to place in metadata.
 STATES = (
@@ -50,6 +56,7 @@ STATES = (
     "kmsi",
     "login_email",
     "login_password",
+    "authorize_error",
     "unknown",
 )
 
@@ -134,6 +141,7 @@ class OAuthStateMachine:
     async def _current_auth_entry_state(self, page: Any) -> str:
         """Classify the current identity page into one bounded state name."""
         for selector, state in (
+            (AUTHORIZE_ERROR, "authorize_error"),
             (CONSENT_ACCEPT, "consent"),
             (ACCOUNT_TYPE_TILE, "account_type"),
             (PROOF_INPUT, "proof_verify"),
@@ -256,10 +264,17 @@ class OAuthStateMachine:
         proxy: str = "",
         recovery_session: Any = None,
         timeout_s: float = 20.0,
+        prefer_sso: bool = False,
     ) -> OAuthTokenResult:
+        # Default to an INTERACTIVE authorize (no prompt=none). A silent
+        # prompt=none hop against a freshly-created MSA account whose session
+        # cookie hasn't settled returns AADSTS90013 instead of a redirect, so
+        # the just-registered path must drive the login forms (#i0116/#i0118)
+        # itself. prefer_sso=True keeps the silent hop available for an
+        # already-logged-in reuse path that can actually complete SSO.
         state = ""
         try:
-            await page.goto(self.config.build_auth_url(prefer_sso=True))
+            await page.goto(self.config.build_auth_url(prefer_sso=prefer_sso))
         except Exception:
             return OAuthTokenResult(
                 ok=False,

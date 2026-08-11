@@ -207,6 +207,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             extra["proxy_rotate_every"] = int(args.proxy_rotate_every)
         if getattr(args, "proxy_rotate_required", False):
             extra["proxy_rotate_required"] = True
+        if getattr(args, "captcha_strategy", None) is not None:
+            extra["captcha_strategy"] = args.captcha_strategy
 
         job = RegisterJob(
             provider=args.provider,
@@ -365,6 +367,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--proxy-rotate-required",
         action="store_true",
         help="fail-fast if rotation fails (no silent reuse of bad egress)",
+    )
+    pr.add_argument(
+        "--captcha-strategy",
+        type=int,
+        choices=(0, 2),
+        default=None,
+        help=(
+            "outlook captcha: 0=full-auto hold 自动解 (需 HOLD-capable slidex, "
+            "当前装版不支持; FunCaptcha 仍等人解窗口); 2=manual handoff for "
+            "hold+FunCaptcha (默认, 最稳)"
+        ),
     )
     pr.add_argument("-v", "--verbose", action="store_true")
     pr.set_defaults(func=cmd_run)

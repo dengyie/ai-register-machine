@@ -64,7 +64,15 @@ class ProviderSpec:
             # the adapter would otherwise silently degrade to strategy 0's
             # fully-auto HOLD solve, masking operator intent. Reject loudly so
             # operators get immediate feedback instead of silent mis-behavior.
-            # 0 = full-auto hold, 2 = manual handoff only (both implemented).
+            # 0 = full-auto hold, 2 = manual handoff (both implemented).
+            # Default stays 2, NOT 0: strategy 0's hold auto-solve calls the
+            # slidex bridge with ChallengeType.HOLD, but installed slidex 0.5.0
+            # VisualChallengeSolver.solve() only handles OCR/IMAGE_TEXT and
+            # SLIDER_CAPTCHA and returns error_code="unsupported_challenge_type"
+            # for HOLD — a naive default-0 would dead-bridge live hold captchas
+            # (fail via a solver that can never succeed) instead of waiting for
+            # the human in the window. Keep 2 (human handles both hold and
+            # FunCaptcha) until a HOLD-capable solver actually exists.
             raise ValueError(
                 "outlook captcha_strategy=1 (ManualFallback) is not implemented "
                 "yet; use 0 (full-auto hold) or 2 (manual handoff)"

@@ -1,0 +1,43 @@
+# Timezone-aligned variant of outlook-live-nobind. Hypothesis under test:
+# we always launched with timezone_id="UTC" while our egress IP is in Taipei,
+# so the session presented a contradictory fingerprint (zh-CN locale + UTC tz +
+# Taipei IP). Upstream aligns timezone_id to the proxy's real geolocation
+# (outlook_controller.py --timezone={tz}). Mismatched tz/locale vs egress is a
+# classic Microsoft anti-abuse risk signal that upgrades the shield from the
+# solvable press-and-hold (iframe[title="验证质询"]) to the heavy FunCaptcha
+# (iframe#enforcementFrame). This profile forces Asia/Taipei + Taipei geo to
+# match the egress, keeping zh-CN locale, to test whether the same Taipei IP
+# then shows the hold shield instead of enforcement.
+#
+# Usage (gated — explicit operator authorization required):
+#   GROK_REGISTER_OUTLOOK_LIVE=1 \
+#   .venv/bin/python -m register_core run \
+#     --profile profiles/outlook-live-tzmatch.yaml -n 1 --egress core
+apiVersion: register.v1
+kind: RegisterProfile
+metadata:
+  name: outlook-live-tzmatch
+  description: Outlook — timezone aligned to Taipei egress (hold-shield hypothesis)
+
+spec:
+  provider:
+    name: outlook
+    options:
+      bind_recovery_email: false
+      captcha_strategy: 2
+      headless: false
+      timezone_id: Asia/Taipei
+      latitude: 25.0531
+      longitude: 121.5264
+
+  count: 1
+
+  strategy:
+    fail_fast: true
+    fail_fast_kinds:
+      - provider
+      - fatal
+      - proxy
+      - verify
+    egress:
+      mode: core

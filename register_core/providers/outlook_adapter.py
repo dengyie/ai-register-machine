@@ -33,6 +33,7 @@ from register_core.providers.outlook_browser import (
 from register_core.providers.outlook_captcha import OutlookCaptchaBridge
 from register_core.providers.outlook_oauth import OAuthStateMachine, OutlookOAuthConfig
 from register_core.providers.outlook_recovery import bind_recovery_email
+from register_core.providers.outlook_identity import resolve_egress_identity
 
 # How long the headed browser stays open waiting for the operator to solve the
 # captcha by hand. FunCaptcha is a few clicks; 10 minutes is generous without
@@ -279,7 +280,17 @@ class OutlookProvider:
         # from email_suffix and never borrows the pipeline's pooled mailbox.
         _ = email_source
 
-        config = OutlookBrowserConfig.from_options(self.config)
+        # Align the browser identity (locale/timezone_id/geolocation) with the
+        # actual registration egress by probing ipinfo.io /json *through this
+        # proxy*. Profile-authored identity keys always win; the resolver only
+        # fills in keys the profile left unset, so an explicit override beats the
+        # auto-derived value. The proxy URL is never carried outside this lookup.
+        resolved = await asyncio.to_thread(resolve_egress_identity, proxy)
+        merged_options = dict(self.config)
+        for key, value in (resolved or {}).items():
+            if key not in merged_options or merged_options.get(key) in (None, ""):
+                merged_options[key] = value
+        config = OutlookBrowserConfig.from_options(merged_options)
         flow = OutlookRegistrationFlow()
         captcha_bridge = self._captcha_bridge()
         oauth = OAuthStateMachine(config=OutlookOAuthConfig(client_id=config.client_id))
@@ -317,8 +328,14 @@ class OutlookProvider:
                         return self._failure(
                             "captcha", error, {"outlook_steps": ["register"]}
                         )
+                    shield = (
+                        "enforcementFrame (FunCaptcha)"
+                        if registration.fun_captcha_seen
+                        else 'hold (iframe[title="验证质询"])'
+                    )
                     print(
-                        "[outlook] captcha shown — solve it in the browser window; "
+                        f"[outlook] captcha shown — shield={shield}; "
+                        "solve it in the browser window; "
                         f"waiting up to {int(_MANUAL_HANDOFF_TIMEOUT_S)}s "
                         f"(account: {email})",
                         flush=True,
