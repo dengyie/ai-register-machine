@@ -225,13 +225,15 @@ _cli_lock_path: str = ""
 # Last mint fail taxonomy for SUMMARY_JSON (best-effort, not a product gate).
 _last_mint_fail_reason: list[str] = [""]
 _last_mint_fail_phase: list[str] = [""]
+_last_mint_fail_detail: list[str] = [""]
 _last_mint_fail_lock = threading.Lock()
 
 
-def _note_mint_fail(reason: str, phase: str = "") -> None:
+def _note_mint_fail(reason: str, phase: str = "", detail: str = "") -> None:
     with _last_mint_fail_lock:
         _last_mint_fail_reason[0] = (reason or "")[:200]
         _last_mint_fail_phase[0] = (phase or "")[:80]
+        _last_mint_fail_detail[0] = (detail or "")[:500]
 
 
 def _classify_mint_fail(result: dict[str, Any] | None) -> tuple[str, str]:
@@ -1945,7 +1947,10 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
             if result.get("token_ok") is not True:
                 _inc("mint_fail")
                 reason, phase = _classify_mint_fail(result)
-                _note_mint_fail(reason, phase)
+                detail = str(
+                    result.get("protocol_error") or result.get("error") or ""
+                )[:500]
+                _note_mint_fail(reason, phase, detail=detail)
                 result.setdefault("mint_fail_reason", reason)
                 if phase:
                     result.setdefault("mint_fail_phase", phase)
@@ -2574,6 +2579,7 @@ def main() -> int:
             # Last mint write failure taxonomy (observability; empty on clean success).
             "mint_fail_reason": _last_mint_fail_reason[0] if s.get("mint_fail") else "",
             "mint_fail_phase": _last_mint_fail_phase[0] if s.get("mint_fail") else "",
+            "mint_fail_detail": _last_mint_fail_detail[0] if s.get("mint_fail") else "",
         }
         print(
             "SUMMARY_JSON "

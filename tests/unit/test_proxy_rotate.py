@@ -375,6 +375,51 @@ def test_clash_force_true_advances_even_on_first_call() -> None:
     print("PASS clash force=True advances on first call")
 
 
+def test_clash_advance_on_start_flag_advances() -> None:
+    """opt-in proxy_rotate_advance_on_start=True must advance on the FIRST call
+    (skip on_start_keep_current / pin_current_on_start) so count=1 one-shot runs
+    get a fresh exit IP. Default (flag unset/false) keeps current — batch contract."""
+    rot = pr.ProxyRotator()
+    rot.configure(
+        {
+            "proxy_rotate_mode": "clash",
+            "proxy_rotate_every": 1,
+            "proxy_rotate_on_start": True,
+            "clash_api": "unix:///tmp/fake.sock",
+            "clash_proxy_group": "🎯Grok注册",
+            "clash_donor_group": "宝可梦",
+            "clash_restore_on_exit": True,
+        }
+    )
+    rot.clash_setup_done = True
+    calls: list[str] = []
+    current = {"now": "GVPS-TUIC-googlevps"}
+
+    def fake_list_nodes(api, group, **k):
+        return (
+            ["GVPS-TUIC-googlevps", "GVPS-AnyTLS-googlevps"],
+            current["now"],
+            {},
+        )
+
+    def fake_switch(api, group, node, **k):
+        calls.append(node)
+        current["now"] = node
+
+    with patch.object(pr, "clash_list_nodes", side_effect=fake_list_nodes):
+        with patch.object(pr, "clash_switch_node", side_effect=fake_switch):
+            r0 = rot.maybe_rotate(log=None, config={"proxy_rotate_advance_on_start": True})
+            assert r0.get("rotated") is True, r0
+            assert r0.get("node") == "GVPS-AnyTLS-googlevps", r0
+            assert calls == ["GVPS-AnyTLS-googlevps"]
+            # second call (_started already True) continues advancing
+            r1 = rot.maybe_rotate(log=None, config={"proxy_rotate_advance_on_start": True})
+            assert r1.get("rotated") is True, r1
+            assert r1.get("node") == "GVPS-TUIC-googlevps", r1
+            assert calls[-1] == "GVPS-TUIC-googlevps"
+    print("PASS clash advance_on_start=True advances on first call")
+
+
 def main() -> int:
     test_parse_proxy_list()
     test_parse_domain_list()
@@ -388,6 +433,7 @@ def main() -> int:
     test_clash_on_start_keeps_current_node()
     test_clash_pin_node_from_config_on_start()
     test_clash_force_true_advances_even_on_first_call()
+    test_clash_advance_on_start_flag_advances()
     print("\nALL PASS (proxy_rotate)")
     return 0
 

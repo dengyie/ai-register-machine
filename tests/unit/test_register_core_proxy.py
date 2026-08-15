@@ -42,6 +42,12 @@ _ENV_KEYS = (
     "CLASH_PROXY",
     "CLASH_API",
     "CLASH_CONTROLLER",
+    "CLASH_SECRET",
+    "CLASH_GROUP",
+    "CLASH_PROXY_GROUP",
+    "CLASH_CONFIG_PATH",
+    "CLASH_DOMAINS",
+    "CLASH_RULE_DOMAINS",
     "REGISTER_CORE_AUTOSTART",
     "USE_CLASH",
 )
@@ -161,6 +167,37 @@ class TestRotationConfig(unittest.TestCase):
         self.assertEqual(cfg["egress_source"], "clash")
         self.assertIn("7897", cfg.get("proxy") or "")
         self.assertFalse(cfg.get("core_pool"))
+
+    def test_clash_env_passes_api_group_config_path(self) -> None:
+        os.environ["CLASH_API"] = "http://127.0.0.1:9090"
+        os.environ["CLASH_SECRET"] = "sekrit"
+        os.environ["CLASH_GROUP"] = "🎯Grok注册"
+        os.environ["CLASH_CONFIG_PATH"] = "/personal/clash/config.yaml"
+        cfg = core_proxy.rotation_config_from_env_and_extra({"egress": "clash"})
+        self.assertEqual(cfg["clash_api"], "http://127.0.0.1:9090")
+        self.assertEqual(cfg["clash_secret"], "sekrit")
+        self.assertEqual(cfg["clash_proxy_group"], "🎯Grok注册")
+        # pxed standalone mihomo: rotator must read live config, not macOS Verge path
+        self.assertEqual(cfg["clash_config_path"], "/personal/clash/config.yaml")
+
+    def test_clash_config_path_absent_by_default(self) -> None:
+        cfg = core_proxy.rotation_config_from_env_and_extra({"egress": "clash"})
+        # not set -> key dropped (None filtered) so rotator keeps its default
+        self.assertNotIn("clash_config_path", cfg)
+
+    def test_clash_advance_on_start_env_parsed(self) -> None:
+        os.environ["PROXY_ROTATE_ADVANCE_ON_START"] = "true"
+        try:
+            cfg = core_proxy.rotation_config_from_env_and_extra({"egress": "clash"})
+            self.assertIs(cfg["proxy_rotate_advance_on_start"], True)
+        finally:
+            os.environ.pop("PROXY_ROTATE_ADVANCE_ON_START", None)
+
+    def test_clash_advance_on_start_false_by_default(self) -> None:
+        os.environ.pop("PROXY_ROTATE_ADVANCE_ON_START", None)
+        cfg = core_proxy.rotation_config_from_env_and_extra({"egress": "clash"})
+        # key always present (bool False kept through None filter), default False
+        self.assertIs(cfg["proxy_rotate_advance_on_start"], False)
 
     def test_egress_direct_clears_proxy(self) -> None:
         os.environ["CHATGPT_PROXY"] = "http://should-not-use:1"

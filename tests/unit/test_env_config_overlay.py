@@ -61,5 +61,30 @@ def test_apply_env_config_overrides() -> None:
         os.environ.pop("CPA_AUTH_PRIORITY", None)
 
 
+def test_env_overlay_advance_on_start_and_cpa_mint() -> None:
+    m = _load()
+    if m is None:
+        src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+        assert "PROXY_ROTATE_ADVANCE_ON_START" in src
+        assert "CPA_PREFER_PROTOCOL" in src
+        assert "CPA_MINT_TIMEOUT_SEC" in src
+        print("PASS env overlay advance_on_start/cpa_mint (source contract; import skipped)")
+        return
+    try:
+        os.environ["PROXY_ROTATE_ADVANCE_ON_START"] = "true"
+        os.environ["CPA_PREFER_PROTOCOL"] = "true"
+        os.environ["CPA_MINT_TIMEOUT_SEC"] = "120"
+        out = m.apply_env_config_overrides({})
+        assert out["proxy_rotate_advance_on_start"] is True
+        assert out["cpa_prefer_protocol"] is True
+        assert out["cpa_mint_timeout_sec"] == 120
+        print("PASS env overlay advance_on_start/cpa_mint")
+    finally:
+        os.environ.pop("PROXY_ROTATE_ADVANCE_ON_START", None)
+        os.environ.pop("CPA_PREFER_PROTOCOL", None)
+        os.environ.pop("CPA_MINT_TIMEOUT_SEC", None)
+
+
 if __name__ == "__main__":
     test_apply_env_config_overrides()
+    test_env_overlay_advance_on_start_and_cpa_mint()

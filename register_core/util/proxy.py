@@ -245,12 +245,23 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
     else:
         on_start = str(on_start_raw).strip().lower() in {"1", "true", "yes", "on"}
 
+    # Opt-in: process's FIRST rotate call advances to the next pool node (new IP)
+    # instead of on_start_keep_current. count=1 one-shot runs get a fresh egress.
+    advance_raw = extra.get("proxy_rotate_advance_on_start")
+    if advance_raw is None:
+        advance_raw = _env_first("PROXY_ROTATE_ADVANCE_ON_START", default="")
+    if isinstance(advance_raw, bool):
+        advance_on_start = advance_raw
+    else:
+        advance_on_start = str(advance_raw).strip().lower() in {"1", "true", "yes", "on"}
+
     cfg: dict[str, Any] = {
         "egress_backend": backend,
         "egress_source": source,
         "proxy_rotate_mode": mode,
         "proxy_rotate_every": every,
         "proxy_rotate_on_start": on_start,
+        "proxy_rotate_advance_on_start": advance_on_start,
         "proxy_rotate_required": required,
         "proxy_list": proxy_list,
         "proxy": base_proxy,
@@ -269,6 +280,11 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
             or _env_first("CLASH_DOMAINS", "CLASH_RULE_DOMAINS")
             or None
         )
+        # pxed: standalone mihomo reads /personal/clash/config.yaml, not Clash
+        # Verge. Without this the rotator falls back to the macOS Verge path and
+        # ensure_clash_domain_group raises FileNotFoundError -> rotation silently
+        # degrades to a fixed egress (no per-registration IP change).
+        cfg["clash_config_path"] = _env_first("CLASH_CONFIG_PATH") or None
         if not cfg.get("proxy"):
             cfg["proxy"] = clash_proxy_url(extra)
         cfg = {k: v for k, v in cfg.items() if v is not None}

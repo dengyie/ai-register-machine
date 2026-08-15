@@ -80,6 +80,53 @@ def _is_cancelled_error(err: Exception | str | None) -> bool:
     return s == "cancelled" or s.startswith("cancelled")
 
 
+def _is_server_policy_error(err: str | Exception | None) -> bool:
+    """True when the token exchange was denied by the x.ai auth SERVER policy.
+
+    Device-code poll returns ``oauth2/token 400 invalid_grant: Access denied
+    [tax=server_policy]`` (oauth_device.py) whenever the server-side policy
+    refuses the account/client token exchange. It can never be resolved by
+    spending a 240s browser device phase — so mint must fast-fail and surface
+    it instead of burning the browser residual dead-end.
+    """
+    low = str(err or "").lower()
+    return (
+        "invalid_grant" in low
+        and ("access denied" in low or "server_policy" in low)
+    ) or "tax=server_policy" in low
+
+
+def _is_consent_dead_end_error(err: str | Exception | None) -> bool:
+    """True when the x.ai consent page itself is a non-retryable dead-end.
+
+    Next.js consent HTML missing/broken ``submitOAuth2Consent`` action id makes
+    the programmatic PKCE submit return HTTP 404 (structured code
+    ``consent_action_missing`` / ``consent_action_rejected``, retryable=False).
+    The browser residual walks that same broken consent page (device phase), so
+    spending browser_timeout_sec there is a dead end — mint must fast-fail and
+    surface it instead. Distinct from ``empty_sso`` (no cookie — interactive
+    browser login may still succeed) and transient network errors.
+
+    ``code`` is duck-typed (any object carrying ``.code``, e.g. a PKCEMintError
+    copy loaded via importlib spec in tests) — class identity must not matter.
+    """
+    code = str(getattr(err, "code", "") or "").strip().lower()
+    if code in {"consent_action_missing", "consent_action_rejected"}:
+        return True
+    s = (str(err) if err is not None else "").lower()
+    if not s:
+        return False
+    needles = (
+        "server action not found",
+        "consent html missing",
+        "submitoauth2consent",
+        "action id",
+        "action_id",
+        "stale hardcoded fallback",
+    )
+    return any(n in s for n in needles)
+
+
 def _should_stamp_protocol_error(mint_method: str) -> bool:
     """Stamp prior PKCE/device failure reason when residual path produced tokens.
 
@@ -439,6 +486,36 @@ def mint_and_export(
                 mint_method="pkce",
                 protocol_err=protocol_err,
             )
+        # Server-policy denial or a broken consent page can never be fixed by a
+        # browser device phase — fast-fail now instead of burning
+        # browser_timeout_sec on a dead-end (pxed live: submitOAuth2Consent
+        # HTTP 404 code=consent_action_missing, retryable=False).
+        if protocol_err and (
+            _is_server_policy_error(protocol_err) or _is_consent_dead_end_error(protocol_err)
+        ):
+            label = (
+                "server_policy"
+                if _is_server_policy_error(protocol_err)
+                else "consent_dead_end"
+            )
+            log(
+                f"mint fast-fail ({label}) — skip browser residual: "
+                f"{str(protocol_err)[:300]}"
+            )
+            return {
+                "ok": False,
+                "email": email,
+                "error": f"{label}: {protocol_err[:400]}",
+                "protocol_error": str(protocol_err)[:500],
+                "mint_method": "protocol_device"
+                if (
+                    prefer_protocol
+                    and sso_val
+                    and (protocol_flow or "pkce").strip().lower() == "pkce"
+                    and protocol_err
+                )
+                else ("protocol" if protocol_err else "browser"),
+            }
         if not password:
             return {
                 "ok": False,

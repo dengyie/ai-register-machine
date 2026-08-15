@@ -90,6 +90,8 @@
   "proxy_rotate_every": 1,
   "// proxy_rotate_on_start": "首次注册即切节点：list→池[0]；clash 有 clash_pin_node/GROK_NODE 时钉到该节点（不 advance 到 next），无 pin 则 claim 当前。false=沿用当前。",
   "proxy_rotate_on_start": true,
+  "// proxy_rotate_advance_on_start": "true=进程首个 rotate 调用直接推进到池内下一个节点（新 IP），绕过 on_start_keep_current / pin；默认 false（批处理/单测契约）。env: PROXY_ROTATE_ADVANCE_ON_START",
+  "proxy_rotate_advance_on_start": false,
   "// proxy_rotate_required": "true=轮换失败即停止整批（不空转）；false=沿用当前继续。",
   "proxy_rotate_required": false,
   "// proxy_list": "list 模式代理池：逗号/分号/换行分隔，或 .txt/.list 文件路径。带认证 http://user:pass@host:port 自动走 LocalAuthProxyBridge。多账号批量优先此池（自控出口）。",

@@ -1058,7 +1058,12 @@ class ProxyRotator:
         # First due rotate (rotate_on_start): claim current / pin — do NOT advance off
         # pre-pinned GROK_NODE (smoke bug: TUIC → AnyTLS on worker start).
         # force_advance (fail-fast path switch): always leave current node.
-        if not self._started and not force_advance:
+        # advance_on_start (opt-in): one-shot runs want a FRESH exit IP — skip the
+        # keep-current/pin branch and advance straight to the next healthy node.
+        advance_on_start = bool(cfg and cfg.get("proxy_rotate_advance_on_start"))
+        if not self._started and advance_on_start and not force_advance:
+            _log(log, f"[*] advance_on_start: 首调用推进到下一节点(新 IP) pool={len(nodes)}")
+        if not self._started and not force_advance and not advance_on_start:
             pin = self.clash_pin_node
             if pin and pin in nodes and pin != now:
                 clash_switch_node(

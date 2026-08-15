@@ -196,5 +196,165 @@ class TestXvfbCleanup(unittest.TestCase):
         self.assertIn("mint_fail_reason", src)
 
 
+class TestServerPolicyFastFail(unittest.TestCase):
+    """mint fast-fail: server-policy token denial must skip browser residual."""
+
+    def test_is_server_policy_error(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(ROOT))
+        from cpa_xai.mint import _is_server_policy_error
+
+        # server-policy matches
+        self.assertTrue(
+            _is_server_policy_error(
+                "device auth token error: invalid_grant: Access denied [tax=server_policy]"
+            )
+        )
+        self.assertTrue(
+            _is_server_policy_error(
+                "token poll: device auth token error: invalid_grant: server_policy deny"
+            )
+        )
+        self.assertTrue(
+            _is_server_policy_error("something with tax=server_policy")
+        )
+        # non-matches
+        self.assertFalse(_is_server_policy_error("browser confirm timeout phase=device"))
+        self.assertFalse(_is_server_policy_error("device_click_stall"))
+        self.assertFalse(_is_server_policy_error(""))
+        self.assertFalse(_is_server_policy_error(None))
+
+    def test_mint_skip_browser_on_server_policy(self) -> None:
+        import sys
+        import tempfile
+
+        sys.path.insert(0, str(ROOT))
+        from unittest import mock
+
+        from cpa_xai.mint import mint_and_export
+        from cpa_xai.pkce_mint import PKCEMintError
+        from cpa_xai.protocol_mint import ProtocolMintError
+
+        auth_dir = tempfile.mkdtemp(prefix="mint_test_")
+        browser_mock = mock.MagicMock()
+
+        pkce_err = "consent: empty SPA shell"
+        device_err = (
+            "device auth token error: invalid_grant: Access denied [tax=server_policy]"
+        )
+
+        with mock.patch.multiple(
+            "cpa_xai.mint",
+            mint_with_sso_pkce=mock.MagicMock(side_effect=PKCEMintError(pkce_err, retryable=False)),
+            mint_with_sso_protocol=mock.MagicMock(
+                side_effect=ProtocolMintError(device_err)
+            ),
+            mint_with_browser=browser_mock,
+        ):
+            result = mint_and_export(
+                email="test@example.com",
+                password="dummy",
+                auth_dir=auth_dir,
+                sso="valid_sso_token",
+                prefer_protocol=True,
+                allow_device_flow_fallback=True,
+                protocol_flow="pkce",
+            )
+
+        self.assertIs(result.get("ok"), False)
+        self.assertIn("invalid_grant", str(result.get("protocol_error") or ""))
+        self.assertIn("server_policy", str(result.get("error") or ""))
+        # browser must NOT be called — fast-fail skips the 240s dead-end
+        browser_mock.assert_not_called()
+
+
+class TestConsentDeadEndFastFail(unittest.TestCase):
+    """mint fast-fail: broken x.ai consent page (HTTP 404) must skip browser residual."""
+
+    def test_is_consent_dead_end_error(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(ROOT))
+        from cpa_xai.mint import _is_consent_dead_end_error
+        from cpa_xai.pkce_mint import PKCEMintError
+
+        # structured code → match
+        self.assertTrue(
+            _is_consent_dead_end_error(
+                PKCEMintError("submit failed", code="consent_action_missing", retryable=False)
+            )
+        )
+        self.assertTrue(
+            _is_consent_dead_end_error(
+                PKCEMintError("submit failed", code="consent_action_rejected", retryable=False)
+            )
+        )
+        # string needles (protocol_err is stringified before fast-fail block)
+        self.assertTrue(
+            _is_consent_dead_end_error(
+                "submitOAuth2Consent failed HTTP 404: Server action not found "
+                "(consent HTML missing submitOAuth2Consent action id; "
+                "stale hardcoded fallback rejected by Next.js)"
+            )
+        )
+        self.assertTrue(_is_consent_dead_end_error("no submitOAuth2Consent action_id in consent html"))
+        # non-matches: empty_sso / cancelled / server-policy / unrelated
+        self.assertFalse(_is_consent_dead_end_error(PKCEMintError("no sso", code="empty_sso")))
+        self.assertFalse(_is_consent_dead_end_error(PKCEMintError("abort", code="cancelled")))
+        self.assertFalse(
+            _is_consent_dead_end_error(
+                "device auth token error: invalid_grant: Access denied [tax=server_policy]"
+            )
+        )
+        self.assertFalse(_is_consent_dead_end_error(""))
+        self.assertFalse(_is_consent_dead_end_error(None))
+
+    def test_mint_skip_browser_on_consent_dead_end(self) -> None:
+        import sys
+        import tempfile
+
+        sys.path.insert(0, str(ROOT))
+        from unittest import mock
+
+        from cpa_xai.mint import mint_and_export
+        from cpa_xai.pkce_mint import PKCEMintError
+
+        auth_dir = tempfile.mkdtemp(prefix="mint_test_")
+        browser_mock = mock.MagicMock()
+
+        consent_err = (
+            "submitOAuth2Consent failed HTTP 404: Server action not found "
+            "(consent HTML missing submitOAuth2Consent action id; "
+            "stale hardcoded fallback rejected by Next.js)"
+        )
+
+        with mock.patch.multiple(
+            "cpa_xai.mint",
+            mint_with_sso_pkce=mock.MagicMock(
+                side_effect=PKCEMintError(
+                    consent_err, code="consent_action_missing", retryable=False
+                )
+            ),
+            mint_with_browser=browser_mock,
+        ):
+            result = mint_and_export(
+                email="test@example.com",
+                password="dummy",
+                auth_dir=auth_dir,
+                sso="valid_sso_token",
+                prefer_protocol=True,
+                allow_device_flow_fallback=False,  # pxed config: no device residual
+                protocol_flow="pkce",
+            )
+
+        self.assertIs(result.get("ok"), False)
+        # protocol_error carries the stringified PKCE error (message, not code)
+        self.assertIn("submitOAuth2Consent", str(result.get("protocol_error") or ""))
+        self.assertIn("consent_dead_end", str(result.get("error") or ""))
+        # browser must NOT be called — fast-fail skips the broken-consent dead-end
+        browser_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
