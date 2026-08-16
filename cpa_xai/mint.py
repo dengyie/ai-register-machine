@@ -9,8 +9,11 @@ from .accounts import normalize_sso_cookie
 from .browser_confirm import mint_with_browser
 from .pkce_mint import PKCEMintError, mint_with_sso_pkce
 from .probe import (
+    MODELS_MISSING_ERROR,
+    MODELS_MISSING_REASON,
     apply_chat_probe_to_result,
     build_probe_transport,
+    pick_chat_probe_model,
     probe_chat_with_retries,
     probe_models,
     resolve_gate_probe_policy,
@@ -670,11 +673,16 @@ def mint_and_export(
                 )
             else:
                 result["ok"] = False
-                result["error"] = "token ok but grok-4.5 not listed"
+                result["error"] = MODELS_MISSING_ERROR
                 result["chat_ok"] = False
                 result["usable"] = False
-                result["fail_reason"] = "models_missing_grok_45"
+                result["fail_reason"] = MODELS_MISSING_REASON
         elif probe_chat:
+            chat_model = pick_chat_probe_model(pr.get("model_ids") or [])
+            log(
+                f"probe chat model: {chat_model} "
+                f"(ids={pr.get('model_ids') or []})"
+            )
             ch = probe_chat_with_retries(
                 tokens["access_token"],
                 base_url=base_url,
@@ -682,6 +690,7 @@ def mint_and_export(
                 max_attempts=3,
                 log=log,
                 transport=gate_transport,
+                model=chat_model,
             )
             apply_chat_probe_to_result(result, ch)
             if result.get("entitlement_denied"):

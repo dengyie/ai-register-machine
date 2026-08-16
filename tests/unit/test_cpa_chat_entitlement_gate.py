@@ -443,7 +443,7 @@ def test_finalize_probe_and_gate_behavior() -> None:
         "path": "/tmp/x-models.json",
         "email": "m@e.com",
         "token_ok": True,
-        "error": "token ok but grok-4.5 not listed",
+        "error": "token ok but no grok-4 model listed",
         "fail_reason": "models_missing_grok_45",
         "chat_ok": False,
     }
@@ -1411,7 +1411,7 @@ def test_mint_token_ok_honesty() -> None:
             )
             assert r_miss.get("token_ok") is True, r_miss
             assert r_miss.get("ok") is False, r_miss
-            assert "grok-4.5 not listed" in str(r_miss.get("error") or "")
+            assert "no grok-4 model listed" in str(r_miss.get("error") or "")
 
             # chat ok path → token_ok + product ok
             mint_mod.probe_models = fake_models_ok  # type: ignore[assignment]
@@ -1437,6 +1437,157 @@ def test_mint_token_ok_honesty() -> None:
         mint_mod.probe_models = orig["models"]  # type: ignore[assignment]
         mint_mod.probe_chat_with_retries = orig["chat"]  # type: ignore[assignment]
     print("PASS mint token_ok honesty")
+
+
+def test_is_grok4_model_and_pick_chat_probe_model() -> None:
+    """Grok-4 family gate: 4.5, 4.6, dated 4-x builds all count as listed."""
+    probe = _load("cpa_xai.probe_g4", ROOT / "cpa_xai" / "probe.py")
+    assert probe.is_grok4_model("grok-4.5") is True
+    assert probe.is_grok4_model("grok-4.6") is True
+    assert probe.is_grok4_model("grok-4-fast-2026") is True
+    assert probe.is_grok4_model("grok-4") is True
+    assert probe.is_grok4_model("grok-3") is False
+    assert probe.is_grok4_model("grok-5") is False
+    assert probe.is_grok4_model(123) is False
+    assert probe.is_grok4_model("") is False
+    assert probe.pick_chat_probe_model(["grok-3", "grok-4.6", "grok-4.5"]) == "grok-4.6"
+    assert probe.pick_chat_probe_model(["grok-4-fast"]) == "grok-4-fast"
+    assert probe.pick_chat_probe_model(["grok-3"]) == "grok-4.5"
+    assert probe.pick_chat_probe_model([]) == "grok-4.5"
+    assert probe.MODELS_MISSING_ERROR == "token ok but no grok-4 model listed"
+    print("PASS is_grok4_model + pick_chat_probe_model")
+
+
+def test_probe_models_accepts_grok4_family() -> None:
+    """probe_models gate passes on a grok-4.x listing, fails only outside family."""
+    probe = _load("cpa_xai.probe_models_g4", ROOT / "cpa_xai" / "probe.py")
+
+    class _Resp:
+        status = 200
+
+        def __init__(self, ids):  # noqa: ANN001
+            self._ids = ids
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):  # noqa: ANN002
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": i} for i in self._ids]}).encode("utf-8")
+
+    state: dict[str, object] = {"ids": ["grok-4.6"]}
+    orig_open = probe._opener
+
+    def fake_opener(_proxy):
+        return SimpleNamespace(
+            open=lambda _req, timeout: _Resp(state["ids"])  # noqa: ANN001
+        )
+
+    probe._opener = fake_opener  # type: ignore[assignment]
+    try:
+        r = probe.probe_models("tok", proxy=None)
+        assert r["has_grok_45"] is True, r
+        assert r["model_ids"] == ["grok-4.6"]
+
+        state["ids"] = ["grok-3", "grok-5"]
+        r2 = probe.probe_models("tok", proxy=None)
+        assert r2["has_grok_45"] is False, r2
+
+        state["ids"] = ["grok-4-fast-20260817"]
+        r3 = probe.probe_models("tok", proxy=None)
+        assert r3["has_grok_45"] is True, r3
+    finally:
+        probe._opener = orig_open
+    print("PASS probe_models accepts grok-4 family")
+
+
+def test_probe_chat_with_retries_plumbs_model() -> None:
+    """probe_chat_with_retries passes the chosen model into probe_mini_response."""
+    probe = _load("cpa_xai.probe_model_plumb", ROOT / "cpa_xai" / "probe.py")
+    seen: dict = {}
+
+    def fake_mini(_token, **kw):  # noqa: ANN001
+        seen.update(kw)
+        out = {"ok": True, "status": 200, "text": "MINT_OK"}
+        out.update(probe.classify_chat_probe(out))
+        return out
+
+    probe.probe_mini_response = fake_mini  # type: ignore[assignment]
+    ch = probe.probe_chat_with_retries("tok", max_attempts=1, model="grok-4.6")
+    assert ch.get("ok") is True
+    assert seen.get("model") == "grok-4.6"
+
+    seen.clear()
+    probe.probe_chat_with_retries("tok", max_attempts=1)
+    assert seen.get("model") == "grok-4.5"  # default preserved
+    print("PASS probe_chat_with_retries plumbs model")
+
+
+def test_mint_chat_probe_uses_listed_grok4_model() -> None:
+    """Grok-4.6-only account passes the gate AND chat probe targets grok-4.6."""
+    from cpa_xai import mint as mint_mod
+
+    calls: dict[str, str] = {}
+    orig = {
+        "pkce": mint_mod.mint_with_sso_pkce,
+        "models": mint_mod.probe_models,
+        "chat": mint_mod.probe_chat_with_retries,
+    }
+
+    def fake_pkce(**_kw):  # noqa: ANN001
+        return {
+            "access_token": "at-g46",
+            "refresh_token": "rt-g46",
+            "id_token": "id-g46",
+            "expires_in": 3600,
+            "mint_method": "pkce",
+        }
+
+    def fake_models_g46(_token, **_kw):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": 200,
+            "has_grok_45": True,
+            "model_ids": ["grok-4.6"],
+            "transport_mode": "direct",
+        }
+
+    def fake_chat(_token, **kw):  # noqa: ANN001
+        calls["model"] = kw.get("model") or "grok-4.5"
+        out = {"ok": True, "status": 200, "text": "MINT_OK"}
+        from cpa_xai.probe import classify_chat_probe
+
+        out.update(classify_chat_probe(out))
+        return out
+
+    mint_mod.mint_with_sso_pkce = fake_pkce  # type: ignore[assignment]
+    mint_mod.probe_models = fake_models_g46  # type: ignore[assignment]
+    mint_mod.probe_chat_with_retries = fake_chat  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            r = mint_mod.mint_and_export(
+                email="g46@ex.com",
+                password="pw",
+                auth_dir=td,
+                sso="sso-g46",
+                prefer_protocol=True,
+                protocol_flow="pkce",
+                allow_device_flow_fallback=False,
+                probe=True,
+                probe_chat=True,
+                probe_via="direct",
+                log=lambda _m: None,
+            )
+            assert r.get("ok") is True, r
+            assert r.get("chat_ok") is True, r
+            assert calls.get("model") == "grok-4.6", calls
+    finally:
+        mint_mod.mint_with_sso_pkce = orig["pkce"]  # type: ignore[assignment]
+        mint_mod.probe_models = orig["models"]  # type: ignore[assignment]
+        mint_mod.probe_chat_with_retries = orig["chat"]  # type: ignore[assignment]
+    print("PASS mint chat probe uses listed grok-4 model (grok-4.6)")
 
 
 def main() -> int:
@@ -1470,6 +1621,10 @@ def main() -> int:
     test_mint_protocol_only_fail_labels_protocol_device()
     test_inject_ignores_probe_via_cpa_ok_without_chat_ok()
     test_mint_token_ok_honesty()
+    test_is_grok4_model_and_pick_chat_probe_model()
+    test_probe_models_accepts_grok4_family()
+    test_probe_chat_with_retries_plumbs_model()
+    test_mint_chat_probe_uses_listed_grok4_model()
     print("\nALL PASS (cpa chat entitlement gate)")
     return 0
 

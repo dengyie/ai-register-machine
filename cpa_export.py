@@ -769,13 +769,15 @@ def finalize_probe_and_gate(
     """
     log = log_callback or (lambda _m: None)
     cfg = cfg or {}
+    from cpa_xai.probe import MODELS_MISSING_ERROR  # lazy: avoid import cycle
+
     probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=True)
     probe_chat_required = _config_bool(cfg.get("cpa_probe_chat_required"), default=True)
     # cpa_probe_required retained for config compatibility; never re-opens soft-pass.
     _ = _config_bool(cfg.get("cpa_probe_required"), default=False)
 
     err_s = str(result.get("error") or "")
-    is_models_only_miss = err_s.startswith("token ok but grok-4.5 not listed")
+    is_models_only_miss = err_s.startswith(MODELS_MISSING_ERROR)
     is_chat_fail = bool(
         result.get("entitlement_denied")
         or result.get("fail_reason")

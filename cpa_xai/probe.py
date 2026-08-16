@@ -318,6 +318,29 @@ def classify_chat_probe(result: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+# x.ai does not stabilize the Grok-4 model id across accounts/deploys: a live
+# account may list grok-4.5, grok-4.6, or a dated grok-4-<build>. The model
+# gate accepts any Grok-4 family member; the chat probe targets the listed one.
+MODELS_MISSING_ERROR = "token ok but no grok-4 model listed"
+MODELS_MISSING_REASON = "models_missing_grok_45"
+
+
+def is_grok4_model(model_id: Any) -> bool:
+    """True for any Grok-4 generation id (grok-4, grok-4.5, grok-4.6, grok-4-*)."""
+    if not isinstance(model_id, str):
+        return False
+    mid = model_id.strip().lower()
+    return mid == "grok-4" or mid.startswith("grok-4.") or mid.startswith("grok-4-")
+
+
+def pick_chat_probe_model(model_ids, fallback: str = "grok-4.5") -> str:
+    """Return the first listed Grok-4 member for the chat probe, else fallback."""
+    for i in model_ids or []:
+        if is_grok4_model(i):
+            return i
+    return fallback
+
+
 def probe_models(
     access_token: str,
     *,
@@ -349,7 +372,7 @@ def probe_models(
                 "ok": True,
                 "status": getattr(resp, "status", 200),
                 "model_ids": ids,
-                "has_grok_45": any(i == "grok-4.5" for i in ids),
+                "has_grok_45": any(is_grok4_model(i) for i in ids),
                 "transport_mode": mode,
             }
     except urllib.error.HTTPError as e:
@@ -385,6 +408,7 @@ def probe_chat_with_retries(
     sleep_fn: Any | None = None,
     log: Any | None = None,
     transport: Mapping[str, Any] | None = None,
+    model: str = "grok-4.5",
 ) -> dict[str, Any]:
     """Probe /v1/responses with classification + transient retries.
 
@@ -405,6 +429,7 @@ def probe_chat_with_retries(
             proxy=proxy,
             timeout=timeout,
             transport=transport,
+            model=model,
         )
         # probe_mini_response already attaches classification; re-apply for safety.
         cls = classify_chat_probe(ch)
@@ -449,9 +474,9 @@ def apply_chat_probe_to_result(
         result["chat_retryable"] = bool(
             models_status in (0, 408, 429, 500, 502, 503, 504)
         )
-        result["fail_reason"] = "models_missing_grok_45"
+        result["fail_reason"] = MODELS_MISSING_REASON
         if not result.get("error"):
-            result["error"] = "token ok but grok-4.5 not listed"
+            result["error"] = MODELS_MISSING_ERROR
         return result
 
     ch = ch or {}
@@ -497,6 +522,7 @@ def probe_mini_response(
     access_token: str,
     *,
     base_url: str = DEFAULT_BASE_URL,
+    model: str = "grok-4.5",
     timeout: float = 60.0,
     proxy: str | None = None,
     transport: Mapping[str, Any] | None = None,
@@ -512,7 +538,7 @@ def probe_mini_response(
     base = str(t.get("base_url") or base_url).rstrip("/")
     url = f"{base}/responses"
     payload = {
-        "model": "grok-4.5",
+        "model": model,
         "stream": False,
         "input": "Reply with exactly MINT_OK",
         "reasoning": {"effort": "low"},
