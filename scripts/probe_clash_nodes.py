@@ -290,6 +290,7 @@ def rewrite_config_groups(
     ]
 
     groups = data.get("proxy-groups") or []
+    healthy_set = set(healthy)
     for g in groups:
         name = g.get("name")
         if name not in REGISTER_GROUPS:
@@ -298,10 +299,16 @@ def rewrite_config_groups(
         if g.get("type") == "url-test":
             g["proxies"] = ordered[:] if ordered else old
         else:
-            new = ordered[:]
-            for m in ("♻️Grok优选", "DIRECT"):
-                if m not in new and m in old:
-                    new.append(m)
+            # select groups keep their curated member list (e.g. the 17-node
+            # per-exit-IP trim) — strip only leaves dead in every round and
+            # preserve order, so rotation still hits distinct exit IPs. Fall
+            # back to the full healthy pool only when nothing survives.
+            new = [m for m in old if m in healthy_set]
+            if not new:
+                new = ordered[:]
+                for m in ("♻️Grok优选", "DIRECT"):
+                    if m not in new and m in old:
+                        new.append(m)
             g["proxies"] = new if new else ["DIRECT"]
         print(f"  group {name}: {len(old)} -> {len(g['proxies'])}")
 
