@@ -19,7 +19,11 @@ AUTHORIZATION_ENDPOINT = f"{ISSUER}/oauth2/authorize"
 TOKEN_ENDPOINT = f"{ISSUER}/oauth2/token"
 ACCOUNTS_ORIGIN = "https://accounts.x.ai"
 CREATE_COOKIE_SETTER_RPC = f"{ACCOUNTS_ORIGIN}/auth_mgmt.AuthManagement/CreateCookieSetterLink"
-SUBMIT_OAUTH2_CONSENT_ACTION = "4005315a1d7e426de592990bb54bb37471f39dd6d2"
+# Updated 2026-08-16: x.ai rotated the consent server-action id AND moved it out
+# of the initial HTML into a client-rendered JS chunk (createServerReference in
+# module 827004). This value is the fast path; _extract_consent_action_id_from_bundles
+# self-heals the next rotation.
+SUBMIT_OAUTH2_CONSENT_ACTION = "40b2dd48cd9fcc160a2c686b89f9f3468af49c36ca"
 DEFAULT_REDIRECT_URI = "http://127.0.0.1:56121/callback"
 
 LogFn = Callable[[str], None]
@@ -235,6 +239,46 @@ def _extract_action_id_from_html(page_html: str | None) -> str | None:
     return None
 
 
+# createServerReference)("<id>",callServer,void 0,findSourceMapURL,"submitOAuth2Consent")
+# — the consent server action on the current (2026-08-16) CSR page. The action
+# NAME is the server reference's last argument, which disambiguates it from other
+# page actions (e.g. getSession ends with "getSession"). Same shape strategy #1
+# extracts from HTML, but the reference lives in a JS chunk, not the initial HTML.
+_SCRIPT_SRC_RE = re.compile(r'<script[^>]*src="([^"]+)"', re.I)
+_SERVER_REF_CONSENT_RE = re.compile(
+    r'createServerReference\)\("([a-f0-9]{40,44})"[^)]*submitOAuth2Consent'
+)
+
+
+def _extract_consent_action_id_from_bundles(
+    session: Any,
+    page_html: str | None,
+    timeout: float = 30.0,
+) -> str | None:
+    """Scan the consent page's referenced JS chunks for the server-action id.
+
+    x.ai's consent page is client-rendered (Turbopack): the submitOAuth2Consent
+    server-action reference lives in a JS chunk, not the initial HTML. We fetch
+    the chunks named by ``page_html`` <script src> and look for the reference
+    whose last argument is the ``submitOAuth2Consent`` action name, which
+    disambiguates it from other page actions (getSession etc.). Returns None
+    when no chunk yields it (bounded by ``timeout`` per request).
+    """
+    if not page_html or not session:
+        return None
+    for src in _SCRIPT_SRC_RE.findall(page_html):
+        url = urljoin(ACCOUNTS_ORIGIN, src)
+        try:
+            resp = session.get(url, timeout=timeout)
+            text = resp.text or ""
+        except Exception:
+            continue
+        m = _SERVER_REF_CONSENT_RE.search(text)
+        if m:
+            return m.group(1)
+    return None
+
+
 def _create_cookie_setter_link(session: Any, success_url: str) -> str:
     msg = grpcweb.encode_string(1, success_url) + grpcweb.encode_string(2, f"{ACCOUNTS_ORIGIN}/sign-in")
     resp = session.post(
@@ -345,38 +389,55 @@ def _submit_consent(
         if code:
             return code
 
-    # 404 "Server action not found": re-fetch consent HTML, re-extract action id, retry once.
-    # Root cause of smoke: empty/JS shell → stale hardcoded action id.
+    # 404 "Server action not found": the consent action id is missing/stale.
+    # Recovery order: (1) re-fetch HTML + re-extract (SSR-era inline ids),
+    # (2) bundle-scan the referenced JS chunks (current CSR page keeps the id
+    # only in a chunk: createServerReference)("<id>") single-arg form).
     not_found = resp.status_code == 404 or "server action not found" in text.lower()
     if not_found:
+        def _try_aid(candidate: str, url: str) -> str | None:
+            """POST consent with a candidate action id; return code or None."""
+            pu = url.split("?")[0] if "consent" in url else url
+            r = _post(pu, candidate)
+            c = _code_from_resp(r)
+            if c:
+                return c
+            if r.status_code >= 400:
+                r = _post(url, candidate)
+                c = _code_from_resp(r)
+                if c:
+                    return c
+            return None
+
+        refreshed_html = ""
+        tried = {action_id}
         try:
             refresh = session.get(page_url, allow_redirects=True, timeout=45)
             refreshed_html = refresh.text or ""
             refresh_url = str(getattr(refresh, "url", None) or page_url)
             new_aid = _extract_action_id_from_html(refreshed_html)
-            if new_aid and new_aid != action_id:
-                action_id = new_aid
-                used_hardcoded = False
-                page_url = refresh_url
-                post_url = page_url.split("?")[0] if "consent" in page_url else page_url
-                resp = _post(post_url, action_id)
-                text = resp.text or ""
-                code = _code_from_resp(resp)
+            if new_aid and new_aid not in tried:
+                tried.add(new_aid)
+                code = _try_aid(new_aid, refresh_url)
                 if code:
                     return code
-                if resp.status_code >= 400:
-                    resp = _post(page_url, action_id)
-                    text = resp.text or ""
-                    code = _code_from_resp(resp)
-                    if code:
-                        return code
         except Exception:
             pass
+
+        scan_html = refreshed_html or page_html
+        try:
+            bundle_aid = _extract_consent_action_id_from_bundles(session, scan_html)
+        except Exception:
+            bundle_aid = None
+        if bundle_aid and bundle_aid not in tried:
+            code = _try_aid(bundle_aid, page_url)
+            if code:
+                return code
 
         if used_hardcoded:
             raise PKCEMintError(
                 "submitOAuth2Consent failed HTTP 404: Server action not found "
-                "(consent HTML missing submitOAuth2Consent action id; "
+                "(consent HTML + JS bundles missing consent action id; "
                 "stale hardcoded fallback rejected by Next.js)",
                 code="consent_action_missing",
                 retryable=False,

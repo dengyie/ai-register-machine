@@ -146,9 +146,142 @@ def test_submit_consent_action_id_extraction() -> None:
     )
     assert extract(html_flight) == "ffffffffffffffffffffffffffffffffffffffffff"
 
-    # 6. constant still present as last-resort POST fallback only
-    assert len(pkce.SUBMIT_OAUTH2_CONSENT_ACTION) >= 40
+    # 6. fast-path constant = current known-good id (x.ai rotated it on
+    #    2026-08-16 and moved the reference into a JS chunk). Extraction +
+    #    bundle-scan recover FUTURE rotations without this value changing.
+    assert (
+        pkce.SUBMIT_OAUTH2_CONSENT_ACTION
+        == "40b2dd48cd9fcc160a2c686b89f9f3468af49c36ca"
+    ), "consent action id rotated by x.ai; refresh via bundle-scan evidence"
     print("PASS submit_consent_action_id_extraction")
+
+
+def test_bundle_scan_extracts_consent_server_ref() -> None:
+    """Consent-page JS chunks: the submitOAuth2Consent server reference (named in
+    the createServerReference call's last arg) is selected; other page actions
+    (e.g. getSession) are excluded even when they look structurally similar."""
+    pkce = _load("cpa_xai.pkce_mint", ROOT / "cpa_xai" / "pkce_mint.py")
+    extract = pkce._extract_consent_action_id_from_bundles
+    NEW_ID = "40b2dd48cd9fcc160a2c686b89f9f3468af49c36ca"
+    SESSION_ID = "0056df73d790f7426a8b29cf35e20cebc56e4c0fad"
+
+    consent_chunk = (
+        'let n=(0,a.createServerReference)("%s",'
+        'a.callServer,void 0,a.findSourceMapURL,"submitOAuth2Consent")' % NEW_ID
+    )
+    session_chunk = (
+        'let n=(0,r.createServerReference)("%s",'
+        'r.callServer,void 0,r.findSourceMapURL,"getSession")' % SESSION_ID
+    )
+
+    class FakeResp:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeSession:
+        def __init__(self, chunk_map: dict) -> None:
+            self.chunks = chunk_map
+
+        def get(self, url, **kw):  # type: ignore[no-untyped-def]
+            return FakeResp(self.chunks.get(url, ""))
+
+    def _session(*names: str):
+        return FakeSession(
+            {
+                "https://accounts.x.ai/_next/static/chunks/consent.js": consent_chunk,
+                "https://accounts.x.ai/_next/static/chunks/session.js": session_chunk,
+            }
+        )
+
+    # consent (single-arg) wins over getSession (multi-arg) regardless of order
+    page_both = (
+        '<script src="/_next/static/chunks/session.js"></script>'
+        '<script src="/_next/static/chunks/consent.js"></script>'
+    )
+    assert extract(_session(), page_both) == NEW_ID
+
+    # only getSession present -> None (multi-arg form excluded)
+    page_session_only = '<script src="/_next/static/chunks/session.js"></script>'
+    assert extract(_session(), page_session_only) is None
+
+    # no script srcs / empty page / no session -> None
+    assert extract(_session(), "<html>no scripts</html>") is None
+    assert extract(_session(), "") is None
+    assert extract(None, page_both) is None
+    print("PASS bundle_scan_extracts_single_arg_server_ref")
+
+
+def test_submit_consent_recovers_via_bundle_scan() -> None:
+    """404 on stale hardcoded id -> bundle-scan finds the CSR single-arg id and
+    completes the consent POST, returning the authorization code."""
+    pkce = _load("cpa_xai.pkce_mint", ROOT / "cpa_xai" / "pkce_mint.py")
+    STALE = "4005315a1d7e426de592990bb54bb37471f39dd6d2"
+    NEW = "40b2dd48cd9fcc160a2c686b89f9f3468af49c36ca"
+    CODE = "AUTHORIZATION_CODE_123"
+
+    page_html = (
+        '<html><head></head><body>'
+        '<form action="https://auth.x.ai/oauth2/authorize" method="POST">'
+        '<input type="hidden" name="principal_type" value="User"/>'
+        "</form>"
+        '<script src="/_next/static/chunks/consent.js"></script>'
+        "</body></html>"
+    )
+    consent_chunk = (
+        'let n=(0,a.createServerReference)("%s",'
+        'a.callServer,void 0,a.findSourceMapURL,"submitOAuth2Consent")' % NEW
+    )
+    calls = []
+
+    class FakeResp:
+        def __init__(self, status: int, text: str) -> None:
+            self.status_code = status
+            self.text = text
+            self.headers = {}
+
+    class FakeSession:
+        def get(self, url, **kw):  # type: ignore[no-untyped-def]
+            calls.append(("GET", url))
+            if "_next/static/chunks" in url:
+                return FakeResp(200, consent_chunk)
+            return FakeResp(200, page_html)  # consent page re-fetch
+
+        def post(self, url, **kw):  # type: ignore[no-untyped-def]
+            aid = (kw.get("headers") or {}).get("next-action")
+            calls.append(("POST", aid))
+            if aid == STALE:
+                return FakeResp(404, "Server action not found.")
+            if aid == NEW:
+                return FakeResp(
+                    200,
+                    '0:{"a":"$@1"}\n1:{"success":true,"action":"allow",'
+                    '"code":"%s"}' % CODE,
+                )
+            return FakeResp(404, "Server action not found.")
+
+    saved = pkce.SUBMIT_OAUTH2_CONSENT_ACTION
+    pkce.SUBMIT_OAUTH2_CONSENT_ACTION = STALE  # simulate a future rotation
+    try:
+        code = pkce._submit_consent(
+            FakeSession(),
+            page_url="https://accounts.x.ai/oauth2/consent?response_type=code&client_id=X",
+            page_html=page_html,
+            client_id="CLIENT-X",
+            redirect_uri="http://127.0.0.1:56121/callback",
+            scope="openid profile email",
+            state="STATE-1",
+            code_challenge="CHALLENGE",
+            nonce="NONCE-1",
+        )
+    finally:
+        pkce.SUBMIT_OAUTH2_CONSENT_ACTION = saved
+
+    assert code == CODE, code
+    post_ids = [aid for kind, aid in calls if kind == "POST"]
+    assert post_ids, calls
+    assert post_ids[0] == STALE, post_ids  # first attempt uses the stale constant
+    assert NEW in post_ids, post_ids  # bundle-scan recovery tried the new id
+    print("PASS submit_consent_recovers_via_bundle_scan")
 
 
 def test_code_from_url_state_mismatch_and_success() -> None:
@@ -206,6 +339,8 @@ if __name__ == "__main__":
     test_pkce_code_challenge_shape()
     test_authorization_url_params()
     test_submit_consent_action_id_extraction()
+    test_bundle_scan_extracts_consent_server_ref()
+    test_submit_consent_recovers_via_bundle_scan()
     test_code_from_url_state_mismatch_and_success()
     test_pkce_mint_error_structured_fields()
     print("\nALL PKCE UNIT TESTS PASSED")
