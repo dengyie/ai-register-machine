@@ -13,20 +13,26 @@
 
 ---
 
-在常见「多模型注册脚本合集」之上，做成 **可维护、可验收、可 Web 操作** 的工程化 monorepo：分层编排 + 多 Provider 生产链路 + **Web Control Plane**（配置 / 导入 / 批次启停与日志监控）。
-
-**对标开源常规脚本合集，我们的核心优势：**
-- **本轮真归因**：成功判定基于本轮实际产出（增量文件、时间戳与 offset 校验），杜绝拿历史账本尾巴或 exit 0 充数。
-- **Fail-Fast 熔断**：资源耗尽（如无可用别名/网络硬封）立即停批，避免无意义空转与封禁扩散。
-- **严格凭证与安全隔离**：产物 0600 权限、目录 0700、内置敏感数据脱敏与检测工具（`doctor_secrets.sh`），不上传任何私钥凭证。
-- **统一入口与 Web 控制面**：`./register.sh` 统一 CLI + FastAPI/Preact 现代化 Web UI，开箱即用。
+面向大模型 API / Console 账号的现代化自动化注册机与凭据管理系统，集 **多线程并发、独立邮箱收信、有头/无头对抗、智能 IP 池轮换、增量真归因验收、CPA 批量导入与可视化 Web 控制面** 于一体。
 
 ---
 
-## 支持的 Provider
+## 🔥 核心项目特性
 
-| Provider | 命令入口 | 核心协议 / 栈 | 产物契约与交付 |
-|----------|----------|---------------|----------------|
+- ⚡ **多线程并发注册引擎**：内置统一 `Pipeline` 线程池调度系统，支持灵活自定义并发规模（`--threads`），提供智能软失败容错继续与硬性资源耗尽的 Fail-Fast 熔断机制。
+- 📬 **内置邮箱管理系统与 API**：抽象统一 `EmailSource` 接口层，深度集成多渠道邮箱自动分配与邮件/验证码精准轮询（tinyhost API、Hotmail/Outlook OAuth2+REST/IMAP、DuckMail API、CloudMail 等），严格保证一号一箱。
+- 🌐 **有头 / 无头双模浏览器驱动**：支持 Playwright 与 DrissionPage 双内核，高效应对 Cloudflare Turnstile 等人机验证；支持浏览器会话复用、崩溃自动清理与调试隔离。
+- 🔄 **智能 IP 池与出口隔离轮换**：深度集成 Clash Verge 控制器，支持专用策略组与域名级精准分流（轮换时不干扰整机主代理）；同时支持自建 HTTP/SOCKS5 节点池（`proxy_list` / `nodes.json`）与实时健康度探针。
+- 🧪 **自动化批量测试与状态归因**：坚守「本轮真实增量交付」原则，杜绝使用历史账本尾巴充数；具备内置连通性探测（smoke probe）、`CONTRACT_EXIT` 验收契约及私钥凭据 `0600` 强隔离。
+- 🚀 **批量导入 CPA（CLIProxyAPI）**：支持从 SSO Cookie 自动进行 OIDC Device Flow 纯协议静默铸造，结合 Chat 模型探针进行 Healthy-Only 门禁筛选，并支持 SSH 远端自动热加载导入。
+- 🖥️ **可视化 Web 控制台（Control Plane）**：开箱即用的 FastAPI + Vite/Preact 现代化 Web 控制面，一站式管理配置热更、凭据导入、批次启停监控与实时日志流。
+
+---
+
+## 支持的 Provider 矩阵
+
+| Provider | 命令入口 | 核心协议 / 驱动栈 | 产物契约与交付 |
+|----------|----------|-------------------|----------------|
 | **typesafe.ai / jev** | `./register.sh typesafe [count] [threads]` | Python + requests + Stytch Magic-Link | `typesafe-*.json` (0600 API Key) |
 | **Grok / xAI** | `./register.sh grok [count] [threads]` | Python + DrissionPage + OIDC Device Flow | `accounts_cli.txt` (SSO) + `cpa_auths/` (OIDC) |
 | **Xiaomi MiMo** | `./register.sh mimo` | Node + Playwright | `mimo-*.json` (`sk-` API Key，OpenAI 兼容) |
@@ -47,14 +53,14 @@ cd ai-register-machine
 bash scripts/setup_simple.sh
 ```
 
-### 2. 核心命令
+### 2. 核心命令速查
 
 ```bash
 # 统一帮助入口
 ./register.sh help
 
-# typesafe.ai 注册（支持并发与软失败继续）
-./register.sh typesafe 1               # 单次注册
+# typesafe.ai 注册（支持并发多线程与软失败继续）
+./register.sh typesafe 1               # 单次注册测试
 ./register.sh typesafe 100 8           # 批量 100 个，8 线程并发
 ./register.sh smoke typesafe           # 控制台连通性探测
 
@@ -64,14 +70,14 @@ bash scripts/setup_simple.sh
 # Xiaomi MiMo TTS Key 注册
 ./register.sh mimo
 
-# 通用 register_core
+# 通用 register_core 分层编排
 ./register.sh core list
 ./register.sh core run -p typesafe -n 1
 ```
 
 ### 3. Web 控制台（Control Plane）
 
-项目内置基于 FastAPI + Vite/Preact 的 Web 控制面，支持可视化配置修改、凭证导入、批次启停和实时日志观察：
+项目内置基于 FastAPI + Vite/Preact 的轻量级 Web 控制面，提供可视化配置、批次启停和实时日志：
 
 ```bash
 export CONTROL_API_SESSION_SECRET="$(openssl rand -hex 32)"
@@ -81,14 +87,14 @@ export CONTROL_API_SESSION_SECRET="$(openssl rand -hex 32)"
 
 ---
 
-## 📊 最新实测（pxed 生产机真机测试）
+## 📊 最新实测（pxed 生产机真机实测）
 
 所有实测严格遵守**「只计算本轮增量」**原则，不统计存量数据：
 
 ### typesafe.ai 实测（1000 批次 · 2026-09-22）
 
 - **命令**：`./register.sh typesafe 1000`（8 线程，`--no-fail-fast`，超时 86400s）
-- **环境**：pxed 服务器，Clash mixed-port `127.0.0.1:7897`（本批次 `rotate=off`），tinyhost 独立邮箱，收信直连
+- **环境**：pxed 生产机，Clash mixed-port `127.0.0.1:7897`（本批次 `rotate=off`），tinyhost 独立邮箱，收信直连
 - **结果**：**976 成功 / 24 失败**，`CONTRACT_EXIT:0`，全部跑完无中途崩溃
 - **交付物**：新增 976 个全新 `0600` `typesafe-*.json`，目录权限 `0700`，未向 `accounts.jsonl` 追加明文，未注入 CPA
 - **失败归因**（全部为上游偶发软失败，不中断批次）：
@@ -96,38 +102,6 @@ export CONTROL_API_SESSION_SECRET="$(openssl rand -hex 32)"
   - `send_magic_link` (5 次)：上游接口 HTTP 500
   - `auth_callback` (2 次)：上游接口 HTTP 401
 - **同日验证**：首轮 100 次实测 97 成功 / 3 失败；修复 magic-link 优先级后次轮 100 次实测 98 成功 / 2 失败。
-
----
-
-## 🏗️ 架构分层
-
-依据生产级设计，解耦各个阶段：
-
-```text
-               ┌───────────────────────────────┐
-               │    Unified CLI / Web UI       │
-               │   ./register.sh / Control API │
-               └──────────────┬────────────────┘
-                              │
-               ┌──────────────▼────────────────┐
-               │     register_core.pipeline    │
-               │  (并发调度 / Fail-Fast / 重试) │
-               └──────┬───────┬───────┬────────┘
-                      │       │       │
-       ┌──────────────┘       │       └──────────────┐
-       ▼                      ▼                      ▼
-┌──────────────┐      ┌──────────────┐       ┌──────────────┐
-│ EmailSource  │      │   Provider   │       │ Verify / Sink│
-│ (tinyhost /  │      │  (typesafe / │       │ (API Key校验/│
-│  hotmail /   │ ───► │  grok / mimo/│ ────► │ 0600 隔离落盘│
-│  duckmail)   │      │  outlook)    │       │ 绝不入账本)  │
-└──────────────┘      └──────────────┘       └──────────────┘
-```
-
-1. **EmailSource（`register_core/email`）**：支持独立邮箱分配与收码（tinyhost、hotmail REST/IMAP、duckmail 等），禁止别名滥用。
-2. **Provider 适配层（`register_core/providers`）**：协议逆向与会话流，严格输出结构化 `RegisterResult`。
-3. **安全落盘与验证（`register_core/sink` & `verify`）**：产物按产品独立归档，私钥字段严格脱敏，不污染公开账本。
-4. **出口策略（`proxy_rotate`）**：支持 Clash 域名隔离组轮换、自建 URL 代理池轮换及直连。
 
 ---
 
@@ -148,12 +122,10 @@ export CONTROL_API_SESSION_SECRET="$(openssl rand -hex 32)"
 
 ---
 
-## 🐧 社区与致谢
+## 🐧 社区致谢与参考
 
-- **[LINUX DO (linux.do)](https://linux.do/)**（🌟 **首位致谢对象**）：感谢 LINUX DO 社区全体佬友的智慧结晶与开源分享，为自动化工程与逆向探索提供了无可替代的灵感源泉。
-- **[ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register)**：启发了多模型注册架构思考。
-- **[Futureppo/typesafe_register](https://github.com/Futureppo/typesafe_register)**：typesafe 协议分析参考。
-- **[daimon3332/OutlookRegister](https://github.com/daimon3332/OutlookRegister)**：Outlook 注册协议参考。
+- **[LINUX DO (https://linux.do)](https://linux.do/)**（🌟 **首位致谢对象**）：特别感谢 LINUX DO 社区全体佬友的智慧结晶与开源分享，为自动化工程与逆向探索提供了无可替代的技术灵感。
+- **技术参考**：感谢社区开源项目 [ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register)、[Futureppo/typesafe_register](https://github.com/Futureppo/typesafe_register)、[daimon3332/OutlookRegister](https://github.com/daimon3332/OutlookRegister) 提供的架构与协议分析灵感。
 
 ---
 
