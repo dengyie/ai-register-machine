@@ -22,4 +22,8 @@ def get_verifier(name: str, **kwargs: Any) -> Verifier:
         from register_core.verify.chatgpt_token import ChatGPTTokenVerifier
 
         return ChatGPTTokenVerifier(**kwargs)
+    if key in ("typesafe", "jev", "typesafe-ai", "typesafe.ai", "typesafe_key"):
+        from register_core.verify.typesafe_key import TypesafeKeyVerifier
+
+        return TypesafeKeyVerifier(**kwargs)
     raise KeyError(f"unknown verifier: {name!r}")

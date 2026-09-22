@@ -138,6 +138,20 @@ class TestStrategyEngine(unittest.TestCase):
         self.assertTrue(stop)
         self.assertIn("registration_disallowed", reason)
 
+    def test_hard_kind_stops_even_when_engine_fail_fast_off(self) -> None:
+        eng = StrategyEngine(fail_fast=False, fail_fast_kinds=["fatal", "verify"])
+        stop, reason = eng.should_stop_on_result(
+            RegisterResult(ok=False, provider="typesafe", error="x", error_kind="fatal")
+        )
+        self.assertTrue(stop)
+        self.assertIn("fatal", reason)
+        soft, _ = eng.should_stop_on_result(
+            RegisterResult(
+                ok=False, provider="typesafe", error="timeout", error_kind="mail_miss"
+            )
+        )
+        self.assertFalse(soft)
+
     def test_on_result_burns_domain_and_ip(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = str(Path(td) / "s.json")

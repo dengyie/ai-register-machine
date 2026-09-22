@@ -271,6 +271,13 @@ def _public_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:
         "outlook_auth_path",
         "recovery_email",
         "bound",
+        "console_probe",
+        "deployment_id",
+        "deployment_mismatch",
+        "api_key_id",
+        "has_organization",
+        "user_id",
+        "organization_id",
     }
     out: dict[str, Any] = {}
     for k, v in artifacts.items():

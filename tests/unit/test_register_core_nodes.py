@@ -1090,6 +1090,14 @@ class TestManager(unittest.TestCase):
             ["https://auth.openai.com/"],
         )
         self.assertEqual(
+            resolve_probe_targets({"provider": "typesafe"}, env={}),
+            ["https://console.typesafe.ai/"],
+        )
+        self.assertEqual(
+            resolve_probe_targets({}, provider="jev", env={}),
+            ["https://console.typesafe.ai/"],
+        )
+        self.assertEqual(
             resolve_probe_targets(
                 {"provider": "grok", "probe_targets": "https://custom.example/"},
                 env={},

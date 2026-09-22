@@ -15,7 +15,7 @@ def resolve_mail_proxy(extra: dict[str, Any] | None = None) -> str:
 
     Priority:
       1. extra["mail_proxy"] / extra["email_proxy"]
-      2. CHATGPT_MAIL_PROXY / EMAIL_PROXY / MAIL_PROXY env
+      2. TYPESAFE_MAIL_PROXY / CHATGPT_MAIL_PROXY / EMAIL_PROXY / MAIL_PROXY env
     Never falls back to register egress (extra["proxy"], PROXY_LIST, etc.).
     """
     extra = extra if isinstance(extra, dict) else {}
@@ -23,7 +23,7 @@ def resolve_mail_proxy(extra: dict[str, Any] | None = None) -> str:
         v = str(extra.get(key) or "").strip()
         if v:
             return v
-    for env in ("CHATGPT_MAIL_PROXY", "EMAIL_PROXY", "MAIL_PROXY"):
+    for env in ("TYPESAFE_MAIL_PROXY", "CHATGPT_MAIL_PROXY", "EMAIL_PROXY", "MAIL_PROXY"):
         v = str(os.environ.get(env) or "").strip()
         if v:
             return v

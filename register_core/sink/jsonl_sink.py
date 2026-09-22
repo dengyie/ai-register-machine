@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import threading
 from pathlib import Path
 
 from register_core.contracts import RegisterResult
@@ -16,6 +17,7 @@ class JsonlSink:
         self.path = Path(path)
         self.public_only = public_only
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
 
     def write(self, result: RegisterResult) -> None:
         payload = result.to_public_dict() if self.public_only else result.to_sink_dict()
@@ -23,19 +25,20 @@ class JsonlSink:
         data = line.encode("utf-8")
         path = self.path
         flags = os.O_APPEND | os.O_WRONLY | os.O_CREAT
-        # Create with 0600 so umask cannot leave a world-readable secret file.
-        fd = os.open(str(path), flags, 0o600)
-        try:
+        with self._lock:
+            # Create with 0600 so umask cannot leave a world-readable secret file.
+            fd = os.open(str(path), flags, 0o600)
             try:
-                os.fchmod(fd, 0o600)
-            except OSError:
-                pass
-            with os.fdopen(fd, "ab") as f:
-                f.write(data)
-                fd = -1  # fdopen owns it
-        finally:
-            if fd >= 0:
                 try:
-                    os.close(fd)
+                    os.fchmod(fd, 0o600)
                 except OSError:
                     pass
+                with os.fdopen(fd, "ab") as f:
+                    f.write(data)
+                    fd = -1  # fdopen owns it
+            finally:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass

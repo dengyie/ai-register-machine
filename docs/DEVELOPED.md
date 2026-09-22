@@ -2,7 +2,7 @@
 
 本索引汇总**已在 main 落地**的功能开发，便于一眼看清「开发了什么」。每条附代表 commit；对应的设计文档（design spec / plan）已归档至 [`docs/archive/`](archive/)。
 
-> 生产现状：**双轨权威（有意）**——(1) CLI 单发：`./register.sh grok|mimo|chatgpt` 经 `register_core` Pipeline（attribution / strategy burn-cool / 节点 preflight / 代理轮换 / 验证器 / JSONL sink）；Grok/MiMo adapter 仍 shell-out legacy（`GROK_LEGACY`/`MIMO_LEGACY`/`CHATGPT_LEGACY=1` 回滚）。(2) **Grok 大批量**：`scripts/launch_batch_supervisor.sh` → `register_cli.py` 并发 chunk（**不经** register_core 串行外壳），disk-first：`CPA_EXPORT=true` / `PROBE_CHAT=false` / `REMOTE_INJECT=false`，成功=complete auth 落盘。CPA inject 独立链路，不绑产号成功。in-process 重写（B）未启动。下表「归档 spec/plan」指设计稿，不代表代码落点。
+> 生产现状：**双轨权威（有意）**——(1) CLI 单发：`./register.sh grok|mimo|chatgpt|typesafe` 经 `register_core` Pipeline（attribution / strategy burn-cool / 节点 preflight / 代理轮换 / 验证器 / JSONL sink）；Grok/MiMo adapter 仍 shell-out legacy（`GROK_LEGACY`/`MIMO_LEGACY`/`CHATGPT_LEGACY=1` 回滚）。(2) **Grok 大批量**：`scripts/launch_batch_supervisor.sh` → `register_cli.py` 并发 chunk（**不经** register_core 串行外壳），disk-first：`CPA_EXPORT=true` / `PROBE_CHAT=false` / `REMOTE_INJECT=false`，成功=complete auth 落盘。CPA inject 独立链路，不绑产号成功。in-process 重写（B）未启动。下表「归档 spec/plan」指设计稿，不代表代码落点。
 
 | 功能 | 交付内容 | 代表 commit | 归档 spec/plan |
 |---|---|---|---|

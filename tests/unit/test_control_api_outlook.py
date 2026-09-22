@@ -17,6 +17,11 @@ def test_start_run_accepts_outlook():
     assert request.product == "outlook"
 
 
+def test_start_run_accepts_typesafe():
+    request = StartRunRequest(product="typesafe", target=1, kind="register_sh")
+    assert request.product == "typesafe"
+
+
 def test_start_run_rejects_unknown_product():
     with pytest.raises(ValidationError):
         StartRunRequest(product="xai")

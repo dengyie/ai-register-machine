@@ -18,6 +18,10 @@ DEFAULT_PROVIDER_PROBE_TARGETS: dict[str, tuple[str, ...]] = {
     "mimo": ("https://api.xiaomimimo.com/",),
     "xiaomi": ("https://api.xiaomimimo.com/",),
     "mimo-tts": ("https://api.xiaomimimo.com/",),
+    "typesafe": ("https://console.typesafe.ai/",),
+    "jev": ("https://console.typesafe.ai/",),
+    "typesafe-ai": ("https://console.typesafe.ai/",),
+    "typesafe.ai": ("https://console.typesafe.ai/",),
 }
 
 _DISABLE_TOKENS = frozenset({"", "0", "none", "off", "false", "no", "-"})

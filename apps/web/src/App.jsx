@@ -88,7 +88,7 @@ export function App() {
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                grok / mimo / chatgpt
+                grok / mimo / chatgpt / typesafe
               </a>
             </div>
           </div>

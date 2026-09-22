@@ -13,14 +13,14 @@ Production-oriented multi-provider register monorepo. Inspired by:
 | **Usable** | One hub (`./register.sh`), one layered CLI (`python -m register_core`), web control plane |
 | **Honest** | Success = this-run delta / RESULT_JSON; never historical tail alone |
 | **Layered** | email / providers / verify / sink / pipeline contracts |
-| **Product-local stacks** | Grok Python+Drission; MiMo Node+Playwright; ChatGPT in-process curl_cffi+EmailSource |
+| **Product-local stacks** | Grok Python+Drission; MiMo Node+Playwright; ChatGPT in-process curl_cffi+EmailSource; typesafe in-process requests+EmailSource |
 | **Safe defaults** | gitignore secrets, sink 0600, public redact, no mass alias farm |
 
 ## Directory map
 
 ```text
 ai-register-machine/
-├── register.sh                 # hub: grok | mimo | chatgpt | core | smoke | help
+├── register.sh                 # hub: grok | mimo | chatgpt | typesafe | core | smoke | help
 ├── ARCHITECTURE.md             # this file (canonical layout)
 ├── Makefile                    # test / syntax / doctor / help
 ├── pyproject.toml              # uv + pytest
@@ -49,6 +49,7 @@ ai-register-machine/
 │   ├── _template/              # copy-me skeleton for a new product
 │   ├── mimo/                   # Xiaomi MiMo (Node/Playwright) — production
 │   ├── chatgpt/                # OpenAI platform protocol (curl_cffi + EmailSource)
+│   ├── typesafe/               # typesafe.ai / jev console (Stytch magic-link)
 │   └── grok/                   # Grok layout notes (runtime still root paths)
 ├── docs/
 │   ├── ADDING_PROVIDER.md

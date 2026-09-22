@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **typesafe.ai / jev console provider** (in-process): Stytch magic-link →
+  `/api/auth/callback` → `/api/api-keys`. Hub `./register.sh typesafe [count]`,
+  aliases `jev` / `typesafe-ai`. Default mailbox is tinyhost (full body).
+  Success = this-run `secret_kind=api_key`. Does **not** copy the original
+  512/256 farm defaults. No CPA inject. pxed smoke 2026-09-22: `./register.sh
+  typesafe 1` → `CONTRACT_EXIT:0` this-run `api_key` (rsync to `/data/grok-register`;
+  not GitHub CI — §7 only deploys SPA).
+- **typesafe probe-before-allocate**: GET+parse `console.typesafe.ai/login`
+  before tinyhost allocate (Clash preflight is skipped for `egress=clash`).
+  Hub `./register.sh smoke typesafe` is probe-only; `TYPESAFE_SMOKE_LIVE=1`
+  for n=1. Control-plane `StartRunRequest.product` accepts `typesafe`.
+
+### Changed
+
+- typesafe no longer appends full `api_key` to `accounts.jsonl`. Deliverable is
+  this-run `0600` `typesafe-*.json` under a `0700` output dir. Session parse
+  failures attach a short `$ACTION` HTML snippet.
+- typesafe console probe now classifies 5xx as `network` / 4xx as `session`
+  (same as login GET) and forwards the parsed `$ACTION` into `register_one`,
+  so allocate is not followed by a second login GET unless magic-link POST
+  needs a refresh. Mailbox timeout stays `mail_miss`. Verifier `live=True`
+  is still shape-only (no spend). Magic-link extract parses query order.
+- typesafe batch (`./register.sh typesafe N` with N>1): continue on
+  `mail_miss`/`network` (hard kinds still stop), in-process workers default 8
+  capped at 32, unique `typesafe-*.json` names. Pipeline fan-out is only for
+  typesafe/chatgpt — grok `--threads` still belongs to the child runner.
+  pxed this-run 2026-09-22: `./register.sh typesafe 100` → `CONTRACT_EXIT:0`
+  ok=97 fail=3 (`mail_miss`×3) `stopped_reason=""`; 97 new `0600`
+  `typesafe-*.json`; no `accounts.jsonl` append; no CPA inject.
+- typesafe mail poll with `sender_hint=typesafe` returns the Stytch URL
+  before any OTP-shaped token in the same body. Mail-miss diagnostics come
+  from this attempt's `MailMissError`, not the shared EmailSource slot
+  (n=100 workers were overwriting each other's wait stats). Deployment drift
+  is logged once per process.
+- pxed this-run 2026-09-22 (after the mail-parse fix): `./register.sh typesafe
+  100` → `CONTRACT_EXIT:0` ok=98 fail=2 (`session` / send_magic_link HTTP 500).
+  Then `./register.sh typesafe 1000` (8 workers, `--no-fail-fast`,
+  `rotate=off`) → `CONTRACT_EXIT:0` ok=976 fail=24
+  (`mail_miss`×17, `session`×5, `oauth_callback`×2); 976 new `0600`
+  `typesafe-*.json`; no `accounts.jsonl` append; no CPA inject.
+- README acknowledges the [LINUX DO](https://linux.do/) community.
+
 ## [1.6.4] - 2026-07-16
 
 ### Added

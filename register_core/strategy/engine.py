@@ -153,8 +153,6 @@ class StrategyEngine:
     def should_stop_on_result(self, result: RegisterResult) -> tuple[bool, str]:
         if result.ok:
             return False, ""
-        if not self.fail_fast:
-            return False, ""
         kind = (result.error_kind or "").strip().lower()
         if kind in self.fail_fast_kinds:
             return True, f"strategy fail_fast kind={kind}"

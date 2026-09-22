@@ -243,7 +243,7 @@ export function RegForm({
           </Field>
           <Field label="product">
             <Select
-              options={["grok", "mimo", "chatgpt"]}
+              options={["grok", "mimo", "chatgpt", "typesafe"]}
               value={isSupervisor ? "grok" : v.product}
               disabled={isSupervisor}
               onChange={(val) => set({ product: val })}

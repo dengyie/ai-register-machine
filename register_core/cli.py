@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Unified layered register CLI — production entry for all providers.
 
-The three ./register.sh production entries (grok | mimo | chatgpt) all route
+The ./register.sh production entries (grok | mimo | chatgpt | typesafe) all route
 through this register_core Pipeline (migrate milestone A):
   grok    → run-register-core.sh → `python -m register_core run --profile ...`
   mimo    → `python -m register_core run --profile profiles/mimo-tinyhost...`
-  chatgpt → `python -m register_core run --profile profiles/chatgpt-tinyhost...`
+  chatgpt  → `python -m register_core run --profile profiles/chatgpt-tinyhost...`
+  typesafe → `python -m register_core run --profile profiles/typesafe-tinyhost...`
 
 Pipeline owns attribution, strategy burn/cool, verifiers, and JSONL sink for all
 three entries. Egress ownership is backend-dependent and declared in the profile
@@ -20,8 +21,8 @@ from CHATGPT_EMAIL_SOURCE → matching profile (cf default clash:7897; tinyhost/
 variants), with CHATGPT_* env overrides forwarded as register_core CLI flags.
 Grok/MiMo adapters still shell out to the legacy runners internally (register_cli.py
 / providers/mimo Node runner) as adapter targets + rollback
-(GROK_LEGACY / MIMO_LEGACY / CHATGPT_LEGACY=1). In-process providers (chatgpt)
-consume EmailSource directly.
+(GROK_LEGACY / MIMO_LEGACY / CHATGPT_LEGACY / TYPESAFE_LEGACY=1). In-process
+providers (chatgpt, typesafe) consume EmailSource directly.
 """
 
 from __future__ import annotations
@@ -68,10 +69,10 @@ def cmd_list(_: argparse.Namespace) -> int:
     print(
         "profile: python -m register_core run --profile profiles/<name>.yaml "
         "(register.v1; mailbox+decode+strategy). "
-        "Legacy flags still work. Hub: ./register.sh grok|mimo|chatgpt"
+        "Legacy flags still work. Hub: ./register.sh grok|mimo|chatgpt|typesafe"
     )
     print(
-        "note: chatgpt/mimo/grok all accept profile mailbox+decode "
+        "note: chatgpt/typesafe/mimo/grok all accept profile mailbox+decode "
         "(CompositeEmailSource → FIXED_EMAIL / OTP_HELPER inject for shell runners). "
         "strategy.burn + fail_fast_kinds are live via StrategyEngine."
     )
@@ -297,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider",
         "-p",
         default="",
-        help="grok | mimo | chatgpt (required unless --profile)",
+        help="grok | mimo | chatgpt | typesafe (required unless --profile)",
     )
     pr.add_argument(
         "--count",
@@ -312,6 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "legacy: provider=adapter-internal mail (required for grok/mimo). "
             "chatgpt: cloudflare|gmail_imap|tinyhost|duckmail|auto. "
+            "typesafe: tinyhost (magic-link needs full mail body). "
             "Prefer --profile for mailbox+decode split."
         ),
     )
@@ -323,7 +325,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue after failure (not recommended)",
     )
     pr.add_argument("--timeout", type=int, default=1200)
-    pr.add_argument("--threads", type=int, default=1, help="grok register threads")
+    pr.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="in-process workers for typesafe/chatgpt (capped at 32); grok child threads",
+    )
     pr.add_argument("--headless", type=int, choices=(0, 1), default=None)
     pr.add_argument(
         "--egress",

@@ -30,6 +30,9 @@ syntax:
 	bash -n providers/mimo/run-register.sh
 	bash -n providers/mimo/smoke.sh
 	bash -n providers/_template/run-register.sh
+	bash -n providers/typesafe/run-register.sh
+	bash -n providers/typesafe/smoke.sh
+	bash -n providers/chatgpt/run-register.sh
 	bash -n scripts/setup_simple.sh
 	bash -n scripts/doctor_secrets.sh
 	bash -n scripts/build_web_console.sh
@@ -38,8 +41,10 @@ syntax:
 	  register_core/providers/registry.py register_core/util/secrets.py \
 	  register_core/util/process.py register_core/verify/mimo_tts.py \
 	  register_core/verify/grok_chat.py providers/mimo/inject_cpa_openai.py \
-	  scripts/probe_clash_nodes.py mail_pool_probe.py
-
+	  scripts/probe_clash_nodes.py mail_pool_probe.py \
+	  register_core/providers/typesafe_adapter.py register_core/verify/typesafe_key.py \
+	  providers/typesafe/protocol/flow.py providers/typesafe/protocol/session.py \
+	  providers/typesafe/protocol/constants.py apps/control_api/schemas.py
 doctor:
 	bash scripts/doctor_secrets.sh || test $$? -eq 2
 

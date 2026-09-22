@@ -18,6 +18,7 @@ from register_core.decode.extract import (
     XAI_BODY_CODE_RE,
     _OPENAI_OTP_PATTERNS,
     extract_otp_code,
+    extract_typesafe_magic_link,
 )
 from register_core.errors import FailFastError, MailMissError
 
@@ -195,7 +196,20 @@ class TinyhostSource:
                 )
                 if hint and hint not in blob.lower():
                     continue
-                code = extract_otp_code(blob, subject=subject)
+                # typesafe.ai mail contains both a Stytch URL and short tokens
+                # that look like an xAI OTP. When the caller asked for typesafe,
+                # the magic link is the code; a hex/alnum hit must not win.
+                code = ""
+                if hint == "typesafe":
+                    parsed = extract_typesafe_magic_link(blob, subject=subject)
+                    if parsed:
+                        code = parsed["magic_link"]
+                if not code:
+                    code = extract_otp_code(blob, subject=subject)
+                if not code:
+                    parsed = extract_typesafe_magic_link(blob, subject=subject)
+                    if parsed:
+                        code = parsed["magic_link"]
                 if not code or code in used:
                     continue
                 diag.matched_at = time.time()

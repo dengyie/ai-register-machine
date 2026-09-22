@@ -201,6 +201,21 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(stats.ok, 0)
         self.assertTrue(stats.stopped_reason)
 
+    def test_threads_do_not_fanout_non_typesafe(self):
+        p = FakeProvider(
+            outcomes=[
+                RegisterResult(ok=True, provider="fake"),
+                RegisterResult(ok=True, provider="fake"),
+            ]
+        )
+        pipe = Pipeline(p, fail_fast=True, verifier=NoopVerifier())
+        extra = dict(self._OFFLINE_EXTRA)
+        extra["threads"] = 8
+        stats = pipe.run(2, extra=extra)
+        self.assertEqual(p.calls, 2)
+        self.assertEqual(stats.ok, 2)
+        self.assertEqual(pipe._worker_count(extra, 2), 1)
+
     def test_fatal_exception_stops(self):
         p = FakeProvider(raise_fatal_on=1)
         pipe = Pipeline(p, fail_fast=True)
@@ -784,6 +799,45 @@ a {{ color:#888888; }}
         from register_core.email.sources.tinyhost import extract_otp_code
 
         self.assertEqual(extract_otp_code(""), "")
+
+    def test_typesafe_hint_prefers_magic_link_over_otp_shaped_token(self):
+        """n=100: one mail_miss was 'magic link missing' after a 4s poll.
+
+        typesafe mail can contain both the Stytch URL and a short token that
+        extract_otp_code accepts. sender_hint=typesafe must return the URL.
+        """
+        from register_core.email.sources.tinyhost import TinyhostSource
+        from register_core.contracts import Mailbox
+
+        link = (
+            "https://login.typesafe.ai/v1/magic_links/redirect"
+            "?public_token=pub-test&stytch_token_type=magic_links&token=stytch-secret"
+        )
+        body = f"Your login code is AB1-CD2. Open {link} to continue. typesafe"
+        src = TinyhostSource()
+        mailbox = Mailbox(
+            address="u@example.com",
+            token="",
+            provider="tinyhost",
+            meta={"local": "u", "domain": "example.com"},
+        )
+
+        def fake_get(_url: str, timeout: float = 20):
+            return {
+                "emails": [
+                    {
+                        "date": "2099-01-01T00:00:00Z",
+                        "subject": "Sign in to typesafe",
+                        "from": "noreply@typesafe.ai",
+                        "body": body,
+                    }
+                ]
+            }
+
+        src._get_json = fake_get  # type: ignore[method-assign]
+        otp = src.poll_otp(mailbox, timeout_s=5, poll_interval_s=0.01, sender_hint="typesafe")
+        self.assertTrue(otp.code.startswith("https://login.typesafe.ai/"))
+        self.assertIn("stytch-secret", otp.code)
 
 
 

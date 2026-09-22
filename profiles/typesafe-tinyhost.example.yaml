@@ -1,0 +1,51 @@
+# Example: typesafe.ai + tinyhost paired mailbox/decode
+#   python -m register_core run --profile profiles/typesafe-tinyhost.example.yaml -n 1
+#
+# tinyhost is required: magic-link lives in the mail body. OTP-only sources
+# (cloudflare / gmail_imap) cannot extract the Stytch URL.
+
+apiVersion: register.v1
+kind: RegisterProfile
+metadata:
+  name: typesafe-tinyhost
+
+spec:
+  provider:
+    name: typesafe
+    options:
+      otp_timeout_s: 180
+
+  count: 1
+
+  mailbox:
+    type: tinyhost
+    # domain omitted on purpose so TYPESAFE_EMAIL_DOMAIN can pin if needed
+
+  decode:
+    type: tinyhost
+    options:
+      timeout_s: 180
+
+  strategy:
+    # n=1 hub keeps this. n>1 hub passes --no-fail-fast so mail_miss/network
+    # continue; fail_fast_kinds (fatal/verify/registration_disallowed/unsupported_email)
+    # still stop the batch.
+    fail_fast: true
+    fail_fast_kinds:
+      - registration_disallowed
+      - unsupported_email
+      - fatal
+      - verify
+    egress:
+      mode: clash
+      proxy: "http://127.0.0.1:7897"
+    mail_proxy: direct
+
+  verify:
+    enabled: true
+
+  sink:
+    path: providers/typesafe/output/pipeline.jsonl
+
+  secrets:
+    mode: prod

@@ -156,8 +156,37 @@ class TestRouterGate(unittest.TestCase):
         self.assertIn("CHATGPT_EMAIL_DOMAIN", block)
 
     # ---- cross-cutting ----
+    def test_typesafe_routes_to_register_core_profile(self) -> None:
+        block = _case_block(self.src, "typesafe|jev|typesafe-ai")
+        self.assertIn("-m register_core run", block)
+        self.assertIn("profiles/typesafe-tinyhost.example.yaml", block)
+        self.assertIn("TYPESAFE_LEGACY", block)
+        self.assertIn("providers/typesafe/run-register.sh", block)
+        code = "\n".join(
+            ln for ln in block.splitlines() if not ln.lstrip().startswith("#")
+        )
+        core_pos = code.find('exec "$_PY"')
+        legacy_pos = code.find('exec bash "$ROOT/providers/typesafe/run-register.sh"')
+        self.assertGreater(core_pos, -1, "typesafe branch must exec register_core")
+        self.assertGreater(legacy_pos, -1, "typesafe legacy fallback must be present")
+        self.assertLess(core_pos, legacy_pos, "register_core must precede legacy typesafe runner")
+        self.assertIn("TYPESAFE_EMAIL_SOURCE", block)
+        self.assertIn("REGISTER_EGRESS", block)
+        self.assertIn("TYPESAFE_PROXY", block)
+
+    def test_smoke_typesafe_routes(self) -> None:
+        block = _case_block(self.src, "smoke")
+        self.assertIn("providers/typesafe/smoke.sh", block)
+        self.assertIn("typesafe|jev|typesafe-ai", block)
+        self.assertIn("providers/mimo/smoke.sh", block)
+
     def test_all_three_provider_branches_mention_register_core(self) -> None:
-        for trigger in ("grok|xai", "mimo|xiaomi|mimo-tts", "chatgpt|openai|openai-platform"):
+        for trigger in (
+            "grok|xai",
+            "mimo|xiaomi|mimo-tts",
+            "chatgpt|openai|openai-platform",
+            "typesafe|jev|typesafe-ai",
+        ):
             block = _case_block(self.src, trigger)
             self.assertIn("register_core", block, f"{trigger} must reference register_core")
 

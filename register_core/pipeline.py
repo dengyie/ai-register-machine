@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
@@ -25,6 +27,20 @@ log = logging.getLogger("register_core.pipeline")
 # via FIXED_EMAIL (+ optional OTP bridge). Kept only for docs / legacy messages.
 _SHELL_PROVIDERS = frozenset({"grok", "mimo", "xai", "xiaomi", "mimo-tts"})
 
+# Hard cap so a farm default (512/256) cannot fan out through Pipeline.
+_MAX_WORKERS = 32
+# grok/mimo --threads belong to the child runner, not Pipeline fan-out.
+_PARALLEL_PROVIDERS = frozenset({"typesafe", "chatgpt"})
+
+
+@dataclass
+class _AttemptOutcome:
+    result: RegisterResult
+    should_stop: bool = False
+    stop_reason: str = ""
+    verify: VerifyResult | None = None
+    skipped: bool = False
+
 
 class Pipeline:
     def __init__(
@@ -45,6 +61,7 @@ class Pipeline:
         self.fail_fast = fail_fast
         self.on_result = on_result
         self.strategy = strategy
+        self._attempt_prep_lock = threading.Lock()
 
     @classmethod
     def from_job(cls, job: RegisterJob, *, sink: ResultSink | None = None) -> Pipeline:
@@ -204,8 +221,95 @@ class Pipeline:
             log.error("fail-fast stop (nodes preflight): %s", exc)
             return stats
 
-        for i in range(1, n + 1):
-            log.info("pipeline attempt %s/%s provider=%s", i, n, self.provider.name)
+        workers = self._worker_count(base_extra, n)
+        if workers <= 1:
+            for i in range(1, n + 1):
+                outcome = self._run_attempt(i, n, base_extra, strategy)
+                if outcome is None:
+                    continue
+                self._commit_attempt(stats, outcome)
+                if stats.stopped_reason:
+                    break
+            return stats
+
+        log.info(
+            "pipeline parallel workers=%s count=%s provider=%s",
+            workers,
+            n,
+            self.provider.name,
+        )
+        lock = threading.Lock()
+        stop = threading.Event()
+
+        def _work(i: int) -> _AttemptOutcome | None:
+            if stop.is_set():
+                return None
+            return self._run_attempt(i, n, base_extra, strategy, stop=stop)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_work, i) for i in range(1, n + 1)]
+            for fut in as_completed(futs):
+                if fut.cancelled():
+                    continue
+                try:
+                    outcome = fut.result()
+                except Exception as exc:
+                    outcome = _AttemptOutcome(
+                        result=RegisterResult(
+                            ok=False,
+                            provider=self.provider.name,
+                            error=f"unexpected: {exc}",
+                            error_kind="other",
+                            secret_kind="none",
+                        ),
+                        should_stop=self.fail_fast,
+                        stop_reason=f"unexpected: {exc}" if self.fail_fast else "",
+                    )
+                if outcome is None:
+                    continue
+                with lock:
+                    self._commit_attempt(stats, outcome)
+                    if stats.stopped_reason:
+                        stop.set()
+                        for pending in futs:
+                            pending.cancel()
+        return stats
+
+    def _worker_count(self, extra: dict[str, Any], n: int) -> int:
+        name = str(getattr(self.provider, "name", "") or "").strip().lower()
+        if name not in _PARALLEL_PROVIDERS:
+            return 1
+        raw = extra.get("workers")
+        if raw is None:
+            raw = extra.get("threads")
+        try:
+            workers = int(raw or 1)
+        except (TypeError, ValueError):
+            workers = 1
+        return max(1, min(workers, _MAX_WORKERS, n))
+
+    def _run_attempt(
+        self,
+        i: int,
+        n: int,
+        base_extra: dict[str, Any],
+        strategy: StrategyEngine,
+        *,
+        stop: threading.Event | None = None,
+    ) -> _AttemptOutcome | None:
+        if stop is not None and stop.is_set():
+            return None
+        log.info("pipeline attempt %s/%s provider=%s", i, n, self.provider.name)
+
+        def _stash(result: RegisterResult, extra: dict[str, Any]) -> RegisterResult:
+            arts = dict(result.artifacts or {})
+            arts["_attempt_extra"] = extra
+            result.artifacts = arts
+            return result
+
+        with self._attempt_prep_lock:
+            if stop is not None and stop.is_set():
+                return None
             # Self-controlled egress: rotate proxy_list (or clash group) per attempt.
             # List mode never depends on Clash UI selecting a node.
             try:
@@ -250,18 +354,18 @@ class Pipeline:
                         "skip_attempt": bool(pre.skip_attempt),
                     },
                 )
-                stats.results.append(result)
-                stats.fail += 1
-                self._emit(result)
                 if pre.skip_attempt:
                     log.warning(
                         "strategy precheck skip attempt (rotate): %s",
                         pre.stop_reason,
                     )
-                    continue
-                stats.stopped_reason = f"strategy: {pre.stop_reason}"
+                    return _AttemptOutcome(result=result, skipped=True)
                 log.error("strategy precheck stop: %s", pre.stop_reason)
-                break
+                return _AttemptOutcome(
+                    result=result,
+                    should_stop=True,
+                    stop_reason=f"strategy: {pre.stop_reason}",
+                )
 
             # Domain hard-burn after mailbox allocate is fail-fast for fixed domains.
             # Adapters allocate inside register_one; precheck uses forced_domain when known.
@@ -283,171 +387,168 @@ class Pipeline:
                         secret_kind="none",
                         artifacts={"strategy_precheck": dpre.action},
                     )
-                    stats.results.append(result)
-                    stats.fail += 1
-                    self._emit(result)
-                    stats.stopped_reason = f"strategy: {dpre.stop_reason}"
                     log.error("strategy domain precheck stop: %s", dpre.stop_reason)
-                    break
+                    return _AttemptOutcome(
+                        result=result,
+                        should_stop=True,
+                        stop_reason=f"strategy: {dpre.stop_reason}",
+                    )
 
-            try:
-                result = self.provider.register_one(
-                    email_source=self.email_source,
-                    extra=attempt_extra,
-                )
-            except FailFastError as exc:
-                result = RegisterResult(
+        try:
+            result = self.provider.register_one(
+                email_source=self.email_source,
+                extra=attempt_extra,
+            )
+        except FailFastError as exc:
+            result = _stash(
+                RegisterResult(
                     ok=False,
                     provider=self.provider.name,
                     error=str(exc),
                     error_kind="fatal",
                     secret_kind="none",
-                )
-                self._feedback_all(attempt_extra, result, strategy)
-                stats.results.append(result)
-                stats.fail += 1
-                self._emit(result)
-                stats.stopped_reason = f"fail_fast: {exc}"
-                log.error("fail-fast stop: %s", exc)
-                break
-            except MailMissError as exc:
-                arts: dict[str, Any] = {}
-                diag = getattr(exc, "diagnostics", None)
-                if diag is not None:
-                    try:
-                        arts["otp_wait"] = (
-                            asdict(diag)
-                            if hasattr(diag, "__dataclass_fields__")
-                            else dict(diag)  # type: ignore[arg-type]
-                        )
-                    except Exception:
-                        arts["otp_wait"] = {"notes": "diagnostics_serialize_failed"}
-                result = RegisterResult(
+                ),
+                attempt_extra,
+            )
+            return _AttemptOutcome(
+                result=result,
+                should_stop=True,
+                stop_reason=f"fail_fast: {exc}",
+            )
+        except MailMissError as exc:
+            arts: dict[str, Any] = {}
+            diag = getattr(exc, "diagnostics", None)
+            if diag is not None:
+                try:
+                    arts["otp_wait"] = (
+                        asdict(diag)
+                        if hasattr(diag, "__dataclass_fields__")
+                        else dict(diag)  # type: ignore[arg-type]
+                    )
+                except Exception:
+                    arts["otp_wait"] = {"notes": "diagnostics_serialize_failed"}
+            result = _stash(
+                RegisterResult(
                     ok=False,
                     provider=self.provider.name,
                     error=str(exc),
                     error_kind="mail_miss",
                     secret_kind="none",
                     artifacts=arts,
-                )
-                # mail_miss is not a dead proxy — still report so soft-cool path
-                # classifies as non_proxy_failure (no quarantine / network cool).
-                try:
-                    self._feedback_all(attempt_extra, result, strategy)
-                except FailFastError as ff:
-                    stats.results.append(result)
-                    stats.fail += 1
-                    self._emit(result)
-                    stats.stopped_reason = f"fail_fast: {ff}"
-                    log.error("fail-fast stop: %s", ff)
-                    break
-                stats.results.append(result)
-                stats.fail += 1
-                self._emit(result)
-                if self.fail_fast:
-                    stats.stopped_reason = f"mail_miss: {exc}"
-                    break
-                continue
-            except RegisterCoreError as exc:
-                result = RegisterResult(
+                ),
+                attempt_extra,
+            )
+            return _AttemptOutcome(
+                result=result,
+                should_stop=self.fail_fast,
+                stop_reason=f"mail_miss: {exc}" if self.fail_fast else "",
+            )
+        except RegisterCoreError as exc:
+            result = _stash(
+                RegisterResult(
                     ok=False,
                     provider=self.provider.name,
                     error=str(exc),
                     error_kind="provider",
                     secret_kind="none",
-                )
-                try:
-                    self._feedback_all(attempt_extra, result, strategy)
-                except FailFastError as ff:
-                    stats.results.append(result)
-                    stats.fail += 1
-                    self._emit(result)
-                    stats.stopped_reason = f"fail_fast: {ff}"
-                    log.error("fail-fast stop: %s", ff)
-                    break
-                stats.results.append(result)
-                stats.fail += 1
-                self._emit(result)
-                if self.fail_fast:
-                    stats.stopped_reason = str(exc)
-                    break
-                continue
-            except Exception as exc:
-                result = RegisterResult(
+                ),
+                attempt_extra,
+            )
+            return _AttemptOutcome(
+                result=result,
+                should_stop=self.fail_fast,
+                stop_reason=str(exc) if self.fail_fast else "",
+            )
+        except Exception as exc:
+            result = _stash(
+                RegisterResult(
                     ok=False,
                     provider=self.provider.name,
                     error=f"unexpected: {exc}",
                     error_kind="other",
                     secret_kind="none",
-                )
-                try:
-                    self._feedback_all(attempt_extra, result, strategy)
-                except FailFastError as ff:
-                    stats.results.append(result)
-                    stats.fail += 1
-                    self._emit(result)
-                    stats.stopped_reason = f"fail_fast: {ff}"
-                    log.error("fail-fast stop: %s", ff)
-                    break
-                stats.results.append(result)
-                stats.fail += 1
-                self._emit(result)
-                if self.fail_fast:
-                    stats.stopped_reason = f"unexpected: {exc}"
-                    break
-                continue
+                ),
+                attempt_extra,
+            )
+            return _AttemptOutcome(
+                result=result,
+                should_stop=self.fail_fast,
+                stop_reason=f"unexpected: {exc}" if self.fail_fast else "",
+            )
 
-            if self.verifier and result.ok:
-                try:
-                    vr = self.verifier.verify(result)
-                    stats.verifies.append(vr)
-                    if not vr.ok:
-                        result.ok = False
-                        result.error = result.error or vr.detail
-                        result.error_kind = result.error_kind or "verify"
-                except Exception as exc:
-                    stats.verifies.append(
-                        VerifyResult(ok=False, provider=result.provider, detail=str(exc))
-                    )
-                    # Verify failure always invalidates the result.
-                    result.ok = False
-                    result.error = f"verify: {exc}"
-                    result.error_kind = "verify"
-
-            # Feedback node health + strategy burn/cool.
+        verify: VerifyResult | None = None
+        if self.verifier and result.ok:
             try:
-                sfb = self._feedback_all(attempt_extra, result, strategy)
-            except FailFastError as ff:
-                stats.results.append(result)
-                if result.ok:
-                    stats.ok += 1
-                else:
-                    stats.fail += 1
-                self._emit(result)
-                stats.stopped_reason = f"fail_fast: {ff}"
-                log.error("fail-fast stop: %s", ff)
-                break
+                verify = self.verifier.verify(result)
+                if not verify.ok:
+                    result.ok = False
+                    result.error = result.error or verify.detail
+                    result.error_kind = result.error_kind or "verify"
+            except Exception as exc:
+                verify = VerifyResult(ok=False, provider=result.provider, detail=str(exc))
+                result.ok = False
+                result.error = f"verify: {exc}"
+                result.error_kind = "verify"
 
+        return _AttemptOutcome(result=_stash(result, attempt_extra), verify=verify)
+
+    def _commit_attempt(self, stats: "PipelineStats", outcome: _AttemptOutcome) -> None:
+        result = outcome.result
+        attempt_extra = None
+        arts = dict(result.artifacts or {})
+        extra = arts.pop("_attempt_extra", None)
+        if isinstance(extra, dict):
+            attempt_extra = extra
+            result.artifacts = arts
+        if outcome.verify is not None:
+            stats.verifies.append(outcome.verify)
+
+        sfb = None
+        skip_feedback = bool(arts.get("strategy_precheck")) or outcome.skipped
+        try:
+            if not skip_feedback:
+                sfb = self._feedback_all(attempt_extra, result, self.strategy)
+        except FailFastError as ff:
             stats.results.append(result)
             if result.ok:
                 stats.ok += 1
             else:
                 stats.fail += 1
             self._emit(result)
+            stats.stopped_reason = f"fail_fast: {ff}"
+            log.error("fail-fast stop: %s", ff)
+            return
 
+        stats.results.append(result)
+        if result.ok:
+            stats.ok += 1
+        else:
+            stats.fail += 1
+        self._emit(result)
+
+        if outcome.skipped:
+            return
+        if outcome.should_stop and outcome.stop_reason:
+            stats.stopped_reason = outcome.stop_reason
+            if outcome.stop_reason.startswith("fail_fast"):
+                log.error("fail-fast stop: %s", outcome.stop_reason)
+            elif outcome.stop_reason.startswith("strategy"):
+                log.error("strategy precheck stop: %s", outcome.stop_reason)
+            elif outcome.stop_reason.startswith("mail_miss"):
+                pass
+            else:
+                log.error("fail-fast after failure: %s", outcome.stop_reason)
+            return
+        if not result.ok:
             # Strategy fail_fast_kinds may stop even when pipeline.fail_fast is soft
             # on other kinds; prefer strategy decision when present.
-            if not result.ok:
-                if sfb and sfb.should_stop:
-                    stats.stopped_reason = sfb.stop_reason or result.error or result.error_kind
-                    log.error("strategy fail-fast: %s", stats.stopped_reason)
-                    break
-                if self.fail_fast:
-                    stats.stopped_reason = result.error or result.error_kind or "failed"
-                    log.error("fail-fast after failure: %s", stats.stopped_reason)
-                    break
-
-        return stats
+            if sfb and sfb.should_stop:
+                stats.stopped_reason = sfb.stop_reason or result.error or result.error_kind
+                log.error("strategy fail-fast: %s", stats.stopped_reason)
+                return
+            if self.fail_fast:
+                stats.stopped_reason = result.error or result.error_kind or "failed"
+                log.error("fail-fast after failure: %s", stats.stopped_reason)
 
     def _feedback_all(
         self,
